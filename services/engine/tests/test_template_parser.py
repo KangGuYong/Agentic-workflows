@@ -1,6 +1,6 @@
 import pytest
 
-from engine.templates.parser import Ref, TemplateParseError, parse_template
+from engine.templates.parser import MAX_NESTING_DEPTH, Ref, TemplateParseError, parse_template
 
 
 def test_extracts_refs_with_paths_in_source_order():
@@ -87,3 +87,18 @@ def test_overlong_and_deeply_nested_templates_raise_parse_errors():
         parse_template("x" * 20_001)
     with pytest.raises(TemplateParseError):
         parse_template("{{ " + "(" * 3000 + "1" + ")" * 3000 + " }}")
+
+
+def test_nesting_depth_problem_just_over_limit():
+    deep = "{{ " + "-" * (MAX_NESTING_DEPTH + 10) + "1 }}"
+    assert parse_template(deep).problems != ()
+
+
+def test_nesting_depth_ok_within_limit():
+    shallow = "{{ " + "-" * 5 + "1 }}"
+    assert parse_template(shallow).problems == ()
+
+
+def test_concat_operator_is_forbidden():
+    assert parse_template("{{ a ~ b }}").problems != ()
+    assert parse_template("{{ a }}{{ b }}").problems == ()

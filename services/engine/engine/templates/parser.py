@@ -13,6 +13,9 @@ from engine.templates.env import ALLOWED_FILTERS, ENV
 
 MAX_TEMPLATE_LENGTH = 20_000
 MAX_LOOP_DEPTH = 1
+# Python fails to compile Jinja's generated code around AST depth ~200 for expression chains
+# (unary/filter/path chains) and ~102 for nested `{% if %}` blocks. 50 keeps >=2x margin on both.
+MAX_NESTING_DEPTH = 50
 _FORBIDDEN = (
     nodes.Call,
     nodes.Assign,
@@ -102,6 +105,12 @@ def _loop_depth(node: nodes.Node) -> int:
     return deepest + 1 if isinstance(node, nodes.For) else deepest
 
 
+def _ast_depth(node: nodes.Node) -> int:
+    """Depth of the whole AST; the node passed in (typically the `Template` node) counts as 1."""
+    deepest = max((_ast_depth(child) for child in node.iter_child_nodes()), default=0)
+    return deepest + 1
+
+
 @lru_cache(maxsize=4096)
 def parse_template(source: str) -> ParsedTemplate:
     if len(source) > MAX_TEMPLATE_LENGTH:
@@ -132,6 +141,10 @@ def _analyze(source: str) -> ParsedTemplate:
             problems.append(f"밑줄로 시작하는 키는 사용할 수 없습니다: {key}")
     if _loop_depth(ast) > MAX_LOOP_DEPTH:
         problems.append(f"반복문은 최대 {MAX_LOOP_DEPTH}단계까지만 중첩할 수 있습니다")
+    if _ast_depth(ast) > MAX_NESTING_DEPTH:
+        problems.append(f"템플릿 중첩이 너무 깊습니다 (최대 {MAX_NESTING_DEPTH}단계)")
+    if next(ast.find_all(nodes.Concat), None) is not None:
+        problems.append("'~' 연산자는 사용할 수 없습니다. 값을 이어 붙이려면 {{ a }}{{ b }}처럼 나란히 쓰세요")
 
     inner = {id(n.node) for n in ast.find_all((nodes.Getattr, nodes.Getitem))}
     defaulted = {id(f.node) for f in ast.find_all(nodes.Filter) if f.name == "default"}
