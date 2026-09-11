@@ -1338,6 +1338,13 @@ git commit -m "feat(engine): add typed template renderer"
 
 ---
 
+> **Post-review note (Task 5, as implemented):** the code quality review found raw exceptions escaping the renderer (compile-time SyntaxError/RecursionError from deep nesting, >4300-digit ints), size amplification past the cap (whole values, chained `tojson`, `~`, list literals), non-JSON results (bound methods, nested Undefined, inf) and aliasing of context objects. The fix (commit `01f021b`) makes the rule "templates operate on JSON data only; every value a template builds is JSON data of serialized size ≤ `MAX_OUTPUT_CHARS`, checked while building":
+> - `env.py`: all arithmetic operators are numbers-only; `MAX_POWER_BITS` became `MAX_INT_BITS`, which also bounds `*`. `getattr` and `getitem` read mapping keys and sequence indexes only (`LoopContext` excepted), never Python attributes. New `json_value()` gives a validated, size-budgeted deep copy, used by printing, `tojson` and `join`.
+> - `parser.py`: rejects `~` and whole-AST nesting deeper than `MAX_NESTING_DEPTH` = 50. Python fails to compile Jinja's output at about 200 (expressions) or 102 (nested `if`).
+> - `render.py`: passes the context positionally. Whole values go through `json_value`. Any failure becomes `TemplateRenderError`, and string results are capped.
+>
+> Known limit: a whole value with a non-string target is budgeted by `json_value`'s lower bound, not an exact serialized size. That is pass-through, not amplification, and Task 16's 1 MB node-output cap applies. Jinja binds the name `self` to its own template reference, so Task 12 reserving `self` is required, not cosmetic. Suite: 154.
+
 ## Task 6: LLM client contract, test double and structured-output gateway
 
 Spec 6.4. `LLMClient` is what nodes call. `LLMGateway` implements it over a `RawLLM` transport and owns the JSON-Schema validation + repair loop (max 2 repairs inside one attempt → `STRUCTURED_OUTPUT_FAILED`, retryable). `ScriptedLLM` is a shipped test double (Plan 2 tests reuse it).
