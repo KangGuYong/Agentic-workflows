@@ -3908,13 +3908,15 @@ git commit -m "feat(engine): add graph validation phase (loops, parallel regions
 Spec 4.4 (guaranteed-before sets, `| default` rule), 4.5 (type compatibility), 6.1. `analyze()` is what the compiler uses: it returns the issues plus the `Graph` when phases 1–2 passed.
 
 **Files:**
+
 - Create: `services/engine/engine/validator/refs.py`
 - Modify: `services/engine/engine/validator/__init__.py` (facade)
 - Test: `services/engine/tests/test_validator_refs.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ]  **Step 1: Write the failing tests**
 
 **File:** `services/engine/tests/test_validator_refs.py`
+
 ```python
 from engine.validator import analyze, validate
 
@@ -4058,14 +4060,15 @@ def test_condition_operand_types():
     assert ("error", "TYPE_INCOMPATIBLE") in _codes(condition("{{llm_1.score}}", "x", op="contains"))
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [ ]  **Step 2: Run to verify failure**
 
 Run: `uv run pytest tests/test_validator_refs.py -v`
 Expected: FAIL — `ImportError: cannot import name 'analyze' from 'engine.validator'`
 
-- [ ] **Step 3: Implement**
+- [ ]  **Step 3: Implement**
 
 **File:** `services/engine/engine/validator/refs.py`
+
 ```python
 """Phase 3: guaranteed-before sets, output schemas, template references and types."""
 from __future__ import annotations
@@ -4188,6 +4191,7 @@ def _check_ref(
 ```
 
 **File:** `services/engine/engine/validator/__init__.py`
+
 ```python
 """Three-phase DSL validation (spec 6.1): structure → graph → references/types."""
 from __future__ import annotations
@@ -4238,12 +4242,12 @@ def validate(raw: dict[str, Any] | WorkflowDSL, registry: NodeRegistry | None = 
     return analyze(raw, registry).issues
 ```
 
-- [ ] **Step 4: Run to verify pass**
+- [ ]  **Step 4: Run to verify pass**
 
 Run: `uv run pytest tests/test_validator_refs.py tests/test_validator_graph.py tests/test_validator_structure.py -v`
 Expected: all PASS
 
-- [ ] **Step 5: Commit**
+- [ ]  **Step 5: Commit**
 
 ```bash
 git add services/engine/engine/validator services/engine/tests/test_validator_refs.py
@@ -4257,6 +4261,7 @@ git commit -m "feat(engine): add reference/type validation phase and validate fa
 Spec 5.3, 5.8. Routing decisions and loop counters are written **into state by the branch node itself**; the LangGraph router only reads `state["routes"][node_id]`, so a resumed run re-takes the same path. `Recorder` is the port Plan 2 implements with Postgres (`node_runs` + `run_events`); `RunGuard` is where Plan 2 plugs cancellation and lease checks.
 
 **Files:**
+
 - Create: `services/engine/engine/compiler/__init__.py`
 - Create: `services/engine/engine/compiler/state.py`
 - Create: `services/engine/engine/compiler/routing.py`
@@ -4267,9 +4272,10 @@ Spec 5.3, 5.8. Routing decisions and loop counters are written **into state by t
 - Test: `services/engine/tests/test_compiler_routing.py`
 - Test: `services/engine/tests/test_runtime_ports.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ]  **Step 1: Write the failing tests**
 
 **File:** `services/engine/tests/test_compiler_routing.py`
+
 ```python
 import pytest
 
@@ -4320,6 +4326,7 @@ def test_unknown_handle_raises():
 ```
 
 **File:** `services/engine/tests/test_runtime_ports.py`
+
 ```python
 import pytest
 
@@ -4365,18 +4372,21 @@ def test_guards():
         guard.check()
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [ ]  **Step 2: Run to verify failure**
 
 Run: `uv run pytest tests/test_compiler_routing.py tests/test_runtime_ports.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'engine.compiler'`
 
-- [ ] **Step 3: Implement**
+- [ ]  **Step 3: Implement**
 
 **File:** `services/engine/engine/compiler/__init__.py`
+
 ```python
+
 ```
 
 **File:** `services/engine/engine/compiler/state.py`
+
 ```python
 from __future__ import annotations
 
@@ -4401,6 +4411,7 @@ def initial_state(inputs: dict[str, Any]) -> RunState:
 ```
 
 **File:** `services/engine/engine/compiler/routing.py`
+
 ```python
 from __future__ import annotations
 
@@ -4441,10 +4452,13 @@ def resolve_route(
 ```
 
 **File:** `services/engine/engine/runtime/__init__.py`
+
 ```python
+
 ```
 
 **File:** `services/engine/engine/runtime/recorder.py`
+
 ```python
 from __future__ import annotations
 
@@ -4553,6 +4567,7 @@ class InMemoryRecorder:
 ```
 
 **File:** `services/engine/engine/runtime/guard.py`
+
 ```python
 from __future__ import annotations
 
@@ -4586,6 +4601,7 @@ class FlagGuard:
 ```
 
 **File:** `services/engine/engine/runtime/deps.py`
+
 ```python
 from __future__ import annotations
 
@@ -4609,12 +4625,12 @@ class RunDeps:
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 ```
 
-- [ ] **Step 4: Run to verify pass**
+- [ ]  **Step 4: Run to verify pass**
 
 Run: `uv run pytest tests/test_compiler_routing.py tests/test_runtime_ports.py -v`
 Expected: all PASS
 
-- [ ] **Step 5: Commit**
+- [ ]  **Step 5: Commit**
 
 ```bash
 git add services/engine/engine/compiler services/engine/engine/runtime services/engine/tests/test_compiler_routing.py services/engine/tests/test_runtime_ports.py
@@ -4628,12 +4644,14 @@ git commit -m "feat(engine): add run state, routing and runtime ports"
 Spec 5.3–5.6. One wrapper for every node type. Order inside an attempt: guard check → exec_index → render templates → `node_started` → `execute` under `asyncio.timeout` → output size check → routing decision → `node_succeeded` + state write. `GraphInterrupt` and `RunCancelled` pass straight through (they are control flow, and `GraphInterrupt` subclasses `Exception`, so it must be caught first).
 
 **Files:**
+
 - Create: `services/engine/engine/compiler/wrapper.py`
 - Test: `services/engine/tests/test_compiler_wrapper.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ]  **Step 1: Write the failing tests**
 
 **File:** `services/engine/tests/test_compiler_wrapper.py`
+
 ```python
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
@@ -4803,14 +4821,15 @@ async def test_cancelled_guard_stops_before_execution():
     assert recorder.records == []
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [ ]  **Step 2: Run to verify failure**
 
 Run: `uv run pytest tests/test_compiler_wrapper.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'engine.compiler.wrapper'`
 
-- [ ] **Step 3: Implement**
+- [ ]  **Step 3: Implement**
 
 **File:** `services/engine/engine/compiler/wrapper.py`
+
 ```python
 """The single LangGraph node function used for every DSL node (spec 5.3 node wrapper)."""
 from __future__ import annotations
@@ -5003,12 +5022,12 @@ def make_node_fn(plan: NodePlan):
     return node_fn
 ```
 
-- [ ] **Step 4: Run to verify pass**
+- [ ]  **Step 4: Run to verify pass**
 
 Run: `uv run pytest tests/test_compiler_wrapper.py -v`
 Expected: all PASS (the timeout test takes ~1 s)
 
-- [ ] **Step 5: Commit**
+- [ ]  **Step 5: Commit**
 
 ```bash
 git add services/engine/engine/compiler/wrapper.py services/engine/tests/test_compiler_wrapper.py
@@ -5024,13 +5043,15 @@ Spec 6.2, 6.3. Compilation mapping: every DSL node → `add_node(id, wrapper)`; 
 `execute_run` picks its input from the checkpoint: fresh thread → initial state; `resume` given → `Command(resume=...)`; otherwise `None` (continue after crash recovery or manual retry). After the invocation the checkpoint snapshot decides the outcome: pending interrupt → `waiting`; no next nodes → `succeeded` with the `end` node output.
 
 **Files:**
+
 - Create: `services/engine/engine/compiler/build.py`
 - Create: `services/engine/engine/runtime/runner.py`
 - Test: `services/engine/tests/test_compiler_build.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ]  **Step 1: Write the failing tests**
 
 **File:** `services/engine/tests/test_compiler_build.py`
+
 ```python
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
@@ -5086,14 +5107,15 @@ async def test_start_input_validation_fails_the_run():
     assert (outcome.error["code"], outcome.error["nodeId"]) == ("TYPE_MISMATCH", "start")
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [ ]  **Step 2: Run to verify failure**
 
 Run: `uv run pytest tests/test_compiler_build.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'engine.compiler.build'`
 
-- [ ] **Step 3: Implement**
+- [ ]  **Step 3: Implement**
 
 **File:** `services/engine/engine/compiler/build.py`
+
 ```python
 from __future__ import annotations
 
@@ -5182,6 +5204,7 @@ def compile_workflow(
 ```
 
 **File:** `services/engine/engine/runtime/runner.py`
+
 ```python
 from __future__ import annotations
 
@@ -5244,12 +5267,12 @@ async def execute_run(
     return RunOutcome("succeeded", outputs=snapshot.values.get("outputs", {}).get("end", {}))
 ```
 
-- [ ] **Step 4: Run to verify pass**
+- [ ]  **Step 4: Run to verify pass**
 
 Run: `uv run pytest tests/test_compiler_build.py -v`
 Expected: all PASS
 
-- [ ] **Step 5: Commit**
+- [ ]  **Step 5: Commit**
 
 ```bash
 git add services/engine/engine/compiler/build.py services/engine/engine/runtime/runner.py services/engine/tests/test_compiler_build.py
@@ -5263,6 +5286,7 @@ git commit -m "feat(engine): compile validated DSL to LangGraph and execute runs
 Spec 2.3 success criteria 1, 3, 4 and 12 (compiler golden tests). One DSL fixture per pattern; Plan 3 reuses them as editor E2E fixtures.
 
 **Files:**
+
 - Create: `services/engine/tests/golden/chaining.json`
 - Create: `services/engine/tests/golden/routing.json`
 - Create: `services/engine/tests/golden/parallel.json`
@@ -5271,9 +5295,10 @@ Spec 2.3 success criteria 1, 3, 4 and 12 (compiler golden tests). One DSL fixtur
 - Test: `services/engine/tests/test_golden_patterns.py`
 - Test: `services/engine/tests/test_runner_recovery.py`
 
-- [ ] **Step 1: Write the golden fixtures**
+- [ ]  **Step 1: Write the golden fixtures**
 
 **File:** `services/engine/tests/golden/chaining.json`
+
 ```json
 {
   "version": "1",
@@ -5295,6 +5320,7 @@ Spec 2.3 success criteria 1, 3, 4 and 12 (compiler golden tests). One DSL fixtur
 ```
 
 **File:** `services/engine/tests/golden/routing.json`
+
 ```json
 {
   "version": "1",
@@ -5327,6 +5353,7 @@ Spec 2.3 success criteria 1, 3, 4 and 12 (compiler golden tests). One DSL fixtur
 ```
 
 **File:** `services/engine/tests/golden/parallel.json`
+
 ```json
 {
   "version": "1",
@@ -5354,6 +5381,7 @@ Spec 2.3 success criteria 1, 3, 4 and 12 (compiler golden tests). One DSL fixtur
 ```
 
 **File:** `services/engine/tests/golden/evaluator_loop.json`
+
 ```json
 {
   "version": "1",
@@ -5384,6 +5412,7 @@ Spec 2.3 success criteria 1, 3, 4 and 12 (compiler golden tests). One DSL fixtur
 ```
 
 **File:** `services/engine/tests/golden/hitl.json`
+
 ```json
 {
   "version": "1",
@@ -5407,9 +5436,10 @@ Spec 2.3 success criteria 1, 3, 4 and 12 (compiler golden tests). One DSL fixtur
 }
 ```
 
-- [ ] **Step 2: Write the pattern tests**
+- [ ]  **Step 2: Write the pattern tests**
 
 **File:** `services/engine/tests/test_golden_patterns.py`
+
 ```python
 import json
 
@@ -5541,6 +5571,7 @@ async def test_hitl_waits_then_resumes_without_duplicate_attempts(answer, expect
 ```
 
 **File:** `services/engine/tests/test_runner_recovery.py`
+
 ```python
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -5606,12 +5637,12 @@ async def test_cancelled_run():
     assert outcome.status == "cancelled"
 ```
 
-- [ ] **Step 3: Run**
+- [ ]  **Step 3: Run**
 
 Run: `uv run pytest tests/test_golden_patterns.py tests/test_runner_recovery.py -v`
 Expected: all PASS. These exercise Tasks 2–17 together; if one fails, fix the component, not the test.
 
-- [ ] **Step 4: Commit**
+- [ ]  **Step 4: Commit**
 
 ```bash
 git add services/engine/tests/golden services/engine/tests/test_golden_patterns.py services/engine/tests/test_runner_recovery.py
@@ -5622,44 +5653,45 @@ git commit -m "test(engine): golden pattern flows and recovery scenarios"
 
 ## Task 19: Full verification
 
-- [ ] **Step 1: Run the whole suite**
+- [ ]  **Step 1: Run the whole suite**
 
 Run: `uv run pytest -q`
 Expected: all tests pass, 0 failures, no warnings about un-awaited coroutines.
 
-- [ ] **Step 2: Lint**
+- [ ]  **Step 2: Lint**
 
 Run: `uv run ruff check .`
 Expected: `All checks passed!`
 
-- [ ] **Step 3: Confirm the spec coverage table below still holds, then commit any lint fixes**
+- [ ]  **Step 3: Confirm the spec coverage table below still holds, then commit any lint fixes**
 
 ```bash
 git add -A services/engine
 git commit -m "chore(engine): lint fixes"
 ```
+
 (Skip the commit if there is nothing to commit.)
 
 ---
 
 ## Spec coverage (Plan 1)
 
-| Spec | Covered by |
-|---|---|
-| 4.1 DSL structure, `settings`, declaration order | Task 2, Task 17 (merge order), Task 18 (parallel) |
-| 4.2 immutable ids, labels, `dsl_hash` | Task 2, Task 12 |
-| 4.3 policy schema, retryable classes | Task 2, Task 12, Task 16 |
-| 4.4 templates, whole-value vs interpolation, before-sets, `default` | Tasks 4, 5, 14 |
-| 4.5 type system | Tasks 3, 14 |
-| 4.6–4.7 node specs, 8 MVP nodes (`http_request` → Plan 2) | Tasks 8–11 |
-| 4.8 graph rules 1–10 (+ MVP parallel tightening) | Tasks 12, 13, 14 |
-| 5.3 exec_index / attempt / success = checkpoint write, wrapper-owned retry | Tasks 15, 16, 18 |
-| 5.4 at-least-once (engine side) | Task 18 recovery tests; idempotency key → Plan 2 |
-| 5.5 manual retry from checkpoint | Task 17, Task 18 |
-| 5.6 HITL re-entry | Tasks 11, 16, 18 |
-| 5.7 parallel + merge semantics | Tasks 11, 13, 17, 18 |
-| 5.8 loops, counters, recursion limit | Tasks 15, 17, 18 |
-| 5.9 cancellation (engine side: guard) | Tasks 15, 16, 18; control channel → Plan 2 |
-| 6.1 validator, 6.2 compiler, 6.4 LLM gateway | Tasks 6, 7, 12–14, 17 |
-| 5.1–5.2, 7, 8, 10, 11.1 (DSL size, inputs size, run time), 6.3 worker | Plan 2 (see roadmap) |
 
+| Spec                                                                       | Covered by                                        |
+| ---------------------------------------------------------------------------- | --------------------------------------------------- |
+| 4.1 DSL structure,`settings`, declaration order                            | Task 2, Task 17 (merge order), Task 18 (parallel) |
+| 4.2 immutable ids, labels,`dsl_hash`                                       | Task 2, Task 12                                   |
+| 4.3 policy schema, retryable classes                                       | Task 2, Task 12, Task 16                          |
+| 4.4 templates, whole-value vs interpolation, before-sets,`default`         | Tasks 4, 5, 14                                    |
+| 4.5 type system                                                            | Tasks 3, 14                                       |
+| 4.6–4.7 node specs, 8 MVP nodes (`http_request` → Plan 2)                | Tasks 8–11                                       |
+| 4.8 graph rules 1–10 (+ MVP parallel tightening)                          | Tasks 12, 13, 14                                  |
+| 5.3 exec_index / attempt / success = checkpoint write, wrapper-owned retry | Tasks 15, 16, 18                                  |
+| 5.4 at-least-once (engine side)                                            | Task 18 recovery tests; idempotency key → Plan 2 |
+| 5.5 manual retry from checkpoint                                           | Task 17, Task 18                                  |
+| 5.6 HITL re-entry                                                          | Tasks 11, 16, 18                                  |
+| 5.7 parallel + merge semantics                                             | Tasks 11, 13, 17, 18                              |
+| 5.8 loops, counters, recursion limit                                       | Tasks 15, 17, 18                                  |
+| 5.9 cancellation (engine side: guard)                                      | Tasks 15, 16, 18; control channel → Plan 2       |
+| 6.1 validator, 6.2 compiler, 6.4 LLM gateway                               | Tasks 6, 7, 12–14, 17                            |
+| 5.1–5.2, 7, 8, 10, 11.1 (DSL size, inputs size, run time), 6.3 worker     | Plan 2 (see roadmap)                              |
