@@ -12,7 +12,7 @@ from jinja2.exceptions import TemplateSyntaxError
 from engine.templates.env import ALLOWED_FILTERS, ENV
 
 MAX_TEMPLATE_LENGTH = 20_000
-MAX_LOOP_DEPTH = 2
+MAX_LOOP_DEPTH = 1
 _FORBIDDEN = (
     nodes.Call,
     nodes.Assign,

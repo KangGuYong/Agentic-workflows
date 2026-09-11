@@ -76,10 +76,10 @@ def test_underscore_string_keys_are_forbidden():
 
 
 def test_loop_nesting_limit():
+    one = "{% for a in start.x %}{{ a }}{% endfor %}"
     two = "{% for a in start.x %}{% for b in a %}{{ b }}{% endfor %}{% endfor %}"
-    three = "{% for a in start.x %}{% for b in a %}{% for c in b %}{{ c }}{% endfor %}{% endfor %}{% endfor %}"
-    assert parse_template(two).problems == ()
-    assert parse_template(three).problems != ()
+    assert parse_template(one).problems == ()
+    assert parse_template(two).problems != ()
 
 
 def test_overlong_and_deeply_nested_templates_raise_parse_errors():

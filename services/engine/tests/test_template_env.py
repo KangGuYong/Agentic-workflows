@@ -1,11 +1,11 @@
 import pytest
 from jinja2.exceptions import SecurityError, UndefinedError
 
-from engine.templates.env import ENV
+from engine.templates.env import ENV, MAX_OUTPUT_CHARS
 
 CTX = {
     "llm_1": {"data": {"items": [{"title": "T"}], "keys": "k", "count": 3}},
-    "start": {"lst": [1, 2], "topic": "AI"},
+    "start": {"lst": [1, 2], "topic": "AI", "many": ["x"] * (MAX_OUTPUT_CHARS // 2 + 1)},
 }
 
 
@@ -24,6 +24,12 @@ def test_missing_mapping_key_is_undefined_not_a_method():
         render("{{ start.values }}")
 
 
+def test_bracket_access_on_missing_key_is_undefined():
+    assert render("{{ start['keys'] | default('d') }}") == "d"
+    with pytest.raises(UndefinedError):
+        render("{{ start['__class__'] }}")
+
+
 def test_finalize_and_tojson():
     assert render("{{ start.lst }} {{ true }} {{ none }}") == "[1, 2] true "
     assert ENV.from_string("{{ v | tojson }}").render(v={"k": "값"}) == '{"k": "값"}'
@@ -31,23 +37,36 @@ def test_finalize_and_tojson():
         render("{{ missing | tojson }}")
 
 
-@pytest.mark.parametrize(
-    "source",
-    ["{{ 'a' * 1000000 }}", "{{ start.topic * 100000 }}", "{{ 2 ** 1000 }}", "{{ start.lst * 60000 }}"],
-)
-def test_size_capped_operators(source):
+def test_numeric_operators_are_allowed():
+    assert render("{{ 3 * 4 }}|{{ 2 ** 3 }}|{{ 7 % 3 }}|{{ 2 ** -1 }}") == "12|8|1|0.5"
+
+
+@pytest.mark.parametrize("source", ["{{ 'a' * 3 }}", "{{ start.lst * 2 }}", "{{ '%05d' % 3 }}", "{{ start.topic * 2 }}"])
+def test_non_numeric_operators_are_rejected(source):
     with pytest.raises(SecurityError):
         render(source)
 
 
-def test_small_repetition_is_allowed():
-    assert render("{{ '-' * 3 }}{{ 2 ** 3 }}") == "---8"
-
-
-@pytest.mark.parametrize("source", ["{{ start['__class__'] }}", "{{ start.lst.__class__ }}"])
-def test_sandbox_blocks_dunder_access(source):
+@pytest.mark.parametrize("source", ["{{ 2 ** 5000 }}", "{{ 10 ** 64 ** 64 ** 64 }}"])
+def test_huge_powers_are_rejected(source):
     with pytest.raises(SecurityError):
         render(source)
+
+
+def test_undefined_operand_is_an_undefined_error():
+    with pytest.raises(UndefinedError):
+        render("{{ missing * 2 }}")
+
+
+def test_join_is_size_checked():
+    assert render("{{ start.lst | join(',') }}") == "1,2"
+    with pytest.raises(SecurityError):
+        render("{{ start.many | join(',') }}")
+
+
+def test_sandbox_blocks_dunder_access():
+    with pytest.raises(SecurityError):
+        render("{{ start.lst.__class__ }}")
 
 
 def test_immutable_sandbox_blocks_mutation():
