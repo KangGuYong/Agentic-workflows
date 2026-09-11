@@ -1,12 +1,15 @@
 """Sandboxed Jinja2 environment shared by the parser (validation) and the renderer (execution).
 
-Resource rule: a template can never build data larger than O(template length + data size) —
+Resource rule: no operator or filter can build a value larger than O(template length + data size) —
 arithmetic operators work on numbers only, integer powers are size-bounded, `join` is size-checked,
-and loops cannot nest (see parser.MAX_LOOP_DEPTH). The renderer additionally caps output size.
+`round` precision is clamped, and loops cannot nest (see parser.MAX_LOOP_DEPTH). The renderer caps
+output size. CPU is NOT fully bounded: one loop whose body scans the data costs O(data size²) with
+little output; bounding that needs a render deadline in the worker (Plan 2).
 """
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -19,6 +22,7 @@ from engine.dsl.types import to_text
 ALLOWED_FILTERS = frozenset({"default", "tojson", "length", "upper", "lower", "trim", "join", "round"})
 MAX_OUTPUT_CHARS = 1_000_000  # largest string a template may produce (join here, rendering in render.py)
 MAX_POWER_BITS = 4096  # largest integer `**` may produce
+MAX_ROUND_PRECISION = 15  # a float holds ~17 significant digits
 
 
 class ChainableStrictUndefined(ChainableUndefined, StrictUndefined):
@@ -92,6 +96,22 @@ def _join(value: Any, separator: Any = "") -> str:
     return sep.join(items)
 
 
+def _round(value: Any, precision: Any = 0, method: str = "common") -> float:
+    if isinstance(value, Undefined):
+        value._fail_with_undefined_error()
+    if not _is_number(value):
+        raise TypeError(f"round는 숫자에만 사용할 수 있습니다: {value!r}")
+    if not isinstance(precision, int) or isinstance(precision, bool) or not 0 <= precision <= MAX_ROUND_PRECISION:
+        raise ValueError(f"round 자릿수는 0~{MAX_ROUND_PRECISION} 사이의 정수여야 합니다")
+    if method == "common":
+        return round(value, precision)
+    if method not in ("ceil", "floor"):
+        raise ValueError("round 방식은 common, ceil, floor 중 하나여야 합니다")
+    factor = 10.0**precision
+    rounding = math.ceil if method == "ceil" else math.floor
+    return rounding(value * factor) / factor
+
+
 def make_env() -> TemplateEnvironment:
     env = TemplateEnvironment(
         undefined=ChainableStrictUndefined,
@@ -100,9 +120,10 @@ def make_env() -> TemplateEnvironment:
         keep_trailing_newline=True,
     )
     builtin = env.filters
-    env.filters = {name: builtin[name] for name in ALLOWED_FILTERS - {"tojson", "join"}}
+    env.filters = {name: builtin[name] for name in ALLOWED_FILTERS - {"tojson", "join", "round"}}
     env.filters["tojson"] = _tojson
     env.filters["join"] = _join
+    env.filters["round"] = _round
     env.tests = {}
     env.globals = {}
     return env

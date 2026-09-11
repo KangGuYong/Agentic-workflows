@@ -72,3 +72,20 @@ def test_sandbox_blocks_dunder_access():
 def test_immutable_sandbox_blocks_mutation():
     with pytest.raises(SecurityError):
         render("{{ start.lst.append(3) }}")
+
+
+def test_round_is_bounded_and_supports_methods():
+    assert render("{{ 3.14159 | round(2) }}|{{ 3.141 | round(2, 'ceil') }}|{{ 3.149 | round(1, 'floor') }}") == "3.14|3.15|3.1"
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["{{ 1.5 | round(10000000, 'ceil') }}", "{{ 1.5 | round(-1) }}", "{{ 1.5 | round(2, 'up') }}", "{{ 'x' | round }}"],
+)
+def test_round_rejects_bad_arguments(source):
+    with pytest.raises((TypeError, ValueError)):
+        render(source)
+
+
+def test_join_formats_items_like_printed_values():
+    assert ENV.from_string("{{ v | join(',') }}").render(v=[None, True, {"k": 1}, "s"]) == ',true,{"k": 1},s'
