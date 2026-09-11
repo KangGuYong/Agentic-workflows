@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Literal
 
 Target = Literal["string", "number", "boolean", "object", "array", "any", "string|array"]
@@ -78,8 +79,8 @@ def resolve_path(schema: dict[str, Any] | None, path: tuple[str, ...]) -> dict[s
         current = _strip_null(current)
         if _is_unknown(current):
             return {}
-        if key.isdigit() and "items" in current:
-            current = current["items"] or {}
+        if key.isdigit() and "array" in kinds_of(current):
+            current = current.get("items") or {}  # no single items schema: element type is unknown
             continue
         props = current.get("properties")
         if props is not None:
@@ -90,6 +91,8 @@ def resolve_path(schema: dict[str, Any] | None, path: tuple[str, ...]) -> dict[s
             if isinstance(extra, dict):
                 current = extra
                 continue
+            if extra is True:
+                return {}
             return None
         if "object" in kinds_of(current):
             return {}
@@ -147,9 +150,12 @@ def coerce_runtime(value: Any, target: Target) -> Any:
             return value
         if isinstance(value, str):
             try:
-                return float(value.strip())
+                number = float(value.strip())
             except ValueError:
                 raise TypeError(f"숫자가 필요하지만 {value!r} 문자열을 받았습니다") from None
+            if not math.isfinite(number):
+                raise TypeError(f"유한한 숫자가 필요하지만 {value!r} 문자열을 받았습니다")
+            return number
         raise TypeError(f"숫자가 필요하지만 {_kind_of_value(value)} 값을 받았습니다")
     if target == "string|array":
         if isinstance(value, (str, list)):

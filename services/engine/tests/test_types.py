@@ -84,3 +84,33 @@ def test_coerce_runtime_accepts_compatible_values():
 def test_coerce_runtime_rejects_incompatible_values(value, target):
     with pytest.raises(TypeError):
         coerce_runtime(value, target)
+
+
+def test_resolve_path_additional_properties():
+    open_schema = {"type": "object", "properties": {"known": {"type": "string"}}, "additionalProperties": True}
+    typed_extra = {"type": "object", "properties": {}, "additionalProperties": {"type": "number"}}
+    assert resolve_path(open_schema, ("known",)) == {"type": "string"}
+    assert resolve_path(open_schema, ("dynamic",)) == {}
+    assert resolve_path(typed_extra, ("anything",)) == {"type": "number"}
+
+
+def test_resolve_path_arrays_with_unknown_items():
+    union = {"oneOf": [{"type": "array", "items": {"type": "string"}}, {"type": "array", "items": {"type": "number"}}]}
+    assert resolve_path({"type": "array"}, ("0",)) == {}
+    assert resolve_path(union, ("0",)) == {}
+    assert resolve_path(OBJ, ("tags", "name")) is None
+
+
+def test_coerce_runtime_other_targets():
+    assert coerce_runtime(True, "boolean") is True
+    assert coerce_runtime({"a": 1}, "object") == {"a": 1}
+    assert coerce_runtime([1], "array") == [1]
+    for value, target in [("true", "boolean"), ([1], "object"), ({"a": 1}, "array")]:
+        with pytest.raises(TypeError):
+            coerce_runtime(value, target)
+
+
+@pytest.mark.parametrize("text", ["nan", "inf", "-Infinity"])
+def test_coerce_runtime_rejects_non_finite_numbers(text):
+    with pytest.raises(TypeError):
+        coerce_runtime(text, "number")
