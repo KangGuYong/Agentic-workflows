@@ -58,3 +58,32 @@ def test_plain_text():
     parsed = parse_template("그냥 텍스트")
     assert parsed.refs == ()
     assert parsed.whole_value is None
+
+
+def test_loop_variable_does_not_hide_a_reference_after_the_loop():
+    parsed = parse_template("{% for llm_1 in start.items %}{{ llm_1 }}{% endfor %}{{ llm_1.text }}")
+    assert [(r.root, r.path) for r in parsed.refs] == [("start", ("items",)), ("llm_1", ("text",))]
+
+
+def test_loop_else_is_outside_the_loop_scope():
+    parsed = parse_template("{% for x in start.xs %}{{ x }}{% else %}{{ x.y }}{% endfor %}")
+    assert [(r.root, r.path) for r in parsed.refs] == [("start", ("xs",)), ("x", ("y",))]
+
+
+def test_underscore_string_keys_are_forbidden():
+    assert parse_template("{{ start['__class__'] }}").problems != ()
+    assert parse_template("{{ start['topic'] }}").problems == ()
+
+
+def test_loop_nesting_limit():
+    two = "{% for a in start.x %}{% for b in a %}{{ b }}{% endfor %}{% endfor %}"
+    three = "{% for a in start.x %}{% for b in a %}{% for c in b %}{{ c }}{% endfor %}{% endfor %}{% endfor %}"
+    assert parse_template(two).problems == ()
+    assert parse_template(three).problems != ()
+
+
+def test_overlong_and_deeply_nested_templates_raise_parse_errors():
+    with pytest.raises(TemplateParseError):
+        parse_template("x" * 20_001)
+    with pytest.raises(TemplateParseError):
+        parse_template("{{ " + "(" * 3000 + "1" + ")" * 3000 + " }}")

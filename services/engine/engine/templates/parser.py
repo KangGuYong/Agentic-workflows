@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -10,6 +11,8 @@ from jinja2.exceptions import TemplateSyntaxError
 
 from engine.templates.env import ALLOWED_FILTERS, ENV
 
+MAX_TEMPLATE_LENGTH = 20_000
+MAX_LOOP_DEPTH = 2
 _FORBIDDEN = (
     nodes.Call,
     nodes.Assign,
@@ -30,7 +33,7 @@ _WHOLE = re.compile(r"\s*\{\{-?(.*?)-?\}\}\s*", re.DOTALL)
 
 
 class TemplateParseError(ValueError):
-    """The template is not valid Jinja syntax."""
+    """The template is not valid Jinja syntax, or is too long / too deeply nested to analyze."""
 
 
 @dataclass(frozen=True)
@@ -71,12 +74,48 @@ def _chain(expr: nodes.Node) -> tuple[str, tuple[str, ...], bool] | None:
     return None
 
 
+def _loop_names(target: nodes.Node) -> set[str]:
+    if isinstance(target, nodes.Name):
+        return {target.name}
+    return {name.name for name in target.find_all(nodes.Name)}
+
+
+def _walk(node: nodes.Node, scope: frozenset[str], visit: Callable[[nodes.Node, frozenset[str]], None]) -> None:
+    """Pre-order walk that knows which names are loop variables at each point (loop scope ≠ else scope)."""
+    if isinstance(node, nodes.For):
+        _walk(node.iter, scope, visit)
+        inner = scope | _loop_names(node.target) | {"loop"}
+        for child in node.body:
+            _walk(child, inner, visit)
+        if node.test is not None:
+            _walk(node.test, inner, visit)
+        for child in node.else_:
+            _walk(child, scope, visit)
+        return
+    visit(node, scope)
+    for child in node.iter_child_nodes():
+        _walk(child, scope, visit)
+
+
+def _loop_depth(node: nodes.Node) -> int:
+    deepest = max((_loop_depth(child) for child in node.iter_child_nodes()), default=0)
+    return deepest + 1 if isinstance(node, nodes.For) else deepest
+
+
 @lru_cache(maxsize=4096)
 def parse_template(source: str) -> ParsedTemplate:
+    if len(source) > MAX_TEMPLATE_LENGTH:
+        raise TemplateParseError(f"템플릿이 너무 깁니다 (최대 {MAX_TEMPLATE_LENGTH}자)")
     try:
-        ast = ENV.parse(source)
+        return _analyze(source)
     except TemplateSyntaxError as exc:
         raise TemplateParseError(f"{exc.lineno}행: {exc.message}") from exc
+    except RecursionError as exc:
+        raise TemplateParseError("템플릿 중첩이 너무 깊습니다") from exc
+
+
+def _analyze(source: str) -> ParsedTemplate:
+    ast = ENV.parse(source)
 
     problems: list[str] = []
     for node in ast.find_all(_FORBIDDEN):
@@ -87,8 +126,13 @@ def parse_template(source: str) -> ParsedTemplate:
     for node in ast.find_all(nodes.Getattr):
         if node.attr.startswith("_"):
             problems.append(f"밑줄로 시작하는 속성은 사용할 수 없습니다: {node.attr}")
+    for node in ast.find_all(nodes.Getitem):
+        key = node.arg.value if isinstance(node.arg, nodes.Const) else None
+        if isinstance(key, str) and key.startswith("_"):
+            problems.append(f"밑줄로 시작하는 키는 사용할 수 없습니다: {key}")
+    if _loop_depth(ast) > MAX_LOOP_DEPTH:
+        problems.append(f"반복문은 최대 {MAX_LOOP_DEPTH}단계까지만 중첩할 수 있습니다")
 
-    local_names = {n.name for n in ast.find_all(nodes.Name) if n.ctx != "load"} | {"loop"}
     inner = {id(n.node) for n in ast.find_all((nodes.Getattr, nodes.Getitem))}
     defaulted = {id(f.node) for f in ast.find_all(nodes.Filter) if f.name == "default"}
     direct: set[int] = set()
@@ -99,13 +143,17 @@ def parse_template(source: str) -> ParsedTemplate:
                 direct.add(id(expr.node))
 
     refs: list[Ref] = []
-    for node in ast.find_all((nodes.Getattr, nodes.Getitem, nodes.Name)):
-        if id(node) in inner or (isinstance(node, nodes.Name) and node.ctx != "load"):
-            continue
+
+    def collect(node: nodes.Node, scope: frozenset[str]) -> None:
+        if not isinstance(node, (nodes.Getattr, nodes.Getitem, nodes.Name)) or id(node) in inner:
+            return
+        if isinstance(node, nodes.Name) and node.ctx != "load":
+            return
         chain = _chain(node)
-        if chain is None or chain[0] in local_names:
-            continue
-        refs.append(Ref(chain[0], chain[1], id(node) in defaulted, id(node) in direct))
+        if chain is not None and chain[0] not in scope:
+            refs.append(Ref(chain[0], chain[1], id(node) in defaulted, id(node) in direct))
+
+    _walk(ast, frozenset(), collect)
 
     whole: Ref | None = None
     expression: str | None = None
@@ -116,7 +164,7 @@ def parse_template(source: str) -> ParsedTemplate:
         target = expr.node if is_default else expr
         chain = _chain(target)
         match = _WHOLE.fullmatch(source)
-        if chain is not None and chain[2] and chain[0] not in local_names and match:
+        if chain is not None and chain[2] and match:
             whole = Ref(chain[0], chain[1], is_default, True)
             expression = match.group(1).strip()
     return ParsedTemplate(tuple(refs), whole, expression, tuple(problems))
