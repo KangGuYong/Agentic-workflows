@@ -1175,6 +1175,12 @@ git commit -m "feat(engine): add sandboxed template env and reference parser"
 
 ---
 
+> **Post-review fix (applied during execution, separate commit):** `env.py` now uses a `TemplateEnvironment(ImmutableSandboxedEnvironment)` whose `getattr` reads mapping keys before attributes (so `{{ x.items }}` reads the `items` key; missing keys are undefined, dict methods are never exposed) and whose intercepted `*`/`**` are size-capped (`MAX_SEQUENCE_LENGTH`, `MAX_EXPONENT`); `tojson` no longer takes `indent` and fails on undefined. `parser.py` enforces `MAX_TEMPLATE_LENGTH` (20,000 chars) and `MAX_LOOP_DEPTH` (2), maps `RecursionError` to `TemplateParseError`, rejects `_`-prefixed string keys, and extracts references scope-aware (loop variables only shadow inside their loop body). New `tests/test_template_env.py`; suite 75.
+>
+> **Carried into later tasks:** Task 5's renderer also maps `TypeError`/`ValueError`/`ArithmeticError` from filters to `TemplateRenderError` and caps rendered output size; Task 12 adds `self` to `RESERVED_IDS`.
+
+---
+
 ## Task 5: Template renderer
 
 Spec 4.4: whole-value templates keep the value's type, everything else is string interpolation; objects interpolate as JSON.
