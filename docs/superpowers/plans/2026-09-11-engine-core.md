@@ -1177,7 +1177,11 @@ git commit -m "feat(engine): add sandboxed template env and reference parser"
 
 > **Post-review fixes (applied during execution, two separate commits):** `env.py` now uses a `TemplateEnvironment(ImmutableSandboxedEnvironment)` whose `getattr`/`getitem` read mapping keys before attributes (so `{{ x.items }}` reads the `items` key; missing keys are undefined, dict methods are never exposed). Resource rule — a template can never build data larger than O(template length + data size): intercepted `*`, `**`, `%` work on numbers only, integer powers are bounded by `MAX_POWER_BITS` (4096), `join` is replaced by a size-checked version (≤ `MAX_OUTPUT_CHARS` = 1,000,000, no `attribute` parameter), `round` is replaced by a version that clamps precision to 0–15 (Jinja's builtin computes `10**precision` unbounded), and `tojson` takes no `indent` and fails on undefined. CPU is not fully bounded (a single loop scanning the data is O(data²)) — that is the Plan 2 render deadline. `parser.py` enforces `MAX_TEMPLATE_LENGTH` (20,000 chars) and `MAX_LOOP_DEPTH` (1 — loops cannot nest), maps `RecursionError` to `TemplateParseError`, rejects `_`-prefixed string keys, and extracts references scope-aware (loop variables only shadow inside their loop body). New `tests/test_template_env.py`; suite 85.
 >
-> **Carried into later tasks:** Task 5's renderer also maps `TypeError`/`ValueError`/`ArithmeticError` from filters to `TemplateRenderError` and caps rendered output size; Task 12 adds `self` to `RESERVED_IDS`.
+> **Carried into later tasks:** Task 5's renderer also maps `TypeError`/`ValueError`/`ArithmeticError` from filters to `TemplateRenderError` and caps rendered output size (streamed via `Template.generate`, aborted past `MAX_OUTPUT_CHARS`); Task 12 adds `self` to `RESERVED_IDS`.
+>
+> Pre-dispatch probes of the plan code (run against the extracted plan tree) added two more:
+> - Task 6 gateway: `json.loads` also raises `RecursionError` (deeply nested output) and plain `ValueError` (integers over 4300 digits), and accepts `NaN`/`Infinity`. The gateway parses with `parse_constant` rejecting non-standard constants and treats `(ValueError, RecursionError)` as a repairable "not JSON" failure.
+> - Task 7 Ollama transport: a malformed body or NDJSON line leaked `JSONDecodeError`, a body without `message` (or with an `error` field) leaked `KeyError`, and a stream cut before `done: true` returned partial text as success. All three become retryable `LLM_UNAVAILABLE`.
 
 ---
 
