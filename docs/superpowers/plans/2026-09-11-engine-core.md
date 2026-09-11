@@ -890,6 +890,10 @@ git commit -m "feat(engine): add template reference type system"
 
 ---
 
+> **Post-review fix (applied during execution, separate commit):** `resolve_path` returns `{}` (unknown) for `additionalProperties: true` and for digit keys into arrays without a single `items` schema (non-digit keys on arrays still return `None`); `coerce_runtime` rejects non-finite numeric strings (`nan`, `inf`). Four tests were appended to `tests/test_types.py` (28 cases; suite 46).
+
+---
+
 ## Task 4: Sandboxed template environment and parser
 
 Spec 4.4. The parser is used by the validator (static checks) and the renderer (whole-value detection).
