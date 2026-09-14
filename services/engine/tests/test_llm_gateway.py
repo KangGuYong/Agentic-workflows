@@ -2,7 +2,7 @@ import pytest
 
 from engine.errors import ErrorCode, NodeError
 from engine.llm.base import ChatMessage, ChatResult
-from engine.llm.gateway import MAX_ERROR_CHARS, LLMGateway
+from engine.llm.gateway import MAX_ECHO_CHARS, MAX_ERROR_CHARS, LLMGateway
 
 SCHEMA = {"type": "object", "properties": {"score": {"type": "number"}}, "required": ["score"]}
 MSG = [ChatMessage("user", "평가해줘")]
@@ -116,3 +116,15 @@ async def test_repair_calls_are_never_streamed():
 
     await LLMGateway(raw).chat(model="m", messages=MSG, schema=SCHEMA, on_token=sink)
     assert [call["on_token"] for call in raw.calls] == [None, None]
+
+
+async def test_repair_conversation_stays_bounded():
+    schema = {"type": "object", "properties": {"score": {"type": "string", "maxLength": 5}}}
+    huge = '{"score": "' + "x" * 1_000_000 + '"}'
+    raw = FakeRaw([huge, huge, huge])
+
+    with pytest.raises(NodeError):
+        await LLMGateway(raw).chat(model="m", messages=MSG, schema=schema)
+
+    last_prompt = raw.calls[2]["messages"]
+    assert sum(len(m.content) for m in last_prompt) <= 2 * (MAX_ECHO_CHARS + MAX_ERROR_CHARS + 200) + len(MSG[0].content)

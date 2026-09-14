@@ -15,6 +15,7 @@ REPAIR_PROMPT = (
 )
 MAX_ERROR_CHARS = 1000  # validation feedback sent back to a small model and kept in the node error
 MAX_MESSAGE_CHARS = 200  # one jsonschema message (they embed the offending value)
+MAX_ECHO_CHARS = 4000  # how much of an invalid answer is shown back to the model in a repair turn
 
 
 def _reject_constant(name: str) -> Any:
@@ -85,7 +86,7 @@ class LLMGateway:
                 return ChatResult(text=result.text, data=data, tokens_in=tokens_in, tokens_out=tokens_out)
             conversation = [
                 *conversation,
-                ChatMessage("assistant", result.text),
+                ChatMessage("assistant", _clip(result.text, MAX_ECHO_CHARS)),
                 ChatMessage("user", REPAIR_PROMPT.format(error=problem)),
             ]
         raise NodeError(ErrorCode.STRUCTURED_OUTPUT_FAILED, f"구조화 출력 검증 실패: {problem}", retryable=True)
