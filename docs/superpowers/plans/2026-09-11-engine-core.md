@@ -1679,6 +1679,27 @@ git add services/engine/engine/llm services/engine/tests/test_llm_scripted.py se
 git commit -m "feat(engine): add LLM client contract, scripted double and structured-output gateway"
 ```
 
+> **Post-review note (Task 6, as implemented):** commits `49a1df8` and `d0c10dc` made these changes on review:
+> - A `RecursionError` from `iter_errors` (deep valid output against a recursive schema) is now repaired instead of escaping.
+> - jsonschema messages are clipped: 200 chars per message and 1000 in total. The invalid answer echoed back is clipped to 4000 chars.
+> - `1e400` is rejected.
+> - `ScriptedLLM` deep-copies dict responses and records `streamed` in `calls`.
+>
+> Deferred to Plan 2 (roadmap): usage of failed attempts.
+>
+> The review also found two schema-side problems:
+> - A tenant schema `pattern` can backtrack catastrophically (`^(a+)+$` on 31 chars took 48 s on the event loop).
+> - An unresolvable `$ref` passes `check_schema` but raises inside `iter_errors`.
+>
+> Both belong at save time and are handled in Task 8's `check_object_schema`. Suite: 170.
+>
+> **Carried into Task 8:** the strict JSON parsing and short schema messages move to a shared `engine/jsondata.py` (`parse_json`, `schema_violations`, `clip`), used by the gateway and the template node. `check_object_schema` then does three things:
+> - It rejects `pattern`/`patternProperties`.
+> - It allows only local `#/...` `$ref`s that resolve.
+> - It maps `RecursionError` (a too-deep schema) to a validation error.
+>
+> `schema_violations` catches `RecursionError`. The template node's JSON format rejects NaN, overflowing numbers and too-deep nesting as `TEMPLATE_ERROR`.
+
 ---
 
 ## Task 7: Ollama transport
