@@ -135,13 +135,35 @@ async def test_invalid_token_counts_count_as_zero():
     assert (result.text, result.tokens_in, result.tokens_out) == ("응답", 0, 0)
 
 
+def _lazy(content: bytes) -> httpx.ByteStream:
+    """A body decoded while it is read, like a network response (content= would decode inside the mock handler)."""
+    return httpx.ByteStream(content)
+
+
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_undecodable_content_encoding_is_retryable(streaming):
-    raw = _raw(lambda request: httpx.Response(200, headers={"Content-Encoding": "gzip"}, content=b"not gzip"))
+    gzip = {"Content-Encoding": "gzip"}
+    raw = _raw(lambda request: httpx.Response(200, headers=gzip, stream=_lazy(b"not gzip")))
     with pytest.raises(NodeError) as exc:
         await raw.complete(model="m", messages=MSG, format=None, temperature=0.7, on_token=_sink if streaming else None)
     assert exc.value.code == ErrorCode.LLM_UNAVAILABLE
     assert exc.value.retryable is True
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "content", "code", "retryable"),
+    [
+        (400, {"Content-Encoding": "gzip"}, b"not gzip", ErrorCode.NODE_FAILED, False),
+        (500, {}, b"x" * (MAX_RESPONSE_CHARS + 10), ErrorCode.LLM_UNAVAILABLE, True),
+    ],
+    ids=["undecodable-4xx-body", "oversized-5xx-body"],
+)
+async def test_error_body_problems_do_not_change_classification(status, headers, content, code, retryable):
+    raw = _raw(lambda request: httpx.Response(status, headers=headers, stream=_lazy(content)))
+    with pytest.raises(NodeError) as exc:
+        await raw.complete(model="m", messages=MSG, format=None, temperature=0.7, on_token=None)
+    assert exc.value.code == code
+    assert exc.value.retryable is retryable
 
 
 @pytest.mark.parametrize("streaming", [False, True])

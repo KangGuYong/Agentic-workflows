@@ -45,25 +45,50 @@ class OllamaRaw:
         try:
             async with self._client.stream("POST", f"{self._base}/api/chat", json=body) as response:
                 if response.status_code >= 400:
-                    _raise_for_status(response.status_code, "\n".join([line async for line in _lines(response)]), model)
+                    _raise_for_status(response.status_code, await _error_excerpt(response), model)
                 if on_token is None:
-                    data = _decode("\n".join([line async for line in _lines(response)]))
+                    data = _decode(await _read_text(response))
                     return _result(_content(data), data)
                 return await _collect(response, on_token)
         except httpx.RequestError as exc:  # transport, protocol and content-decoding failures
             raise _unavailable(f"Ollama 연결 실패: {exc}") from exc
 
 
+def _check_size(size: int) -> None:
+    """A stuck model can generate forever: stop reading (closing the stream) past MAX_RESPONSE_CHARS."""
+    if size > MAX_RESPONSE_CHARS:
+        raise NodeError(
+            ErrorCode.OUTPUT_TOO_LARGE, f"Ollama 응답이 너무 큽니다 (최대 {MAX_RESPONSE_CHARS}자)", retryable=False
+        )
+
+
+async def _read_text(response: httpx.Response) -> str:
+    parts: list[str] = []
+    size = 0
+    async for text in response.aiter_text():
+        size += len(text)
+        _check_size(size)
+        parts.append(text)
+    return "".join(parts)
+
+
+async def _error_excerpt(response: httpx.Response) -> str:
+    """The start of an error body, for the message only: the status code alone decides how the error is classified."""
+    try:
+        async for text in response.aiter_text():
+            return text[:200]
+    except httpx.HTTPError:
+        pass
+    return ""
+
+
 async def _lines(response: httpx.Response) -> AsyncIterator[str]:
-    """Response text split into lines; stops (closing the stream) once MAX_RESPONSE_CHARS have arrived."""
+    """NDJSON lines of a streaming response, size-checked as they arrive."""
     buffer = ""
     size = 0
     async for text in response.aiter_text():
         size += len(text)
-        if size > MAX_RESPONSE_CHARS:
-            raise NodeError(
-                ErrorCode.OUTPUT_TOO_LARGE, f"Ollama 응답이 너무 큽니다 (최대 {MAX_RESPONSE_CHARS}자)", retryable=False
-            )
+        _check_size(size)
         buffer += text
         if "\n" in text:
             *complete, buffer = buffer.split("\n")
