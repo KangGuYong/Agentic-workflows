@@ -348,3 +348,8 @@ def test_json_target_requires_valid_json(source):
     with pytest.raises(TemplateRenderError) as exc:
         render_template(source, JSON_CTX, "json")
     assert exc.value.code == ErrorCode.TEMPLATE_ERROR
+
+
+def test_json_target_hints_at_quoted_substitutions():
+    with pytest.raises(TemplateRenderError, match="따옴표"):
+        render_template('{"a": "{{ start.tags }}"}', JSON_CTX, "json")

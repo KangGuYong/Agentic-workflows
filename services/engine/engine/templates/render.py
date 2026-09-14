@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from typing import Any
 
@@ -11,6 +12,8 @@ from engine.errors import ErrorCode
 from engine.jsondata import parse_json
 from engine.templates.env import ENV, JSON_ENV, MAX_OUTPUT_CHARS, OUTPUT_TOO_LARGE_MESSAGE, json_value
 from engine.templates.parser import TemplateParseError, parse_template
+
+_QUOTED_SUBSTITUTION = re.compile(r'"\s*\{\{')  # a common mistake in JSON templates: "{{ x }}"
 
 
 class TemplateRenderError(Exception):
@@ -70,7 +73,8 @@ def render_template(source: str, context: dict[str, Any], target: Target) -> Any
                 try:
                     value = parse_json(value)
                 except ValueError as exc:
-                    raise TemplateRenderError(f"JSON 템플릿 결과가 올바른 JSON이 아닙니다: {exc}") from exc
+                    hint = " ({{ }}는 JSON 값을 넣으므로 따옴표로 감싸지 마세요)" if _QUOTED_SUBSTITUTION.search(source) else ""
+                    raise TemplateRenderError(f"JSON 템플릿 결과가 올바른 JSON이 아닙니다: {exc}{hint}") from exc
     except TemplateRenderError:
         raise
     except Exception as exc:

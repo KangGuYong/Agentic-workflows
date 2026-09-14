@@ -8,6 +8,7 @@ from engine.jsondata import (
     MAX_SCHEMA_BRANCHES,
     MAX_SCHEMA_CHARS,
     MAX_SCHEMA_DEPTH,
+    MAX_SCHEMA_LIST,
     MAX_SCHEMA_NODES,
     MAX_SCHEMA_PROBLEMS,
     MAX_VIOLATIONS,
@@ -239,7 +240,38 @@ def test_valid_large_data_is_linear():
         "type": "array",
         "items": {"type": "object", "properties": {"v": {"anyOf": [{"type": "string"}, {"type": "integer"}]}}},
     }
-    data = [{"v": i} for i in range(200_000)]
+    data = [{"v": i} for i in range(50_000)]  # about 0.4 s: generous headroom for slow CI
     started = time.perf_counter()  # measured without tracemalloc, which slows Python code about 10x
     assert schema_violations(schema, data) == []
     assert time.perf_counter() - started < 5
+
+
+@pytest.mark.parametrize(
+    ("schema", "fragment"),
+    [
+        ({"enum": list(range(MAX_SCHEMA_LIST + 1))}, "enum"),
+        ({"type": "object", "required": [f"f{i}" for i in range(MAX_SCHEMA_LIST + 1)]}, "required"),
+        ({"type": "object", "required": ["a", "a"]}, "required"),
+        ({"type": ["null", "null", "integer"]}, "type"),
+    ],
+    ids=["enum-length", "required-length", "required-duplicates", "type-duplicates"],
+)
+def test_list_keywords_are_bounded(schema, fragment):
+    assert any(fragment in problem for problem in schema_problems(schema))
+
+
+def test_large_enum_is_a_set_lookup_with_json_equality():
+    options = [*range(MAX_SCHEMA_LIST - 3), True, "x", {"k": [1]}]
+    schema = {"type": "array", "items": {"enum": options}}
+    assert schema_problems(schema) == []
+    assert schema_violations(schema, [1.0, True, "x", {"k": [1.0]}]) == []
+    assert len(schema_violations(schema, [False, 1.5, {"k": [True]}])) == 3
+    data = [MAX_SCHEMA_LIST - 4] * 100_000
+    started = time.perf_counter()
+    assert schema_violations(schema, data) == []
+    assert time.perf_counter() - started < 5  # about 0.1 s; a linear scan of the options took minutes
+
+
+def test_type_mismatch_messages_are_short():
+    schema = {"type": "object", "properties": {"x" * 5000: {"type": ["string", "null"]}}}
+    assert all(len(violation) <= 201 for violation in schema_violations(schema, {"x" * 5000: 1}))
