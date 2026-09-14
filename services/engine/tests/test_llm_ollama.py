@@ -5,7 +5,7 @@ import pytest
 
 from engine.errors import ErrorCode, NodeError
 from engine.llm.base import ChatMessage
-from engine.llm.ollama import OllamaRaw
+from engine.llm.ollama import MAX_RESPONSE_CHARS, OllamaRaw
 
 MSG = [ChatMessage("user", "hi")]
 
@@ -122,3 +122,56 @@ async def test_broken_stream_is_retryable(body):
         await raw.complete(model="m", messages=MSG, format=None, temperature=0.7, on_token=sink)
     assert exc.value.code == ErrorCode.LLM_UNAVAILABLE
     assert exc.value.retryable is True
+
+
+async def _sink(text: str) -> None:
+    return None
+
+
+async def test_invalid_token_counts_count_as_zero():
+    body = {"message": {"content": "응답"}, "done": True, "prompt_eval_count": "12", "eval_count": None}
+    raw = _raw(lambda request: httpx.Response(200, json=body))
+    result = await raw.complete(model="m", messages=MSG, format=None, temperature=0.7, on_token=None)
+    assert (result.text, result.tokens_in, result.tokens_out) == ("응답", 0, 0)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_undecodable_content_encoding_is_retryable(streaming):
+    raw = _raw(lambda request: httpx.Response(200, headers={"Content-Encoding": "gzip"}, content=b"not gzip"))
+    with pytest.raises(NodeError) as exc:
+        await raw.complete(model="m", messages=MSG, format=None, temperature=0.7, on_token=_sink if streaming else None)
+    assert exc.value.code == ErrorCode.LLM_UNAVAILABLE
+    assert exc.value.retryable is True
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_oversized_response_stops_reading(streaming):
+    line = json.dumps({"message": {"content": "x" * (MAX_RESPONSE_CHARS + 10)}, "done": False})
+    raw = _raw(lambda request: httpx.Response(200, content=line.encode()))
+    with pytest.raises(NodeError) as exc:
+        await raw.complete(model="m", messages=MSG, format=None, temperature=0.7, on_token=_sink if streaming else None)
+    assert exc.value.code == ErrorCode.OUTPUT_TOO_LARGE
+    assert exc.value.retryable is False
+
+
+class _TimesOutMidStream(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        yield b'{"message": {"content": "a"}, "done": false}\n'
+        raise httpx.ReadTimeout("slow")
+
+
+async def test_read_timeout_mid_stream_is_retryable():
+    raw = _raw(lambda request: httpx.Response(200, stream=_TimesOutMidStream()))
+    with pytest.raises(NodeError) as exc:
+        await raw.complete(model="m", messages=MSG, format=None, temperature=0.7, on_token=_sink)
+    assert exc.value.code == ErrorCode.LLM_UNAVAILABLE
+
+
+async def test_token_sink_errors_propagate_unchanged():
+    async def failing_sink(text: str) -> None:
+        raise RuntimeError("sink broke")
+
+    body = b'{"message": {"content": "a"}, "done": false}\n{"message": {"content": ""}, "done": true}\n'
+    raw = _raw(lambda request: httpx.Response(200, content=body))
+    with pytest.raises(RuntimeError, match="sink broke"):
+        await raw.complete(model="m", messages=MSG, format=None, temperature=0.7, on_token=failing_sink)
