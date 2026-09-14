@@ -82,7 +82,7 @@ class NodeSpec(ABC):
 
     @abstractmethod
     def output_schema(self, config: BaseModel, pred_schemas: dict[str, dict[str, Any]]) -> dict[str, Any]:
-        """JSON Schema of the output. `pred_schemas` maps forward predecessors (declaration order)."""
+        """JSON Schema of the output, read-only. `pred_schemas` maps forward predecessors (declaration order)."""
 
     @abstractmethod
     async def execute(self, ctx: NodeContext, config: BaseModel, rendered: dict[str, Any]) -> NodeResult: ...
@@ -95,4 +95,6 @@ def check_object_schema(value: dict[str, Any], what: str) -> dict[str, Any]:
         raise ValueError(f"{what}: " + "; ".join(problems))
     if value.get("type") != "object":
         raise ValueError(f"{what}의 type은 object여야 합니다")
+    if "anyOf" in value or "oneOf" in value:
+        raise ValueError(f"{what}의 최상위에는 anyOf/oneOf를 쓸 수 없습니다")
     return value

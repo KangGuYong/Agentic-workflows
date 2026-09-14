@@ -5,7 +5,11 @@ from engine.nodes.base import NodeSpec
 
 class NodeRegistry:
     def __init__(self, specs: list[NodeSpec]) -> None:
-        self._specs = {spec.type: spec for spec in specs}
+        self._specs: dict[str, NodeSpec] = {}
+        for spec in specs:
+            if spec.type in self._specs:
+                raise ValueError(f"duplicate node type: {spec.type}")
+            self._specs[spec.type] = spec
 
     def get(self, node_type: str) -> NodeSpec | None:
         return self._specs.get(node_type)

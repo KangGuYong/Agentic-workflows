@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import re
 from typing import Any
 
@@ -15,7 +16,7 @@ from engine.nodes.base import (
     schema_violations,
 )
 
-_OUTPUT_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_OUTPUT_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 
 
 class StartConfig(BaseModel):
@@ -45,7 +46,7 @@ class StartNode(NodeSpec):
                 "실행 입력이 입력 스키마와 맞지 않습니다: " + "; ".join(violations),
                 retryable=False,
             )
-        return NodeResult(dict(ctx.inputs))
+        return NodeResult(copy.deepcopy(ctx.inputs))
 
 
 class EndConfig(BaseModel):
@@ -55,7 +56,7 @@ class EndConfig(BaseModel):
     @field_validator("outputs")
     @classmethod
     def _output_names(cls, value: dict[str, str]) -> dict[str, str]:
-        bad = [key for key in value if not _OUTPUT_KEY.match(key)]
+        bad = [key for key in value if not _OUTPUT_KEY.fullmatch(key)]
         if bad:
             raise ValueError(f"출력 이름 형식이 잘못되었습니다: {', '.join(bad)}")
         return value

@@ -8,7 +8,8 @@ from jinja2.environment import TemplateExpression
 
 from engine.dsl.types import Target, coerce_runtime
 from engine.errors import ErrorCode
-from engine.templates.env import ENV, MAX_OUTPUT_CHARS, OUTPUT_TOO_LARGE_MESSAGE, json_value
+from engine.jsondata import parse_json
+from engine.templates.env import ENV, JSON_ENV, MAX_OUTPUT_CHARS, OUTPUT_TOO_LARGE_MESSAGE, json_value
 from engine.templates.parser import TemplateParseError, parse_template
 
 
@@ -21,8 +22,8 @@ class TemplateTypeError(TemplateRenderError):
 
 
 @lru_cache(maxsize=4096)
-def _template(source: str) -> Template:
-    return ENV.from_string(source)
+def _template(source: str, json_text: bool) -> Template:
+    return (JSON_ENV if json_text else ENV).from_string(source)
 
 
 @lru_cache(maxsize=4096)
@@ -43,7 +44,11 @@ def _render_bounded(template: Template, context: dict[str, Any]) -> str:
 
 
 def render_template(source: str, context: dict[str, Any], target: Target) -> Any:
-    """Render one template field. Whole-value templates keep the referenced value's type."""
+    """Render one template field. Whole-value templates keep the referenced value's type.
+
+    Target "json": the template is JSON text in which every `{{ }}` inserts a JSON value (so data can never
+    add JSON structure), and the result is the parsed value; a whole-value template returns the value itself.
+    """
     try:
         parsed = parse_template(source)
     except TemplateParseError as exc:
@@ -60,7 +65,12 @@ def render_template(source: str, context: dict[str, Any], target: Target) -> Any
             # JSON data only, size-bounded, and a copy so nodes never share context objects.
             value = json_value(value)
         else:
-            value = _render_bounded(_template(source), context)
+            value = _render_bounded(_template(source, target == "json"), context)
+            if target == "json":
+                try:
+                    value = parse_json(value)
+                except ValueError as exc:
+                    raise TemplateRenderError(f"JSON 템플릿 결과가 올바른 JSON이 아닙니다: {exc}") from exc
     except TemplateRenderError:
         raise
     except Exception as exc:

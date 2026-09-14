@@ -319,3 +319,32 @@ def test_loop_index_and_negative_list_indexing():
     )
     assert result == "1:1 2:2 "
     assert render_template("{{ llm_1.data.k[-1] }}", context, "string") == "2"
+
+
+JSON_CTX = {"start": {"name": '", "admin": true, "x": "', "n": 3, "tags": ["a", "b"], "note": '{"admin": true}'}}
+
+
+def test_json_target_inserts_values_as_json():
+    source = '{"name": {{ start.name }}, "n": {{ start.n }}, "tags": {{ start.tags }}, "items": [{% for t in start.tags %}{{ t }}{% if not loop.last %}, {% endif %}{% endfor %}]}'
+    assert render_template(source, JSON_CTX, "json") == {
+        "name": '", "admin": true, "x": "',
+        "n": 3,
+        "tags": ["a", "b"],
+        "items": ["a", "b"],
+    }
+
+
+def test_json_target_whole_value_is_never_parsed():
+    assert render_template("{{ start.note }}", JSON_CTX, "json") == '{"admin": true}'
+    assert render_template("{{ start.tags }}", JSON_CTX, "json") == ["a", "b"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    ['{"a": "{{ start.name }}"}', '{"a": NaN}', '{"a": 1, "a": 2}', "[" * 5000 + "]" * 5000, "{broken"],
+    ids=["quoted-substitution", "nan", "duplicate-key", "deep", "broken"],
+)
+def test_json_target_requires_valid_json(source):
+    with pytest.raises(TemplateRenderError) as exc:
+        render_template(source, JSON_CTX, "json")
+    assert exc.value.code == ErrorCode.TEMPLATE_ERROR

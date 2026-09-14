@@ -71,16 +71,10 @@ async def test_non_standard_or_pathological_json_is_repaired():
     assert len(raw.calls) == 4
 
 
-RECURSIVE_SCHEMA = {"$defs": {"n": {"type": "array", "items": {"$ref": "#/$defs/n"}}}, "$ref": "#/$defs/n"}
-
-
-async def test_output_too_deep_to_validate_is_repaired():
-    raw = FakeRaw(["[" * 600 + "]" * 600, "[]"])
-
-    result = await LLMGateway(raw).chat(model="m", messages=MSG, schema=RECURSIVE_SCHEMA)
-
-    assert result.data == []
-    assert "중첩" in raw.calls[1]["messages"][-1].content
+async def test_duplicate_keys_and_unsafe_text_are_repaired():
+    raw = FakeRaw(['{"score": 1, "score": 2}', '{"score": 1, "note": "\\u0000"}', '{"score": 3}'])
+    result = await LLMGateway(raw).chat(model="m", messages=MSG, schema=SCHEMA)
+    assert result.data == {"score": 3}
 
 
 async def test_non_finite_numbers_are_repaired():

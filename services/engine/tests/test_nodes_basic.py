@@ -4,7 +4,7 @@ from pydantic import ValidationError
 from engine.errors import ErrorCode, NodeError
 from engine.nodes.base import TemplateField
 from engine.nodes.io import EndNode, StartNode
-from engine.nodes.registry import default_registry
+from engine.nodes.registry import NodeRegistry, default_registry
 from engine.nodes.template import TemplateNode
 from tests.helpers import make_ctx
 
@@ -40,9 +40,10 @@ async def test_end_maps_rendered_outputs():
     assert result.output == {"result": "본문"}
 
 
-def test_end_rejects_bad_output_names():
+@pytest.mark.parametrize("name", ["1bad", "result\n", "a-b", "x" * 65])
+def test_end_rejects_bad_output_names(name):
     with pytest.raises(ValidationError):
-        EndNode().parse_config({"outputs": {"1bad": "x"}})
+        EndNode().parse_config({"outputs": {name: "x"}})
 
 
 async def test_template_text_output():
@@ -53,15 +54,13 @@ async def test_template_text_output():
     assert result.output == {"text": "안녕 철수"}
 
 
-async def test_template_json_output():
+async def test_template_json_output_is_the_rendered_value():
     spec = TemplateNode()
     config = spec.parse_config({"template": '{"a": {{start.n}}}', "format": "json"})
-    assert spec.template_fields(config)[0].target == "any"
-    assert (await spec.execute(make_ctx(), config, {"template": '{"a": 1}'})).output == {"data": {"a": 1}}
-    assert (await spec.execute(make_ctx(), config, {"template": [1, 2]})).output == {"data": [1, 2]}
-    with pytest.raises(NodeError) as exc:
-        await spec.execute(make_ctx(), config, {"template": "{broken"})
-    assert exc.value.code == ErrorCode.TEMPLATE_ERROR
+    assert spec.template_fields(config)[0].target == "json"
+    assert (await spec.execute(make_ctx(), config, {"template": {"a": 1}})).output == {"data": {"a": 1}}
+    # a rendered string is data, never parsed again
+    assert (await spec.execute(make_ctx(), config, {"template": '{"admin": true}'})).output == {"data": '{"admin": true}'}
 
 
 def test_registry_lookup():
@@ -71,15 +70,9 @@ def test_registry_lookup():
     assert {"start", "end", "template"} <= {spec.type for spec in registry.all()}
 
 
-@pytest.mark.parametrize(
-    "text", ["[" * 100_000, "1" * 5000, "NaN", '{"a": Infinity}'], ids=["deep", "huge-int", "nan", "infinity"]
-)
-async def test_template_json_rejects_non_standard_json(text):
-    spec = TemplateNode()
-    config = spec.parse_config({"template": "x", "format": "json"})
-    with pytest.raises(NodeError) as exc:
-        await spec.execute(make_ctx(), config, {"template": text})
-    assert exc.value.code == ErrorCode.TEMPLATE_ERROR
+def test_registry_rejects_duplicate_types():
+    with pytest.raises(ValueError):
+        NodeRegistry([StartNode(), StartNode()])
 
 
 @pytest.mark.parametrize(
@@ -88,8 +81,9 @@ async def test_template_json_rejects_non_standard_json(text):
         {"type": "object", "properties": {"code": {"type": "string", "pattern": "^(a+)+$"}}},
         {"type": "object", "properties": {"tags": {"type": "array", "uniqueItems": True}}},
         {"type": "object", "$ref": "#"},
+        {"type": "object", "anyOf": [{"type": "string"}]},
     ],
-    ids=["pattern", "uniqueItems", "ref"],
+    ids=["pattern", "uniqueItems", "ref", "root-anyOf"],
 )
 def test_start_rejects_schemas_outside_the_tenant_subset(schema):
     with pytest.raises(ValidationError):
@@ -103,3 +97,14 @@ async def test_start_input_violations_are_short():
         await spec.execute(make_ctx(inputs={"topic": "x" * 100_000}), config, {})
     assert exc.value.code == ErrorCode.TYPE_MISMATCH
     assert len(exc.value.message) < 1000
+
+
+async def test_start_output_does_not_share_inputs():
+    spec = StartNode()
+    config = spec.parse_config({"inputs": {"type": "object"}})
+    inputs = {"tags": ["a"]}
+
+    result = await spec.execute(make_ctx(inputs=inputs), config, {})
+    result.output["tags"].append("b")
+
+    assert inputs == {"tags": ["a"]}

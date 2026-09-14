@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from jinja2 import ChainableUndefined, StrictUndefined, Undefined
@@ -176,6 +176,14 @@ def _finalize(value: Any) -> Any:
     return text
 
 
+def _finalize_json(value: Any) -> str:
+    """Output of `{{ }}` in JSON templates: the value as JSON, so data can never add JSON structure."""
+    text = json.dumps(json_value(value), ensure_ascii=False)
+    if len(text) > MAX_OUTPUT_CHARS:
+        raise SecurityError(OUTPUT_TOO_LARGE_MESSAGE)
+    return text
+
+
 def _tojson(value: Any) -> str:
     text = json.dumps(json_value(value), ensure_ascii=False)
     if len(text) > MAX_OUTPUT_CHARS:
@@ -208,11 +216,11 @@ def _round(value: Any, precision: Any = 0, method: str = "common") -> float:
     return rounding(value * factor) / factor
 
 
-def make_env() -> TemplateEnvironment:
+def make_env(finalize: Callable[[Any], Any] = _finalize) -> TemplateEnvironment:
     env = TemplateEnvironment(
         undefined=ChainableStrictUndefined,
         autoescape=False,
-        finalize=_finalize,
+        finalize=finalize,
         keep_trailing_newline=True,
     )
     builtin = env.filters
@@ -226,3 +234,4 @@ def make_env() -> TemplateEnvironment:
 
 
 ENV = make_env()
+JSON_ENV = make_env(_finalize_json)  # for templates whose target is "json"

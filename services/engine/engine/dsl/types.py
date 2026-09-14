@@ -5,7 +5,8 @@ import json
 import math
 from typing import Any, Literal
 
-Target = Literal["string", "number", "boolean", "object", "array", "any", "string|array"]
+Target = Literal["string", "number", "boolean", "object", "array", "any", "string|array", "json"]
+# "json": the field is JSON text whose {{ }} insert JSON values; it renders to the parsed value (see render.py)
 Severity = Literal["ok", "warning", "error"]
 
 _JSON_TO_KIND = {
@@ -102,7 +103,7 @@ def resolve_path(schema: dict[str, Any] | None, path: tuple[str, ...]) -> dict[s
 
 def compat(source: set[str], target: Target) -> Severity:
     """Severity of passing a value of `source` kinds into a field expecting `target` (spec 4.5 table)."""
-    if target == "any":
+    if target in ("any", "json"):
         return "ok"
     worst: Severity = "ok"
     for kind in source or {"unknown"}:
@@ -139,7 +140,7 @@ def to_text(value: Any) -> str:
 
 def coerce_runtime(value: Any, target: Target) -> Any:
     """Runtime type check for a rendered field. Raises TypeError with a Korean message on mismatch."""
-    if target == "any":
+    if target in ("any", "json"):
         return value
     if target == "string":
         return to_text(value)
