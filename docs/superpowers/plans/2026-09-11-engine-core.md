@@ -2688,6 +2688,20 @@ git add services/engine/engine/nodes services/engine/tests/test_nodes_ai.py
 git commit -m "feat(engine): add llm and classifier nodes"
 ```
 
+> **Post-review note (Task 9, as implemented):** commits `a0c14b2` and `424d0af`.
+> - The registry keeps the duplicate-type check and only adds the new nodes. Task 11 does the same.
+> - Model names match `MODEL_NAME` (`^\S+$`) and are at most 200 chars.
+> - `temperature` is `strict=True`: bool is rejected, int is accepted.
+> - A `prompt`/`input` that renders empty raises non-retryable `TEMPLATE_ERROR` before any model call.
+> - A system prompt that renders empty is omitted.
+> - Classifier fields are bounded:
+>   - `description` ≤ 500 chars, single line;
+>   - `instructions` ≤ 4000 chars;
+>   - `reason` ≤ 500 chars (`maxLength`).
+> - Classifier `route` raises `NODE_FAILED` for a missing category or one outside `handles()`.
+>
+> Suite: 344.
+
 ---
 
 ## Task 10: Condition node
@@ -2891,6 +2905,30 @@ Expected: all PASS
 git add services/engine/engine/nodes/condition.py services/engine/tests/test_nodes_condition.py
 git commit -m "feat(engine): add condition node"
 ```
+
+> **Post-review note (Task 10, as implemented):** commits `4a1581c` and `d2707c3`.
+>
+> **Loose `==`.** The plan's version used Python equality, so `true == 1` and `"1_000" == 1000` were both true. It is now JSON equality via `engine.jsondata.json_equal`, which replaces the old private `_json_equal`. A string still matches the JSON value it spells, parsed with `parse_json`: `"5" == 5`, `"true" == true`, `"" == null`.
+>
+> **Operand checks.**
+> - `contains`/`not_contains` need a non-empty `right` template.
+> - A `null` needle never matches inside a string. It still matches a `null` array item.
+> - Numeric ops and `contains` raise `TypeError` on mismatched operands. `execute` maps this to non-retryable `TYPE_MISMATCH`.
+> - A `RecursionError` from deeply nested operands becomes `NODE_FAILED`.
+> - `route` requires a bool `result`.
+>
+> Suite: 379.
+>
+> **Carried into Task 11** (prepared, not yet applied):
+> - **`human_approval`:** check the resume answer's shape.
+>   - Only the keys `decision`, `comment`, `editedValue`, `reviewedAt` are allowed.
+>   - `comment` is a str of at most 10,000 chars.
+>   - `reviewedAt` is a str of at most 64 chars.
+>   - `editedValue` goes through `templates.env.json_value`, which enforces JSON data, bounds its size and copies it.
+> - **`merge`:**
+>   - Deep-copy upstream outputs.
+>   - A missing predecessor output raises `NODE_FAILED` instead of `KeyError`.
+> - **Registry:** keep the duplicate-type check.
 
 ---
 
