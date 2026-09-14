@@ -223,15 +223,16 @@ def schema_problems(schema: Any) -> list[str]:
 # ---------------------------------------------------------------- validation
 
 
-def _json_equal(a: Any, b: Any) -> bool:
+def json_equal(a: Any, b: Any) -> bool:
+    """JSON equality: 1 == 1.0, but true != 1 and "1" != 1, also inside arrays and objects."""
     if isinstance(a, bool) or isinstance(b, bool):
         return isinstance(a, bool) and isinstance(b, bool) and a == b
     if _is_number(a) or _is_number(b):
         return _is_number(a) and _is_number(b) and a == b
     if isinstance(a, list):
-        return isinstance(b, list) and len(a) == len(b) and all(map(_json_equal, a, b))
+        return isinstance(b, list) and len(a) == len(b) and all(map(json_equal, a, b))
     if isinstance(a, dict):
-        return isinstance(b, dict) and a.keys() == b.keys() and all(_json_equal(v, b[k]) for k, v in a.items())
+        return isinstance(b, dict) and a.keys() == b.keys() and all(json_equal(v, b[k]) for k, v in a.items())
     return type(a) is type(b) and a == b
 
 
@@ -321,7 +322,7 @@ class _Validator:
             return key in scalars
         for option, size in containers:
             self.charge(size)
-            if _json_equal(value, option):
+            if json_equal(value, option):
                 return True
         return False
 
@@ -354,7 +355,7 @@ class _Validator:
             self.fail("허용된 값 중 하나여야 합니다")
         if "const" in schema:
             self.charge(_size(schema["const"]))
-            if not _json_equal(value, schema["const"]):
+            if not json_equal(value, schema["const"]):
                 self.fail("정해진 값과 같아야 합니다")
         if "anyOf" in schema and not any(self.is_valid(branch, value) for branch in schema["anyOf"]):
             self.fail("anyOf 조건 중 하나 이상을 만족해야 합니다")
