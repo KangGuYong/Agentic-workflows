@@ -4,13 +4,12 @@ Parsing accepts standard JSON only. Tenant schemas use a small JSON Schema subse
 regular expressions or `uniqueItems`) with bounded size, depth, fan-out and length/count bounds, and
 are validated by the subset validator below instead of a general JSON Schema library: `anyOf`/`oneOf`
 stop at the deciding branch, at most MAX_VIOLATIONS messages are collected, messages never copy the
-data, data is only descended as deep as the schema, scalar enum options are looked up in a set, and
-property checks walk the smaller of the object and the schema's properties. Validation therefore costs
-about O(schema size x data nodes) time and O(depth) memory.
+data, data is only descended as deep as the schema, and scalar enum options are looked up in a set.
+Every check is charged to a step budget (MAX_VALIDATION_STEPS), so one validation costs bounded time
+whatever the accepted schema, and O(depth) memory.
 """
 from __future__ import annotations
 
-import contextlib
 import json
 import math
 import re
@@ -22,9 +21,10 @@ MAX_SCHEMA_CHARS = 32_000  # serialized size of one tenant schema
 MAX_SCHEMA_DEPTH = 32  # nesting of subschemas, and of enum/const values
 MAX_SCHEMA_NODES = 256  # subschemas in one schema
 MAX_SCHEMA_BRANCHES = 16  # entries of one anyOf/oneOf
-MAX_SCHEMA_LIST = 256  # entries of one enum or required list
+MAX_SCHEMA_LIST = 256  # entries of one enum or required list (duplicates allowed in enum)
 MAX_SCHEMA_BOUND = 10_000  # length/count bounds; Ollama expands them into grammar rules
 MAX_SCHEMA_PROBLEMS = 10
+MAX_VALIDATION_STEPS = 1_000_000  # checks in one validation, about 1-2 s of pure Python
 
 _TYPES = frozenset({"string", "number", "integer", "boolean", "object", "array", "null"})
 _ANNOTATIONS = frozenset({"title", "description", "default", "examples", "$comment", "format"})
@@ -245,8 +245,8 @@ def _is_type(value: Any, name: str) -> bool:
     return isinstance(value, {"string": str, "array": list, "object": dict}[name])
 
 
-def _path_text(path: tuple[str, ...]) -> str:
-    return clip("/".join(clip(part, 40) for part in path)) or "(root)"
+def _path_text(path: list[str | int]) -> str:
+    return clip("/".join(clip(str(part), 40) for part in path)) or "(root)"
 
 
 def _scalar_key(value: Any) -> tuple[str, Any] | None:
@@ -262,54 +262,95 @@ def _scalar_key(value: Any) -> tuple[str, Any] | None:
     return None
 
 
-class _Validator:
-    """One validation run; caches enum lookups per schema list."""
+def _size(value: Any) -> int:
+    """JSON nodes in a value (enum/const values are depth-bounded by schema_problems)."""
+    if isinstance(value, list):
+        return 1 + sum(map(_size, value))
+    if isinstance(value, dict):
+        return 1 + sum(map(_size, value.values()))
+    return 1
 
-    def __init__(self) -> None:
-        self._enums: dict[int, tuple[frozenset[tuple[str, Any]], list[Any]]] = {}
+
+class _Invalid(Exception):
+    """A branch being tested by `is_valid` failed."""
+
+
+class _TooMuchWork(Exception):
+    """The validation step budget ran out."""
+
+
+class _Validator:
+    """One validation run: collects messages, tracks the data path, and charges every check to a step budget."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.found: list[str] = []
+        self.path: list[str | int] = []
+        self.steps = 0
+        self.quiet = 0  # > 0 while testing anyOf/oneOf branches: failures only need a yes/no
+        self._enums: dict[int, tuple[list[Any], frozenset[tuple[str, Any]], list[tuple[Any, int]]]] = {}
+
+    def charge(self, steps: int) -> None:
+        self.steps += steps
+        if self.steps > MAX_VALIDATION_STEPS:
+            raise _TooMuchWork
+
+    def fail(self, message: str) -> None:
+        if self.quiet:
+            raise _Invalid
+        self.found.append(clip(f"{_path_text(self.path)}: {message}"))
+        if len(self.found) >= self.limit:
+            raise _Enough
 
     def enum_contains(self, options: list[Any], value: Any) -> bool:
-        cached = self._enums.get(id(options))
-        if cached is None:
+        entry = self._enums.get(id(options))
+        if entry is None or entry[0] is not options:  # the entry keeps `options` alive, so ids cannot be reused
             scalars = frozenset(key for key in map(_scalar_key, options) if key is not None)
-            containers = [option for option in options if _scalar_key(option) is None]
-            cached = self._enums[id(options)] = (scalars, containers)
-        scalars, containers = cached
+            containers = [(option, _size(option)) for option in options if _scalar_key(option) is None]
+            entry = self._enums[id(options)] = (options, scalars, containers)
+        _, scalars, containers = entry
         key = _scalar_key(value)
         if key is not None:
             return key in scalars
-        return any(_json_equal(value, option) for option in containers)
+        for option, size in containers:
+            self.charge(size)
+            if _json_equal(value, option):
+                return True
+        return False
 
     def is_valid(self, schema: Any, value: Any) -> bool:
+        depth = len(self.path)
+        self.quiet += 1
         try:
-            self.validate(schema, value, (), [], 1)
-        except _Enough:
+            self.validate(schema, value)
+        except _Invalid:
             return False
+        finally:
+            self.quiet -= 1
+            del self.path[depth:]
         return True
 
-    def validate(self, schema: Any, value: Any, path: tuple[str, ...], found: list[str], limit: int) -> None:
-        def fail(message: str) -> None:
-            found.append(clip(f"{_path_text(path)}: {message}"))
-            if len(found) >= limit:
-                raise _Enough
-
+    def validate(self, schema: Any, value: Any) -> None:
+        self.charge(1)
         if schema is True:
             return
         if schema is False:
-            fail("값이 허용되지 않습니다")
+            self.fail("값이 허용되지 않습니다")
             return
         declared = schema.get("type")
         if declared is not None:
-            names = [declared] if isinstance(declared, str) else declared
+            names = (declared,) if isinstance(declared, str) else declared
             if not any(_is_type(value, name) for name in names):
-                fail(f"{' 또는 '.join(names)} 타입이어야 하지만 {_kind(value)} 값입니다")
+                self.fail(f"{' 또는 '.join(names)} 타입이어야 하지만 {_kind(value)} 값입니다")
                 return  # the remaining keywords would only restate the mismatch
         if "enum" in schema and not self.enum_contains(schema["enum"], value):
-            fail("허용된 값 중 하나여야 합니다")
-        if "const" in schema and not _json_equal(value, schema["const"]):
-            fail("정해진 값과 같아야 합니다")
+            self.fail("허용된 값 중 하나여야 합니다")
+        if "const" in schema:
+            self.charge(_size(schema["const"]))
+            if not _json_equal(value, schema["const"]):
+                self.fail("정해진 값과 같아야 합니다")
         if "anyOf" in schema and not any(self.is_valid(branch, value) for branch in schema["anyOf"]):
-            fail("anyOf 조건 중 하나 이상을 만족해야 합니다")
+            self.fail("anyOf 조건 중 하나 이상을 만족해야 합니다")
         if "oneOf" in schema:
             matches = 0
             for branch in schema["oneOf"]:
@@ -318,59 +359,76 @@ class _Validator:
                     if matches > 1:
                         break
             if matches != 1:
-                fail("oneOf 조건 중 정확히 하나를 만족해야 합니다")
+                self.fail("oneOf 조건 중 정확히 하나를 만족해야 합니다")
         if _is_number(value):
             if "minimum" in schema and value < schema["minimum"]:
-                fail(f"{schema['minimum']} 이상이어야 합니다")
+                self.fail(f"{schema['minimum']} 이상이어야 합니다")
             if "maximum" in schema and value > schema["maximum"]:
-                fail(f"{schema['maximum']} 이하여야 합니다")
+                self.fail(f"{schema['maximum']} 이하여야 합니다")
             if "exclusiveMinimum" in schema and value <= schema["exclusiveMinimum"]:
-                fail(f"{schema['exclusiveMinimum']}보다 커야 합니다")
+                self.fail(f"{schema['exclusiveMinimum']}보다 커야 합니다")
             if "exclusiveMaximum" in schema and value >= schema["exclusiveMaximum"]:
-                fail(f"{schema['exclusiveMaximum']}보다 작아야 합니다")
+                self.fail(f"{schema['exclusiveMaximum']}보다 작아야 합니다")
         elif isinstance(value, str):
             if "minLength" in schema and len(value) < schema["minLength"]:
-                fail(f"길이가 {schema['minLength']}자 이상이어야 합니다")
+                self.fail(f"길이가 {schema['minLength']}자 이상이어야 합니다")
             if "maxLength" in schema and len(value) > schema["maxLength"]:
-                fail(f"길이가 {schema['maxLength']}자 이하여야 합니다")
+                self.fail(f"길이가 {schema['maxLength']}자 이하여야 합니다")
         elif isinstance(value, list):
             if "minItems" in schema and len(value) < schema["minItems"]:
-                fail(f"항목이 {schema['minItems']}개 이상이어야 합니다")
+                self.fail(f"항목이 {schema['minItems']}개 이상이어야 합니다")
             if "maxItems" in schema and len(value) > schema["maxItems"]:
-                fail(f"항목이 {schema['maxItems']}개 이하여야 합니다")
-            if "items" in schema:
+                self.fail(f"항목이 {schema['maxItems']}개 이하여야 합니다")
+            items = schema.get("items")
+            if items is not None and items is not True:
+                path = self.path
                 for index, item in enumerate(value):
-                    self.validate(schema["items"], item, (*path, str(index)), found, limit)
+                    path.append(index)
+                    self.validate(items, item)
+                    path.pop()
         elif isinstance(value, dict):
             if "minProperties" in schema and len(value) < schema["minProperties"]:
-                fail(f"필드가 {schema['minProperties']}개 이상이어야 합니다")
+                self.fail(f"필드가 {schema['minProperties']}개 이상이어야 합니다")
             if "maxProperties" in schema and len(value) > schema["maxProperties"]:
-                fail(f"필드가 {schema['maxProperties']}개 이하여야 합니다")
-            for name in schema.get("required", ()):
+                self.fail(f"필드가 {schema['maxProperties']}개 이하여야 합니다")
+            required = schema.get("required", ())
+            self.charge(len(required))
+            for name in required:
                 if name not in value:
-                    fail(f"필수 필드가 없습니다: {clip(name, 40)}")
+                    self.fail(f"필수 필드가 없습니다: {clip(name, 40)}")
             properties = schema.get("properties", {})
             if len(properties) <= len(value):  # walk the smaller side
                 present = [name for name in properties if name in value]
             else:
                 present = [name for name in value if name in properties]
+            self.charge(min(len(properties), len(value)))
+            path = self.path
             for name in present:
-                self.validate(properties[name], value[name], (*path, name), found, limit)
+                path.append(name)
+                self.validate(properties[name], value[name])
+                path.pop()
             extra = schema.get("additionalProperties")
-            if extra is not None:
+            if extra is not None and extra is not True:
                 for name, item in value.items():
                     if name in properties:
                         continue
                     if extra is False:
-                        fail(f"허용되지 않은 필드입니다: {clip(name, 40)}")
+                        self.fail(f"허용되지 않은 필드입니다: {clip(name, 40)}")
                     else:
-                        self.validate(extra, item, (*path, name), found, limit)
+                        path.append(name)
+                        self.validate(extra, item)
+                        path.pop()
 
 
 def schema_violations(schema: dict[str, Any], value: Any) -> list[str]:
     """Up to MAX_VIOLATIONS short violations of `value` against a schema accepted by `schema_problems`
-    ([] when `value` is valid)."""
-    found: list[str] = []
-    with contextlib.suppress(_Enough):
-        _Validator().validate(schema, value, (), found, MAX_VIOLATIONS)
-    return found
+    ([] when `value` is valid). Validation that needs more than MAX_VALIDATION_STEPS checks stops with a
+    violation instead of blocking the caller."""
+    validator = _Validator(MAX_VIOLATIONS)
+    try:
+        validator.validate(schema, value)
+    except _Enough:
+        pass
+    except _TooMuchWork:
+        validator.found.append(f"(root): 검증할 작업이 너무 많습니다 (최대 {MAX_VALIDATION_STEPS}단계)")
+    return validator.found

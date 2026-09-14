@@ -4,6 +4,7 @@ import tracemalloc
 import pytest
 
 from engine.jsondata import (
+    MAX_MESSAGE_CHARS,
     MAX_SCHEMA_BOUND,
     MAX_SCHEMA_BRANCHES,
     MAX_SCHEMA_CHARS,
@@ -272,6 +273,55 @@ def test_large_enum_is_a_set_lookup_with_json_equality():
     assert time.perf_counter() - started < 5  # about 0.1 s; a linear scan of the options took minutes
 
 
-def test_type_mismatch_messages_are_short():
-    schema = {"type": "object", "properties": {"x" * 5000: {"type": ["string", "null"]}}}
-    assert all(len(violation) <= 201 for violation in schema_violations(schema, {"x" * 5000: 1}))
+def test_messages_are_clipped_even_with_long_paths():
+    key = "k" * 40
+    schema: dict = {"type": "string"}
+    value: object = 1
+    for _ in range(6):
+        schema = {"type": "object", "properties": {key: schema}}
+        value = {key: value}
+
+    [violation] = schema_violations(schema, value)
+
+    assert len(violation) == MAX_MESSAGE_CHARS + 1
+
+
+def test_enum_depth_is_checked_per_option():
+    def nested(depth):
+        value: object = 0
+        for _ in range(depth - 1):
+            value = [value]
+        return value
+
+    assert schema_problems({"enum": [nested(MAX_SCHEMA_DEPTH)]}) == []
+    assert schema_problems({"enum": [nested(MAX_SCHEMA_DEPTH + 1)]}) != []
+
+
+def _timed(schema, value):
+    started = time.perf_counter()
+    violations = schema_violations(schema, value)
+    return violations, time.perf_counter() - started
+
+
+def test_container_enum_options_are_charged_to_the_budget():
+    schema = {"type": "array", "items": {"enum": [[k] for k in range(MAX_SCHEMA_LIST)]}}
+    assert schema_problems(schema) == []
+    assert schema_violations(schema, [[0], [255]]) == []
+    violations, elapsed = _timed(schema, [[MAX_SCHEMA_LIST - 1]] * 200_000)
+    assert "작업" in violations[-1] and elapsed < 5
+
+
+def test_nested_branches_are_charged_to_the_budget():
+    leaves = [{"type": "string"}] * 15
+    last = [{"type": "string"}] * 14 + [{"type": "integer"}]
+    schema = {"type": "array", "items": {"anyOf": [{"anyOf": leaves}] * 14 + [{"anyOf": last}]}}
+    assert schema_problems(schema) == []
+    assert schema_violations(schema, [1, 2]) == []
+    violations, elapsed = _timed(schema, [0] * 300_000)
+    assert "작업" in violations[-1] and elapsed < 5
+
+
+def test_budget_allows_ordinary_large_data():
+    schema = {"type": "array", "items": {"type": "object", "properties": {"v": {"type": "integer"}}}}
+    violations, elapsed = _timed(schema, [{"v": i} for i in range(100_000)])
+    assert violations == [] and elapsed < 5
