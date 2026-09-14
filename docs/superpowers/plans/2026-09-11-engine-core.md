@@ -2352,6 +2352,38 @@ git add services/engine/engine/nodes services/engine/tests/helpers.py services/e
 git commit -m "feat(engine): add node spec contract, registry and start/end/template nodes"
 ```
 
+> **Post-review note (Task 8, as implemented):** four review rounds changed this task substantially. The commits are `251c9e5`, `0900992`, `59069c1`, `4ec4f4d` and `61208a6`.
+>
+> **`engine/jsondata.py`** is shared by the LLM gateway, the nodes and later the validator.
+> - **Parsing.** `parse_json` accepts standard JSON only. It rejects NaN/Infinity, overflowing numbers, integers over 4300 digits, duplicate keys, NUL, lone surrogates and too-deep nesting.
+> - **Accepted schemas.** `schema_problems` limits tenant schemas to a subset:
+>   - Keywords: `type`, `properties`, `required`, `additionalProperties`, `items`, `anyOf`, `oneOf`, `enum`, `const`, numeric bounds, length/count bounds (at most 10,000), annotations, `format` and `x-*`.
+>   - Excluded: `$ref`, `pattern`, `uniqueItems` and everything else.
+>   - Size limits: at most 32,000 chars, depth 32, 256 subschemas, 16 branches, and 256 `enum`/`required` entries.
+>   - Measured reasons: a `pattern` took 48 s on 31 chars, `uniqueItems` took 78 s on 8,000 objects, and unresolvable `$ref`s raise errors.
+> - **Validation.** `schema_violations` is an in-house validator for that subset. It no longer uses the jsonschema library, which built every error and every failing branch's context and blew up to 20 s / 3.6 GB on accepted schemas.
+>   - It stops `anyOf`/`oneOf` early, returns at most 5 messages that never copy data, and looks up scalar `enum` values in a set.
+>   - All work is charged to `MAX_VALIDATION_STEPS` (1,000,000 steps, at most about 3 s). Running out raises `ValidationBudgetExceeded`.
+>   - A differential test against jsonschema on about 176K random cases found 0 mismatches.
+>
+> **Template target `"json"`** (`dsl/types.py`, `templates/env.py`, `templates/render.py`).
+> - In a JSON template each `{{ }}` inserts a JSON value, and the renderer parses the result. Data can therefore never add JSON structure.
+> - `TemplateNode` format `json` uses this target and never re-parses strings. The old re-parsing allowed injection through `{"a": "{{start.name}}"}`.
+> - Writing `"{{ x }}"` inside quotes is an error and comes with a hint.
+>
+> **Node changes.**
+> - Output names are checked with `fullmatch`.
+> - Start inputs are deep-copied.
+> - The registry rejects duplicate types.
+> - Root `anyOf`/`oneOf` is rejected in object schemas.
+> - `StartNode` maps an exhausted budget to `NODE_FAILED`, and the gateway maps it to `OUTPUT_TOO_LARGE`. Neither is retried or repaired.
+>
+> Suite: 319.
+>
+> **Carried into later tasks:**
+> - **Task 9:** the LLM node's `outputSchema` goes through `check_object_schema`. `outputSchema` must be a schema the tenant subset accepts before it is sent to Ollama as `format`.
+> - **Task 12:** the validator's `defaultOutput` check calls `schema_violations`, and must catch `ValidationBudgetExceeded` and report it as an `INVALID_POLICY` issue. Task 12 also adds `self` to `RESERVED_IDS` (see Task 4/5).
+
 ---
 
 ## Task 9: LLM and classifier nodes
