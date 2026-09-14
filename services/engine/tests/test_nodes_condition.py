@@ -1,5 +1,7 @@
 import pytest
+from pydantic import ValidationError
 
+from engine.errors import ErrorCode, NodeError
 from engine.nodes.condition import ConditionNode, evaluate
 from tests.helpers import make_ctx
 
@@ -69,3 +71,48 @@ def test_unary_ops_have_no_right_field():
     config = spec.parse_config({"conditions": [{"left": "{{a.b}}", "op": "is_empty"}]})
     assert [f.path for f in spec.template_fields(config)] == ["conditions.0.left"]
     assert spec.handles(config) == ["true", "false"]
+
+
+def test_contains_with_a_missing_needle_is_false_for_strings():
+    assert evaluate("contains", "abc", None) is False
+    assert evaluate("not_contains", "abc", None) is True
+    assert evaluate("contains", ["a", None], None) is True
+
+
+def test_contains_requires_a_right_operand():
+    with pytest.raises(ValidationError):
+        ConditionNode().parse_config({"conditions": [{"left": "{{a.b}}", "op": "contains"}]})
+
+
+@pytest.mark.parametrize(
+    ("op", "left", "right"),
+    [(">", "5", "3"), (">", None, 3), ("<", True, 2), ("contains", {"a": 1}, "a"), ("contains", 5, "5")],
+    ids=["strings", "null", "bool", "dict-container", "number-container"],
+)
+async def test_mistyped_operands_fail_as_type_mismatch(op, left, right):
+    with pytest.raises(TypeError):
+        evaluate(op, left, right)
+    spec = ConditionNode()
+    config = spec.parse_config({"conditions": [{"left": "{{a.b}}", "op": op, "right": "x"}]})
+    with pytest.raises(NodeError) as exc:
+        await spec.execute(make_ctx(), config, {"conditions.0.left": left, "conditions.0.right": right})
+    assert (exc.value.code, exc.value.retryable) == (ErrorCode.TYPE_MISMATCH, False)
+
+
+async def test_too_deep_values_fail_as_a_node_error():
+    deep: list = []
+    current = deep
+    for _ in range(5000):
+        current.append([])
+        current = current[0]
+    spec = ConditionNode()
+    config = spec.parse_config({"conditions": [{"left": "{{a.b}}", "op": "==", "right": "{{a.c}}"}]})
+    with pytest.raises(NodeError):
+        await spec.execute(make_ctx(), config, {"conditions.0.left": deep, "conditions.0.right": deep})
+
+
+@pytest.mark.parametrize("output", [{}, {"result": "true"}], ids=["missing", "not-bool"])
+def test_route_rejects_non_boolean_results(output):
+    spec = ConditionNode()
+    with pytest.raises(NodeError):
+        spec.route(spec.parse_config({"conditions": [{"left": "x", "op": "is_empty"}]}), output)
