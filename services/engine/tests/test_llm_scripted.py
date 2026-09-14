@@ -37,3 +37,18 @@ async def test_text_responses_are_streamed_to_token_sink():
 
     await ScriptedLLM(["토큰"]).chat(model="m", messages=MSG, on_token=sink)
     assert tokens == ["토큰"]
+
+
+async def test_structured_responses_are_copies_and_calls_record_streaming():
+    scripted = {"score": {"value": 1}}
+    llm = ScriptedLLM([scripted, "텍스트"])
+
+    async def sink(text: str) -> None:
+        return None
+
+    result = await llm.chat(model="m", messages=MSG)
+    result.data["score"]["value"] = 99
+    await llm.chat(model="m", messages=MSG, on_token=sink)
+
+    assert scripted == {"score": {"value": 1}}
+    assert [call["streamed"] for call in llm.calls] == [False, True]

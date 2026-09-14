@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from collections.abc import Callable
 from typing import Any
@@ -33,7 +34,13 @@ class ScriptedLLM:
         temperature: float = 0.7,
         on_token: TokenSink | None = None,
     ) -> ChatResult:
-        self.calls.append({"model": model, "messages": list(messages), "schema": schema, "temperature": temperature})
+        self.calls.append({
+            "model": model,
+            "messages": list(messages),
+            "schema": schema,
+            "temperature": temperature,
+            "streamed": on_token is not None,
+        })
         if self._delay:
             await asyncio.sleep(self._delay)
         if callable(self._script):
@@ -45,7 +52,8 @@ class ScriptedLLM:
         if isinstance(response, Exception):
             raise response
         if isinstance(response, dict):
-            return ChatResult(text=json.dumps(response, ensure_ascii=False), data=response)
+            data = copy.deepcopy(response)  # callers may mutate results; the script must stay intact
+            return ChatResult(text=json.dumps(data, ensure_ascii=False), data=data)
         if isinstance(response, str):
             response = ChatResult(text=response)
         if on_token is not None and response.data is None:

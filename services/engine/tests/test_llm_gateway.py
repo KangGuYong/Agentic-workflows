@@ -2,7 +2,7 @@ import pytest
 
 from engine.errors import ErrorCode, NodeError
 from engine.llm.base import ChatMessage, ChatResult
-from engine.llm.gateway import LLMGateway
+from engine.llm.gateway import MAX_ERROR_CHARS, LLMGateway
 
 SCHEMA = {"type": "object", "properties": {"score": {"type": "number"}}, "required": ["score"]}
 MSG = [ChatMessage("user", "평가해줘")]
@@ -69,3 +69,50 @@ async def test_non_standard_or_pathological_json_is_repaired():
 
     assert result.data == {"score": 5}
     assert len(raw.calls) == 4
+
+
+RECURSIVE_SCHEMA = {"$defs": {"n": {"type": "array", "items": {"$ref": "#/$defs/n"}}}, "$ref": "#/$defs/n"}
+
+
+async def test_output_too_deep_to_validate_is_repaired():
+    raw = FakeRaw(["[" * 600 + "]" * 600, "[]"])
+
+    result = await LLMGateway(raw).chat(model="m", messages=MSG, schema=RECURSIVE_SCHEMA)
+
+    assert result.data == []
+    assert "중첩" in raw.calls[1]["messages"][-1].content
+
+
+async def test_non_finite_numbers_are_repaired():
+    raw = FakeRaw(['{"score": 1e400}', '{"score": -1e400}', '{"score": 2.5}'])
+    result = await LLMGateway(raw).chat(model="m", messages=MSG, schema=SCHEMA)
+    assert result.data == {"score": 2.5}
+
+
+async def test_validation_feedback_is_clipped():
+    schema = {"type": "object", "properties": {"score": {"type": "string", "maxLength": 5}}}
+    huge = '{"score": "' + "x" * 1_000_000 + '"}'
+    raw = FakeRaw([huge, huge, huge])
+
+    with pytest.raises(NodeError) as exc:
+        await LLMGateway(raw).chat(model="m", messages=MSG, schema=schema)
+
+    assert len(raw.calls[1]["messages"][-1].content) <= MAX_ERROR_CHARS + 200
+    assert len(exc.value.message) <= MAX_ERROR_CHARS + 50
+
+
+async def test_zero_repairs_means_one_attempt():
+    raw = FakeRaw(["x"])
+    with pytest.raises(NodeError):
+        await LLMGateway(raw, max_repairs=0).chat(model="m", messages=MSG, schema=SCHEMA)
+    assert len(raw.calls) == 1
+
+
+async def test_repair_calls_are_never_streamed():
+    raw = FakeRaw(["x", '{"score": 1}'])
+
+    async def sink(text: str) -> None:
+        return None
+
+    await LLMGateway(raw).chat(model="m", messages=MSG, schema=SCHEMA, on_token=sink)
+    assert [call["on_token"] for call in raw.calls] == [None, None]
