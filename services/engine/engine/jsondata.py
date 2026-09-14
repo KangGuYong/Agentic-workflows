@@ -5,8 +5,10 @@ regular expressions or `uniqueItems`) with bounded size, depth, fan-out and leng
 are validated by the subset validator below instead of a general JSON Schema library: `anyOf`/`oneOf`
 stop at the deciding branch, at most MAX_VIOLATIONS messages are collected, messages never copy the
 data, data is only descended as deep as the schema, and scalar enum options are looked up in a set.
-Every check is charged to a step budget (MAX_VALIDATION_STEPS), so one validation costs bounded time
-whatever the accepted schema, and O(depth) memory.
+Every validation call and every enum/const/required/property scan is charged to a step budget
+(MAX_VALIDATION_STEPS), so one validation costs bounded time whatever the accepted schema (measured at
+0.5-3.2 microseconds per step), and O(depth) memory. Wide unions spend steps fastest: data whose items
+match late in a 16-branch anyOf exhausts the default budget at about 0.4 MB.
 """
 from __future__ import annotations
 
@@ -24,7 +26,7 @@ MAX_SCHEMA_BRANCHES = 16  # entries of one anyOf/oneOf
 MAX_SCHEMA_LIST = 256  # entries of one enum or required list (duplicates allowed in enum)
 MAX_SCHEMA_BOUND = 10_000  # length/count bounds; Ollama expands them into grammar rules
 MAX_SCHEMA_PROBLEMS = 10
-MAX_VALIDATION_STEPS = 1_000_000  # checks in one validation, about 1-2 s of pure Python
+MAX_VALIDATION_STEPS = 1_000_000  # work in one validation: at most about 3 s of pure Python
 
 _TYPES = frozenset({"string", "number", "integer", "boolean", "object", "array", "null"})
 _ANNOTATIONS = frozenset({"title", "description", "default", "examples", "$comment", "format"})
@@ -279,11 +281,16 @@ class _TooMuchWork(Exception):
     """The validation step budget ran out."""
 
 
-class _Validator:
-    """One validation run: collects messages, tracks the data path, and charges every check to a step budget."""
+class ValidationBudgetExceeded(Exception):
+    """Validating a value would take more than the step budget (the value is too large or complex)."""
 
-    def __init__(self, limit: int) -> None:
+
+class _Validator:
+    """One validation run: collects messages, tracks the data path, and charges its work to a step budget."""
+
+    def __init__(self, limit: int, max_steps: int) -> None:
         self.limit = limit
+        self.max_steps = max_steps
         self.found: list[str] = []
         self.path: list[str | int] = []
         self.steps = 0
@@ -292,7 +299,7 @@ class _Validator:
 
     def charge(self, steps: int) -> None:
         self.steps += steps
-        if self.steps > MAX_VALIDATION_STEPS:
+        if self.steps > self.max_steps:
             raise _TooMuchWork
 
     def fail(self, message: str) -> None:
@@ -420,15 +427,15 @@ class _Validator:
                         path.pop()
 
 
-def schema_violations(schema: dict[str, Any], value: Any) -> list[str]:
+def schema_violations(schema: dict[str, Any], value: Any, *, max_steps: int = MAX_VALIDATION_STEPS) -> list[str]:
     """Up to MAX_VIOLATIONS short violations of `value` against a schema accepted by `schema_problems`
-    ([] when `value` is valid). Validation that needs more than MAX_VALIDATION_STEPS checks stops with a
-    violation instead of blocking the caller."""
-    validator = _Validator(MAX_VIOLATIONS)
+    ([] when `value` is valid). Raises ValidationBudgetExceeded instead of blocking the caller when the
+    check needs more than `max_steps` steps; that is not a violation the value's author can fix."""
+    validator = _Validator(MAX_VIOLATIONS, max_steps)
     try:
         validator.validate(schema, value)
     except _Enough:
         pass
     except _TooMuchWork:
-        validator.found.append(f"(root): 검증할 작업이 너무 많습니다 (최대 {MAX_VALIDATION_STEPS}단계)")
+        raise ValidationBudgetExceeded("값이 너무 크거나 복잡해서 스키마 검증을 끝낼 수 없습니다") from None
     return validator.found

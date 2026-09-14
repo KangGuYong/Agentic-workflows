@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from engine.errors import ErrorCode, NodeError
+from engine.jsondata import ValidationBudgetExceeded
 from engine.nodes.base import (
     NodeContext,
     NodeResult,
@@ -39,7 +40,10 @@ class StartNode(NodeSpec):
         return config.inputs
 
     async def execute(self, ctx: NodeContext, config: StartConfig, rendered: dict[str, Any]) -> NodeResult:
-        violations = schema_violations(config.inputs, ctx.inputs)
+        try:
+            violations = schema_violations(config.inputs, ctx.inputs)
+        except ValidationBudgetExceeded as exc:
+            raise NodeError(ErrorCode.NODE_FAILED, f"실행 입력을 검증할 수 없습니다: {exc}", retryable=False) from exc
         if violations:
             raise NodeError(
                 ErrorCode.TYPE_MISMATCH,

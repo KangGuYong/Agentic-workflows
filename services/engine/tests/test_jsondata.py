@@ -13,6 +13,7 @@ from engine.jsondata import (
     MAX_SCHEMA_NODES,
     MAX_SCHEMA_PROBLEMS,
     MAX_VIOLATIONS,
+    ValidationBudgetExceeded,
     clip,
     parse_json,
     schema_problems,
@@ -297,31 +298,42 @@ def test_enum_depth_is_checked_per_option():
     assert schema_problems({"enum": [nested(MAX_SCHEMA_DEPTH + 1)]}) != []
 
 
-def _timed(schema, value):
-    started = time.perf_counter()
-    violations = schema_violations(schema, value)
-    return violations, time.perf_counter() - started
+@pytest.mark.parametrize(
+    ("schema", "value", "steps"),
+    [
+        ({"type": "array", "items": {"type": "integer"}}, [1] * 9, 10),  # one per validate call
+        ({"type": "array", "items": {"enum": [[0], [1], [2]]}}, [[2]], 8),  # container options by size
+        ({"const": [1, 2]}, [1, 2], 4),
+        ({"type": "object", "required": ["a", "b"]}, {"a": 1, "b": 2}, 3),
+        ({"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "integer"}]}}, [1], 4),
+    ],
+    ids=["calls", "container-enum", "const", "required", "branches"],
+)
+def test_validation_work_is_charged_exactly(schema, value, steps):
+    assert schema_violations(schema, value, max_steps=steps) == []
+    with pytest.raises(ValidationBudgetExceeded):
+        schema_violations(schema, value, max_steps=steps - 1)
 
 
-def test_container_enum_options_are_charged_to_the_budget():
-    schema = {"type": "array", "items": {"enum": [[k] for k in range(MAX_SCHEMA_LIST)]}}
-    assert schema_problems(schema) == []
-    assert schema_violations(schema, [[0], [255]]) == []
-    violations, elapsed = _timed(schema, [[MAX_SCHEMA_LIST - 1]] * 200_000)
-    assert "작업" in violations[-1] and elapsed < 5
+def test_budget_exhaustion_is_not_reported_as_a_violation():
+    schema = {"type": "object", "properties": {"a": {"type": "string"}, "b": {"anyOf": [{"type": "null"}]}}}
+    with pytest.raises(ValidationBudgetExceeded):
+        schema_violations(schema, {"a": 1, "b": [0]}, max_steps=3)  # the earlier violation is discarded
 
 
-def test_nested_branches_are_charged_to_the_budget():
+def test_default_budget_bounds_pathological_accepted_schemas():
     leaves = [{"type": "string"}] * 15
     last = [{"type": "string"}] * 14 + [{"type": "integer"}]
-    schema = {"type": "array", "items": {"anyOf": [{"anyOf": leaves}] * 14 + [{"anyOf": last}]}}
-    assert schema_problems(schema) == []
-    assert schema_violations(schema, [1, 2]) == []
-    violations, elapsed = _timed(schema, [0] * 300_000)
-    assert "작업" in violations[-1] and elapsed < 5
+    nested = {"type": "array", "items": {"anyOf": [{"anyOf": leaves}] * 14 + [{"anyOf": last}]}}
+    container_enum = {"type": "array", "items": {"enum": [[k] for k in range(MAX_SCHEMA_LIST)]}}
+    for schema, value in [(nested, [0] * 300_000), (container_enum, [[MAX_SCHEMA_LIST - 1]] * 200_000)]:
+        assert schema_problems(schema) == []
+        started = time.perf_counter()
+        with pytest.raises(ValidationBudgetExceeded):
+            schema_violations(schema, value)
+        assert time.perf_counter() - started < 10  # about 1-2 s; unbudgeted this took minutes
 
 
-def test_budget_allows_ordinary_large_data():
+def test_default_budget_allows_ordinary_large_data():
     schema = {"type": "array", "items": {"type": "object", "properties": {"v": {"type": "integer"}}}}
-    violations, elapsed = _timed(schema, [{"v": i} for i in range(100_000)])
-    assert violations == [] and elapsed < 5
+    assert schema_violations(schema, [{"v": i} for i in range(100_000)]) == []

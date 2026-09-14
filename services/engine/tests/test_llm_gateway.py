@@ -1,6 +1,7 @@
 import pytest
 
 from engine.errors import ErrorCode, NodeError
+from engine.jsondata import ValidationBudgetExceeded
 from engine.llm.base import ChatMessage, ChatResult
 from engine.llm.gateway import MAX_ECHO_CHARS, MAX_ERROR_CHARS, LLMGateway
 
@@ -122,3 +123,14 @@ async def test_repair_conversation_stays_bounded():
 
     last_prompt = raw.calls[2]["messages"]
     assert sum(len(m.content) for m in last_prompt) <= 2 * (MAX_ECHO_CHARS + MAX_ERROR_CHARS + 200) + len(MSG[0].content)
+
+
+async def test_validation_budget_exhaustion_is_not_repaired(monkeypatch):
+    def too_expensive(schema, value):
+        raise ValidationBudgetExceeded("너무 복잡")
+
+    monkeypatch.setattr("engine.llm.gateway.schema_violations", too_expensive)
+    raw = FakeRaw(['{"score": 1}', '{"score": 2}'])
+    with pytest.raises(NodeError) as exc:
+        await LLMGateway(raw).chat(model="m", messages=MSG, schema=SCHEMA)
+    assert (exc.value.code, exc.value.retryable, len(raw.calls)) == (ErrorCode.OUTPUT_TOO_LARGE, False, 1)

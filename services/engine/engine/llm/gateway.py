@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from engine.errors import ErrorCode, NodeError
-from engine.jsondata import clip, parse_json, schema_violations
+from engine.jsondata import ValidationBudgetExceeded, clip, parse_json, schema_violations
 from engine.llm.base import ChatMessage, ChatResult, RawLLM, TokenSink
 
 REPAIR_PROMPT = (
@@ -20,7 +20,10 @@ def _check(text: str, schema: dict[str, Any]) -> tuple[Any, str | None]:
         data = parse_json(text)
     except ValueError as exc:
         return None, clip(f"JSON이 아닙니다 ({exc})", MAX_ERROR_CHARS)
-    violations = schema_violations(schema, data)
+    try:
+        violations = schema_violations(schema, data)
+    except ValidationBudgetExceeded as exc:  # the model cannot repair this, so do not spend repair calls on it
+        raise NodeError(ErrorCode.OUTPUT_TOO_LARGE, f"구조화 출력 검증 실패: {exc}", retryable=False) from exc
     if violations:
         return None, clip("; ".join(violations), MAX_ERROR_CHARS)
     return data, None

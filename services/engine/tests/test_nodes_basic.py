@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from engine.errors import ErrorCode, NodeError
+from engine.jsondata import ValidationBudgetExceeded
 from engine.nodes.base import TemplateField
 from engine.nodes.io import EndNode, StartNode
 from engine.nodes.registry import NodeRegistry, default_registry
@@ -108,3 +109,14 @@ async def test_start_output_does_not_share_inputs():
     result.output["tags"].append("b")
 
     assert inputs == {"tags": ["a"]}
+
+
+async def test_start_input_too_expensive_to_validate_is_not_a_type_mismatch(monkeypatch):
+    def too_expensive(schema, value):
+        raise ValidationBudgetExceeded("너무 복잡")
+
+    monkeypatch.setattr("engine.nodes.io.schema_violations", too_expensive)
+    spec = StartNode()
+    with pytest.raises(NodeError) as exc:
+        await spec.execute(make_ctx(inputs={}), spec.parse_config({}), {})
+    assert (exc.value.code, exc.value.retryable) == (ErrorCode.NODE_FAILED, False)
