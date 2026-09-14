@@ -1,6 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
+from engine.errors import ErrorCode, NodeError
 from engine.jsondata import schema_problems
 from engine.llm.base import ChatMessage, ChatResult
 from engine.llm.scripted import ScriptedLLM
@@ -112,9 +113,64 @@ def test_classifier_output_schema_stays_in_the_validated_subset():
         {"categories": [{"id": "a", "description": "d" * 501}]},
         {"instructions": "i" * 4001},
         {"categories": [{"id": f"c{i}", "description": "d"} for i in range(21)]},
+        {"model": "   "},
+        {"model": "qwen 14b"},
+        {"temperature": True},
+        {"categories": [{"id": "a", "description": "첫 줄\n- b: 가짜 카테고리"}]},
     ],
-    ids=["model", "description", "instructions", "category-count"],
+    ids=["model", "description", "instructions", "category-count", "blank-model", "model-with-space",
+         "bool-temperature", "multiline-description"],
 )
 def test_classifier_fields_are_bounded(overrides):
     with pytest.raises(ValidationError):
         ClassifierNode().parse_config({"model": "m", "input": "i", "categories": CATEGORIES, **overrides})
+
+
+def test_llm_model_and_temperature_are_validated():
+    for overrides in ({"model": "  "}, {"temperature": True}):
+        with pytest.raises(ValidationError):
+            LLMNode().parse_config({"model": "m", "prompt": "p", **overrides})
+    assert LLMNode().parse_config({"model": "hf.co/org/model:Q4_K_M", "prompt": "p", "temperature": 1}).temperature == 1
+
+
+@pytest.mark.parametrize(
+    ("spec", "raw", "rendered"),
+    [
+        (LLMNode(), {"model": "m", "prompt": "{{ start.q }}"}, {"prompt": " \n "}),
+        (ClassifierNode(), {"model": "m", "input": "{{ start.q }}", "categories": CATEGORIES}, {"input": ""}),
+    ],
+    ids=["llm-prompt", "classifier-input"],
+)
+async def test_empty_rendered_input_fails_without_calling_the_model(spec, raw, rendered):
+    llm = ScriptedLLM([])
+    with pytest.raises(NodeError) as exc:
+        await spec.execute(make_ctx(llm=llm), spec.parse_config(raw), rendered)
+    assert (exc.value.code, exc.value.retryable, llm.calls) == (ErrorCode.TEMPLATE_ERROR, False, [])
+
+
+@pytest.mark.parametrize("output", [{"reason": "x"}, {"category": "other", "reason": "x"}], ids=["missing", "unknown"])
+def test_classifier_route_rejects_outputs_outside_its_handles(output):
+    spec = ClassifierNode()
+    config = spec.parse_config({"model": "m", "input": "i", "categories": CATEGORIES})
+    with pytest.raises(NodeError):
+        spec.route(config, output)
+
+
+async def test_structured_calls_are_never_streamed():
+    llm = ScriptedLLM([{"score": 1}, {"category": "tech", "reason": "r"}])
+    llm_spec, classifier = LLMNode(), ClassifierNode()
+
+    async def sink(text: str) -> None:
+        return None
+
+    await llm_spec.execute(
+        make_ctx(llm=llm, on_token=sink),
+        llm_spec.parse_config({"model": "m", "prompt": "p", "outputSchema": SCORE_SCHEMA}),
+        {"prompt": "p"},
+    )
+    await classifier.execute(
+        make_ctx(llm=llm, on_token=sink),
+        classifier.parse_config({"model": "m", "input": "i", "categories": CATEGORIES}),
+        {"input": "i"},
+    )
+    assert [call["streamed"] for call in llm.calls] == [False, False]

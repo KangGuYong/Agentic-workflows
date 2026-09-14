@@ -14,6 +14,7 @@ from engine.jsondata import schema_violations as schema_violations  # re-exporte
 from engine.llm.base import LLMClient, TokenSink
 
 TEMPLATE = {"x-template": True}  # json_schema_extra marker: the editor renders a template input
+MODEL_NAME = r"^\S+$"  # Ollama model names such as "qwen2.5:14b" contain no whitespace
 TEXT_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"text": {"type": "string"}},

@@ -5,9 +5,11 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from engine.dsl.models import Policy, RetrySpec
+from engine.errors import ErrorCode, NodeError
 from engine.llm.base import ChatMessage
-from engine.nodes.base import TEMPLATE, NodeContext, NodeResult, NodeSpec, TemplateField, Usage
+from engine.nodes.base import MODEL_NAME, TEMPLATE, NodeContext, NodeResult, NodeSpec, TemplateField, Usage
 
+MAX_REASON_CHARS = 500
 SYSTEM_PROMPT = (
     "입력을 아래 카테고리 중 하나로 분류하세요. 어느 카테고리에도 맞지 않으면 \"default\"를 고르세요.\n"
     "카테고리:\n{categories}\n{instructions}"
@@ -18,16 +20,16 @@ SYSTEM_PROMPT = (
 class Category(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
-    description: str = Field(min_length=1, max_length=500)
+    description: str = Field(min_length=1, max_length=500, pattern=r"^[^\r\n]+$")  # one line per category
 
 
 class ClassifierConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    model: str = Field(min_length=1, max_length=200)
+    model: str = Field(max_length=200, pattern=MODEL_NAME)
     input: str = Field(min_length=1, json_schema_extra=TEMPLATE)
     categories: list[Category] = Field(min_length=1, max_length=20)
     instructions: str = Field("", max_length=4000)  # goes into a small model's system prompt
-    temperature: float = Field(0.0, ge=0, le=2)
+    temperature: float = Field(0.0, ge=0, le=2, strict=True)
 
     @model_validator(mode="after")
     def _unique_ids(self) -> ClassifierConfig:
@@ -54,7 +56,10 @@ class ClassifierNode(NodeSpec):
         return [TemplateField("input", config.input, "string")]
 
     def route(self, config: ClassifierConfig, output: dict[str, Any]) -> str:
-        return output["category"]
+        category = output.get("category")
+        if category not in self.handles(config):  # holds for gateway-validated output; guards any other client
+            raise NodeError(ErrorCode.NODE_FAILED, f"알 수 없는 분류 결과입니다: {str(category)[:40]}", retryable=False)
+        return category
 
     def fallback_output(self, config: ClassifierConfig) -> dict[str, Any]:
         return {"category": "default", "reason": "error"}
@@ -64,13 +69,15 @@ class ClassifierNode(NodeSpec):
             "type": "object",
             "properties": {
                 "category": {"type": "string", "enum": self.handles(config)},
-                "reason": {"type": "string"},
+                "reason": {"type": "string", "maxLength": MAX_REASON_CHARS},
             },
             "required": ["category", "reason"],
             "additionalProperties": False,
         }
 
     async def execute(self, ctx: NodeContext, config: ClassifierConfig, rendered: dict[str, Any]) -> NodeResult:
+        if not rendered["input"].strip():
+            raise NodeError(ErrorCode.TEMPLATE_ERROR, "분류할 입력이 비어 있습니다", retryable=False)
         categories = "\n".join(f"- {c.id}: {c.description}" for c in config.categories)
         instructions = f"{config.instructions}\n" if config.instructions else ""
         result = await ctx.llm.chat(

@@ -5,8 +5,10 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from engine.dsl.models import Policy, RetrySpec
+from engine.errors import ErrorCode, NodeError
 from engine.llm.base import ChatMessage
 from engine.nodes.base import (
+    MODEL_NAME,
     TEMPLATE,
     TEXT_OUTPUT_SCHEMA,
     NodeContext,
@@ -20,10 +22,10 @@ from engine.nodes.base import (
 
 class LLMConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    model: str = Field(min_length=1, max_length=200)
+    model: str = Field(max_length=200, pattern=MODEL_NAME)
     system: str = Field("", json_schema_extra=TEMPLATE)
     prompt: str = Field(min_length=1, json_schema_extra=TEMPLATE)
-    temperature: float = Field(0.7, ge=0, le=2)
+    temperature: float = Field(0.7, ge=0, le=2, strict=True)
     outputSchema: dict[str, Any] | None = None
 
     @field_validator("outputSchema")
@@ -49,6 +51,8 @@ class LLMNode(NodeSpec):
         return config.outputSchema or TEXT_OUTPUT_SCHEMA
 
     async def execute(self, ctx: NodeContext, config: LLMConfig, rendered: dict[str, Any]) -> NodeResult:
+        if not rendered["prompt"].strip():
+            raise NodeError(ErrorCode.TEMPLATE_ERROR, "프롬프트가 비어 있습니다", retryable=False)
         messages = []
         if config.system and rendered["system"].strip():  # a system template may render to nothing
             messages.append(ChatMessage("system", rendered["system"]))
