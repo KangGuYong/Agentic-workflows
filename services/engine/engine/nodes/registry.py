@@ -19,7 +19,9 @@ class NodeRegistry:
 
 
 def default_registry() -> NodeRegistry:
+    from engine.nodes.classifier import ClassifierNode
     from engine.nodes.io import EndNode, StartNode
+    from engine.nodes.llm import LLMNode
     from engine.nodes.template import TemplateNode
 
-    return NodeRegistry([StartNode(), EndNode(), TemplateNode()])
+    return NodeRegistry([StartNode(), EndNode(), TemplateNode(), LLMNode(), ClassifierNode()])
