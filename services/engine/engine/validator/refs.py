@@ -15,18 +15,34 @@ MAX_LABEL_CHARS = 80  # tenant-written references and literals quoted in message
 
 
 def compute_before(graph: Graph) -> dict[str, frozenset[str]]:
-    """Nodes guaranteed to have run before each node (spec 4.4): ∩ over predecessors, ∪ for merge."""
-    before: dict[str, frozenset[str]] = {}
-    for node_id in graph.order:
-        preds = [edge.source for edge in graph.incoming[node_id]]
-        if not preds:
-            before[node_id] = frozenset()
-            continue
-        sets = [before[pred] | {pred} for pred in preds]
-        if graph.nodes[node_id].spec.type == "merge":
-            before[node_id] = frozenset().union(*sets)
-        else:
-            before[node_id] = frozenset.intersection(*sets)
+    """Nodes guaranteed to have run before each node (spec 4.4): ∩ over predecessors, ∪ for merge.
+
+    Back-edges count as predecessors too: in a loop that starts at its condition (start → condition →
+    body → condition), the body's only predecessor is the condition, through the back-edge. Solved as a
+    greatest fixpoint (like dominators), so loops converge. Merges keep the union rule; phase 2 keeps
+    them out of loops, so their predecessors are forward edges only. `graph.order` is a topological order
+    of forward edges, not necessarily the order nodes first run.
+    """
+    predecessors: dict[str, list[str]] = {node_id: [] for node_id in graph.reachable}
+    for edge in graph.edges:
+        if edge.source in graph.reachable:
+            predecessors[edge.target].append(edge.source)
+    everything = frozenset(graph.reachable)
+    before = {node_id: frozenset() if node_id == "start" else everything for node_id in graph.reachable}
+    changed = True
+    while changed:
+        changed = False
+        for node_id in graph.order:
+            if node_id == "start":
+                continue
+            sets = [before[pred] | {pred} for pred in predecessors[node_id]]
+            if graph.nodes[node_id].spec.type == "merge":
+                value = frozenset().union(*sets)
+            else:
+                value = frozenset.intersection(*sets) if sets else frozenset()
+            if value != before[node_id]:
+                before[node_id] = value
+                changed = True
     return before
 
 

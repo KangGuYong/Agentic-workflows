@@ -193,3 +193,30 @@ def test_analyze_shares_one_schema_step_budget(monkeypatch):
     monkeypatch.setattr(facade, "check_structure", spy)
     analyze(chain("p"))
     assert len(budgets) == 1 and budgets[0] is not None
+
+
+def while_loop(llm_prompt: str, left: str) -> dict:
+    return {
+        "nodes": [
+            START,
+            {"id": "condition_1", "type": "condition",
+             "config": {"conditions": [{"left": left, "op": "is_empty"}]}},
+            {"id": "llm_1", "type": "llm", "config": {"model": "m", "prompt": llm_prompt}},
+            {"id": "end", "type": "end"},
+        ],
+        "edges": [
+            {"id": "e1", "source": "start", "target": "condition_1"},
+            {"id": "e2", "source": "condition_1", "sourceHandle": "true", "target": "end"},
+            {"id": "back", "source": "condition_1", "sourceHandle": "false", "target": "llm_1", "maxIterations": 2},
+            {"id": "e3", "source": "llm_1", "target": "condition_1"},
+        ],
+    }
+
+
+def test_loop_that_starts_at_its_condition_guarantees_what_ran_before_the_condition():
+    assert validate(while_loop("{{start.topic}} 다시 {{condition_1.result}}", "{{start.topic}}")) == []
+
+
+def test_loop_body_output_is_not_guaranteed_at_the_condition():
+    assert ("error", "REF_NOT_GUARANTEED") in _codes(while_loop("p", "{{llm_1.text}}"))
+    assert validate(while_loop("p", "{{llm_1.text | default('')}}")) == []
