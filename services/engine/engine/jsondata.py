@@ -47,7 +47,8 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _kind(value: Any) -> str:
+def json_kind(value: Any) -> str:
+    """The JSON type name of `value` ("number" for int and float alike)."""
     if value is None:
         return "null"
     if isinstance(value, bool):
@@ -84,7 +85,8 @@ def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _check_text(value: Any) -> None:
+def check_text(value: Any) -> None:
+    """Raise ValueError if any string or key in the JSON data `value` holds NUL or a lone surrogate."""
     stack = [value]
     while stack:
         item = stack.pop()
@@ -109,7 +111,7 @@ def parse_json(text: str) -> Any:
         raise ValueError(f"{exc.msg} ({exc.lineno}행 {exc.colno}열)") from None
     except RecursionError:
         raise ValueError("JSON 중첩이 너무 깊습니다") from None
-    _check_text(value)
+    check_text(value)
     return value
 
 
@@ -349,7 +351,7 @@ class _Validator:
         if declared is not None:
             names = (declared,) if isinstance(declared, str) else declared
             if not any(_is_type(value, name) for name in names):
-                self.fail(f"{' 또는 '.join(names)} 타입이어야 하지만 {_kind(value)} 값입니다")
+                self.fail(f"{' 또는 '.join(names)} 타입이어야 하지만 {json_kind(value)} 값입니다")
                 return  # the remaining keywords would only restate the mismatch
         if "enum" in schema and not self.enum_contains(schema["enum"], value):
             self.fail("허용된 값 중 하나여야 합니다")
