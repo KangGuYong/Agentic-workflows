@@ -5983,6 +5983,18 @@ git add services/engine/tests/golden services/engine/tests/test_golden_patterns.
 git commit -m "test(engine): golden pattern flows and recovery scenarios"
 ```
 
+> **Post-review note (Task 18, as implemented):** commit `d9dc140`.
+>
+> **Deviations.**
+> - The HITL golden resume sends `{"nodeId": "human_approval_1", "execIndex": 1, **answer}`, because Task 17 made `execute_run` require the approval's target.
+> - Added `test_a_loop_exit_can_fan_out_and_merges_once` (exit on `true` and exit when exhausted) and `test_a_condition_self_loop_stops_at_its_limit`.
+>
+> **Mutation check.** The tests catch a router firing two branches, loop counters that reset, a retry that ignores the checkpoint, and a replayed approval that records a second attempt.
+>
+> **Not covered.** No flow reaches `MergeNode`'s missing-predecessor guard, because both merge predecessors always finish in the same superstep. Add a direct unit test if routing into merges changes.
+>
+> Suite: 631.
+
 ---
 
 ## Task 19: Full verification
@@ -6005,6 +6017,8 @@ git commit -m "chore(engine): lint fixes"
 ```
 
 (Skip the commit if there is nothing to commit.)
+
+> **Verification (Task 19):** at `d9dc140`, `uv run pytest -q` reports 631 passed, with no warnings (also clean under `-W error::RuntimeWarning`), and `uv run ruff check .` reports `All checks passed!`. No lint fixes were needed. The coverage table below still holds.
 
 ---
 
