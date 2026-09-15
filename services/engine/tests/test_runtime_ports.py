@@ -48,6 +48,7 @@ async def test_recorder_rejects_a_duplicate_attempt():
     await recorder.node_started("llm_1", 1, 1, None)
     with pytest.raises(DuplicateAttempt):
         await recorder.node_started("llm_1", 1, 1, None)
+    assert issubclass(DuplicateAttempt, LeaseLost)  # another worker owns the run: stop, never a node error
 
 
 async def test_recorder_stores_json_copies_and_rejects_other_values():
@@ -58,6 +59,8 @@ async def test_recorder_stores_json_copies_and_rejects_other_values():
     assert recorder.for_node("llm_1")[0].input == {"prompt": ["a"]}
     with pytest.raises((TypeError, ValueError)):
         await recorder.node_succeeded("llm_1", 1, 1, {"x": float("nan")}, Usage(), defaulted=False, meta={})
+    record = recorder.for_node("llm_1")[0]
+    assert (record.status, record.output, len(recorder.events)) == ("running", None, 1)  # a rejected write changes nothing
     with pytest.raises(TypeError):
         await recorder.node_started("llm_2", 1, 1, {"x": {1, 2}})
 

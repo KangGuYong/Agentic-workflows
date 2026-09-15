@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from engine.errors import LeaseLost
 from engine.nodes.base import Usage
 
 
@@ -21,8 +22,9 @@ class NodeRunRecord:
     waited: bool = False  # this attempt recorded node_waiting at some point, even if it has finished since
 
 
-class DuplicateAttempt(Exception):
-    """node_started for an attempt that already exists: another worker owns the run (Postgres unique key)."""
+class DuplicateAttempt(LeaseLost):
+    """node_started for an attempt that already exists: another worker owns the run (Postgres unique key).
+    A LeaseLost, so the node wrapper stops instead of treating it as a node error."""
 
 
 class Recorder(Protocol):
@@ -89,9 +91,10 @@ class InMemoryRecorder:
             raise KeyError((node_id, exec_index, attempt))
         return record
 
-    def _emit(self, event_type: str, node_id: str, exec_index: int, attempt: int | None, **payload: Any) -> None:
+    @staticmethod
+    def _event(event_type: str, node_id: str, exec_index: int, attempt: int | None, **payload: Any) -> dict[str, Any]:
         event = {"type": event_type, "nodeId": node_id, "execIndex": exec_index, "attempt": attempt}
-        self.events.append({**event, **_stored(payload)})
+        return {**event, **_stored(payload)}
 
     async def attempts_so_far(self, node_id: str, exec_index: int) -> int:
         return sum(1 for r in self.records if r.node_id == node_id and r.exec_index == exec_index)
@@ -100,37 +103,43 @@ class InMemoryRecorder:
         attempts = [r.attempt for r in self.records if (r.node_id, r.exec_index) == (node_id, exec_index) and r.waited]
         return max(attempts, default=None)
 
+    # Each write builds every stored value first and changes the record only when all of them are JSON,
+    # like a Postgres UPDATE that either applies completely or rolls back.
+
     async def node_started(self, node_id: str, exec_index: int, attempt: int, input: dict[str, Any] | None) -> None:
         if self._find(node_id, exec_index, attempt) is not None:
             raise DuplicateAttempt((node_id, exec_index, attempt))
-        self.records.append(NodeRunRecord(node_id, exec_index, attempt, "running", input=_stored(input)))
-        self._emit("node_started", node_id, exec_index, attempt)
+        record = NodeRunRecord(node_id, exec_index, attempt, "running", input=_stored(input))
+        event = self._event("node_started", node_id, exec_index, attempt)
+        self.records.append(record)
+        self.events.append(event)
 
     async def node_succeeded(
         self, node_id: str, exec_index: int, attempt: int, output: dict[str, Any], usage: Usage,
         *, defaulted: bool, meta: dict[str, Any],
     ) -> None:
         record = self._get(node_id, exec_index, attempt)
+        stored_output, stored_meta = _stored(output), _stored(meta)
+        event = self._event("node_finished", node_id, exec_index, attempt, defaulted=defaulted, **meta)
         record.status = "defaulted" if defaulted else "succeeded"
-        record.output = _stored(output)
-        record.usage = usage
-        record.meta = _stored(meta)
-        self._emit("node_finished", node_id, exec_index, attempt, defaulted=defaulted, **meta)
+        record.output, record.usage, record.meta = stored_output, usage, stored_meta
+        self.events.append(event)
 
     async def node_failed(
         self, node_id: str, exec_index: int, attempt: int, error: dict[str, Any], *, will_retry: bool
     ) -> None:
         record = self._get(node_id, exec_index, attempt)
-        record.status = "failed"
-        record.error = _stored(error)
-        self._emit("node_failed", node_id, exec_index, attempt, error=error, willRetry=will_retry)
+        stored_error = _stored(error)
+        event = self._event("node_failed", node_id, exec_index, attempt, error=error, willRetry=will_retry)
+        record.status, record.error = "failed", stored_error
+        self.events.append(event)
 
     async def node_waiting(self, node_id: str, exec_index: int, attempt: int, payload: dict[str, Any]) -> None:
         record = self._get(node_id, exec_index, attempt)
-        record.status = "waiting"
-        record.waited = True
-        record.meta = {"waiting": _stored(payload)}
-        self._emit("node_waiting", node_id, exec_index, attempt, payload=payload)
+        stored_payload = _stored(payload)
+        event = self._event("node_waiting", node_id, exec_index, attempt, payload=payload)
+        record.status, record.waited, record.meta = "waiting", True, {"waiting": stored_payload}
+        self.events.append(event)
 
     async def node_token(self, node_id: str, exec_index: int, text: str) -> None:
-        self._emit("node_token", node_id, exec_index, None, text=text)
+        self.events.append(self._event("node_token", node_id, exec_index, None, text=text))
