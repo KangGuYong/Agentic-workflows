@@ -5,8 +5,9 @@ import asyncio
 import copy
 import json
 import logging
+from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 from langgraph.errors import GraphBubbleUp
 from langgraph.runtime import Runtime
@@ -26,6 +27,7 @@ MAX_OUTPUT_BYTES = 1_000_000
 CONTROL_FLOW = (GraphBubbleUp, RunCancelled, EngineFault)  # never node errors: they end or pause the node call
 
 log = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -96,26 +98,30 @@ def _fallback_output(plan: NodePlan) -> dict[str, Any] | None:
     return plan.spec.fallback_output(plan.config)
 
 
-async def _recorded(write: Any) -> None:
-    """Await a recorder write; an infrastructure failure becomes EngineFault, never a node error."""
+async def _recorded(call: Awaitable[T]) -> T:
+    """Await a recorder read or write; an infrastructure failure becomes EngineFault, never a node error."""
     try:
-        await write
+        return await call
     except RunCancelled:
         raise
     except Exception as exc:
-        raise EngineFault(f"recorder write failed: {type(exc).__name__}") from exc
+        raise EngineFault(f"recorder call failed: {type(exc).__name__}") from exc
 
 
 def _context(
     plan: NodePlan, deps: RunDeps, state: RunState, exec_index: int, attempt: int, resumed: bool
 ) -> NodeContext:
     node_id = plan.node.id
+    lost_tokens = 0
 
     async def on_token(text: str) -> None:
+        nonlocal lost_tokens
         try:  # tokens are a best-effort live preview (spec 7.2): a failed publish never fails the node
             await deps.recorder.node_token(node_id, exec_index, text)
         except Exception:  # noqa: BLE001
-            log.warning("node_token failed for %s#%s", node_id, exec_index, exc_info=True)
+            lost_tokens += 1
+            if lost_tokens == 1:  # one warning per attempt, not one per token
+                log.warning("node_token failed for %s#%s attempt %s", node_id, exec_index, attempt, exc_info=True)
 
     async def wait_for_human(payload: dict[str, Any]) -> Any:
         # On resume LangGraph re-runs the node and interrupt() returns the resume value instead of raising.
@@ -176,18 +182,19 @@ def make_node_fn(plan: NodePlan):
         exec_index = state.get("exec_counts", {}).get(node_id, 0) + 1
         outputs = state.get("outputs", {})
         loop_counters = state.get("loop_counters", {})
-        waited = await recorder.find_waiting(node_id, exec_index)
+        waited = await _recorded(recorder.find_waiting(node_id, exec_index))
         # An execution that already waited is being resumed (or replayed after a crash) for this whole call:
         # it reuses the waited attempt first and never records node_waiting again, even on a retry.
         resumed = waited is not None
-        attempt = waited if resumed else await recorder.attempts_so_far(node_id, exec_index) + 1
+        attempt = waited if resumed else await _recorded(recorder.attempts_so_far(node_id, exec_index)) + 1
         started = resumed
         error: NodeError | None = None
+        rendered: dict[str, Any] | None
 
         for tries in range(1, max_attempts + 1):
             error = None
             try:
-                rendered: dict[str, Any] | None = _render(fields, outputs)
+                rendered = _render(fields, outputs)
             except Exception as exc:  # noqa: BLE001 - a template failure is this attempt's node error
                 rendered, error = None, _as_node_error(exc, timeout)
             if not started:
@@ -215,7 +222,7 @@ def make_node_fn(plan: NodePlan):
             await deps.sleep(backoff_delay(plan.policy.retry, tries))
             deps.guard.check()
             # a new attempt number from the log, so a replay that reused a waited attempt never collides
-            attempt = await recorder.attempts_so_far(node_id, exec_index) + 1
+            attempt = await _recorded(recorder.attempts_so_far(node_id, exec_index)) + 1
             started = False
 
         fallback = _fallback_output(plan)

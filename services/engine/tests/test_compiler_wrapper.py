@@ -272,22 +272,36 @@ class _FlakyRecorder(InMemoryRecorder):
             raise ConnectionError("redis publish failed")
         await super().node_token(node_id, exec_index, text)
 
+    async def find_waiting(self, node_id, exec_index):
+        if self.broken == "find_waiting":
+            raise ConnectionError("db connection reset")
+        return await super().find_waiting(node_id, exec_index)
+
     async def node_started(self, node_id, exec_index, attempt, input):
         if self.broken == "node_started":
             raise ConnectionError("db connection reset")
         await super().node_started(node_id, exec_index, attempt, input)
 
 
-async def test_a_failed_token_publish_does_not_fail_the_node():
-    deps, _, _ = _deps(ScriptedLLM(["답"]))
+class _Streamer(_Echo):
+    async def execute(self, ctx, config, rendered):
+        for piece in ("가", "나", "다", "라"):
+            await ctx.on_token(piece)
+        return NodeResult(self.output)
+
+
+async def test_a_failed_token_publish_does_not_fail_the_node(caplog):
+    deps, _, _ = _deps()
     deps.recorder = _FlakyRecorder("node_token")
-    result = await _run(_plan(LLMNode(), LLM_CONFIG, policy=LLMNode.default_policy), deps)
-    assert result["outputs"]["n"] == {"text": "답"}
+    result = await _run(_plan(_Streamer({"text": "가나다라"}), {}), deps)
+    assert result["outputs"]["n"] == {"text": "가나다라"}
+    assert len([r for r in caplog.records if "node_token failed" in r.getMessage()]) == 1
 
 
-async def test_a_recorder_failure_escapes_as_an_engine_fault_not_a_node_error():
+@pytest.mark.parametrize("broken", ["node_started", "find_waiting"])
+async def test_a_recorder_failure_escapes_as_an_engine_fault_not_a_node_error(broken):
     deps, _, _ = _deps(ScriptedLLM(["답"]))
-    deps.recorder = _FlakyRecorder("node_started")
+    deps.recorder = _FlakyRecorder(broken)
     with pytest.raises(EngineFault):
         await _run(_plan(LLMNode(), LLM_CONFIG, policy=LLMNode.default_policy), deps)
     assert deps.recorder.events == []
