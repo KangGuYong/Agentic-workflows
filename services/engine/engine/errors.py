@@ -35,4 +35,8 @@ class NodeFailedError(Exception):
 
 
 class RunCancelled(Exception):
-    """Raised when the run guard observes a cancellation request or a lost lease."""
+    """Raised when the run guard observes a cancellation request (or, as LeaseLost, a lost lease)."""
+
+
+class LeaseLost(RunCancelled):
+    """This worker no longer owns the run. Stop without writing a terminal status: the new owner continues."""

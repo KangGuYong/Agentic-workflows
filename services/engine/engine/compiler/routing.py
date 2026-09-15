@@ -30,7 +30,7 @@ def resolve_route(
     if loop is None:
         return RouteDecision(chosen, [edge.target for edge in edges])
     used = loop_counters.get(loop.id, 0)
-    if loop.maxIterations is not None and used >= loop.maxIterations:
+    if used >= (loop.maxIterations or 0):  # back-edges always carry maxIterations (phase 2)
         exit_handle = "default" if node_type == "classifier" else _OPPOSITE.get(chosen)
         if exit_handle is None or exit_handle not in handle_edges:  # phase 2 only allows condition/classifier loops
             raise ValueError(f"'{node_type}' 노드의 '{chosen}' 반복에는 빠져나갈 출력이 없습니다")

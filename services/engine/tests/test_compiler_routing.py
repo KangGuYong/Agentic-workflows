@@ -50,3 +50,18 @@ def test_exhausted_loop_without_an_exit_handle_raises_value_error():
     edges = {"approve": [Edge(id="back", source="h", sourceHandle="approve", target="gen", maxIterations=1)]}
     with pytest.raises(ValueError):
         resolve_route("human_approval", "approve", edges, frozenset({"back"}), {"back": 1})
+
+
+def test_last_allowed_loop_pass_counts_up_to_the_limit():
+    decision = resolve_route("condition", "false", LOOP_EDGES, frozenset({"back"}), {"back": 1})
+    assert (decision.handle, decision.targets, decision.counters) == ("false", ["gen"], {"back": 2})
+
+
+def test_exhausted_loop_exit_can_fan_out():
+    edges = {
+        "true": [Edge(id="x1", source="c", sourceHandle="true", target="a"),
+                 Edge(id="x2", source="c", sourceHandle="true", target="b")],
+        "false": [BACK],
+    }
+    decision = resolve_route("condition", "false", edges, frozenset({"back"}), {"back": 2})
+    assert (decision.handle, decision.targets, decision.loop_exhausted) == ("true", ["a", "b"], True)

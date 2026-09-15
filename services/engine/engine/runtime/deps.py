@@ -11,7 +11,10 @@ from engine.runtime.recorder import Recorder
 
 @dataclass
 class RunDeps:
-    """Per-run dependencies, passed to LangGraph as `context=` (compiled graphs are shared across runs)."""
+    """Per-run dependencies, passed to LangGraph as `context=` (compiled graphs are shared across runs).
+
+    Never share one instance between runs: `recorder` and `guard` are bound to `run_id`.
+    """
 
     run_id: str
     llm: LLMClient
