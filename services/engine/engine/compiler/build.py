@@ -25,6 +25,9 @@ class WorkflowInvalid(Exception):
 
 @dataclass(frozen=True)
 class CompiledWorkflow:
+    """A compiled graph bound to one checkpointer and one node registry. A cache keyed by `dsl_hash` alone is
+    correct only with a single registry and checkpointer per process."""
+
     graph: CompiledStateGraph
     dsl: WorkflowDSL
     dsl_hash: str
