@@ -20,8 +20,22 @@ class NodeRegistry:
 
 def default_registry() -> NodeRegistry:
     from engine.nodes.classifier import ClassifierNode
+    from engine.nodes.condition import ConditionNode
+    from engine.nodes.human_approval import HumanApprovalNode
     from engine.nodes.io import EndNode, StartNode
     from engine.nodes.llm import LLMNode
+    from engine.nodes.merge import MergeNode
     from engine.nodes.template import TemplateNode
 
-    return NodeRegistry([StartNode(), EndNode(), TemplateNode(), LLMNode(), ClassifierNode()])
+    return NodeRegistry(
+        [
+            StartNode(),
+            EndNode(),
+            TemplateNode(),
+            LLMNode(),
+            ClassifierNode(),
+            ConditionNode(),
+            MergeNode(),
+            HumanApprovalNode(),
+        ]
+    )
