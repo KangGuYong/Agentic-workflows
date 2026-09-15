@@ -4886,6 +4886,31 @@ git add services/engine/engine/compiler services/engine/engine/runtime services/
 git commit -m "feat(engine): add run state, routing and runtime ports"
 ```
 
+> **Post-review note (Task 15, as implemented):** commits `4da65b4`, `f53d266` and `8c4d800`.
+>
+> **Resume detection.** `Recorder.find_waiting` returns the latest attempt of the execution that ever recorded `node_waiting`, even after that attempt finished. The plan's version returned `None` once the row closed, so a replay after a crash (resume succeeded, checkpoint not yet saved) opened attempt 2 and emitted a bogus `node_waiting`. The plan test now expects `1`. A replay therefore reuses the waited attempt and closes it again, which duplicates `node_finished`. Spec 5.3 describes a new row per replay; Task 16 decides.
+>
+> **Lost lease.**
+> - `errors.LeaseLost` subclasses `RunCancelled`, and `FlagGuard.lose_lease()` raises it before `cancelled` is checked.
+> - `DuplicateAttempt`, raised when an attempt already exists (the Postgres unique key), is a `LeaseLost`, so the wrapper's `except RunCancelled: raise` stops instead of treating it as a node error.
+>
+> **Strict test double.** `InMemoryRecorder` rejects duplicate attempts and stores inputs, outputs, errors, meta and event payloads as strict JSON copies (`allow_nan=False`). A rejected write changes nothing. Events stay flat (spec 7.1 nests `payload`; the Plan 2 recorder nests them). A recorder is bound to one run, and `RunDeps` is never shared between runs.
+>
+> Suite: 577. The plan's Task 16–18 code and tests pass on top, except `test_output_too_large` (see below).
+>
+> **Carried into Task 16:**
+> - `test_output_too_large` fails because the template renderer caps output first. Build the oversized output another way.
+> - `_check_size` uses `json.dumps(default=str)`, so a non-JSON output passes it and the recorder then raises outside the wrapper's `try`. Use strict `json.dumps(..., allow_nan=False)` so it becomes a node error.
+> - Pass `resuming` for the whole node call. Otherwise a retry after a resumed interrupt records `node_waiting` again.
+> - Decide whether a replay of a closed waited attempt opens a new row (spec 5.3) or reuses it.
+>
+> **Carried into Task 17:** the runner maps `LeaseLost` to "stop and write nothing", not to `cancelled`.
+>
+> **Carried into Plan 2 (roadmap):**
+> - Closing an attempt must work on a row that is already closed (replays).
+> - Run-level cancel closes `running` rows as `cancelled` (spec 5.9).
+> - Token usage of failed attempts (already listed).
+
 ---
 
 ## Task 16: Node wrapper — render, retry, timeout, onError, record, route
