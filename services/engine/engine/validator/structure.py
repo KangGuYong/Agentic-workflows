@@ -42,7 +42,7 @@ class ParsedNode:
 
 
 def pydantic_issues(exc: ValidationError, code: str, prefix: str, **where: Any) -> list[Issue]:
-    what = "설정 오류" if code == "INVALID_CONFIG" else "실행 정책 오류"
+    what = {"INVALID_CONFIG": "설정 오류", "INVALID_POLICY": "실행 정책 오류"}.get(code, "워크플로 형식 오류")
     issues = []
     for err in exc.errors()[:MAX_FIELD_ISSUES]:
         location = clip(".".join(str(part) for part in err["loc"]), MAX_NAME_CHARS)
