@@ -4473,6 +4473,36 @@ git add services/engine/engine/validator services/engine/tests/test_validator_re
 git commit -m "feat(engine): add reference/type validation phase and validate facade"
 ```
 
+> **Post-review note (Task 14, as implemented):** commits `f2bca1f`, `5c0faa3`, `7d2bc53` and `e158ccb`; the Task 13 follow-up is `e55dca5`.
+>
+> **Facade (`analyze`).**
+> - DSL text with NUL or lone surrogates, or values nested too deeply to serialize, is `DSL_INVALID` ("워크플로 형식 오류").
+> - A DSL over 512 KB (UTF-8 JSON, measured without filled-in defaults) is `LIMIT_EXCEEDED`.
+> - One `StepBudget` is shared by every phase.
+> - `issues.bounded()` de-duplicates issues, puts errors before warnings and caps the list at 100, in every phase. Warnings can no longer crowd out an error and let an invalid workflow compile.
+> - `graph` is set once phases 1–2 pass; callers must still check `has_errors`.
+>
+> **Guaranteed-before sets** are a greatest fixpoint over every reachable predecessor, including back-edges (∩, and ∪ for merge). The plan's forward-only rule wrongly rejected `{{ start.x }}` inside a loop that starts at its condition (start → condition → body → condition). `graph.order` is a forward topological order, not first-execution order.
+>
+> **Types.**
+> - `true`/`false` JSON subschemas no longer crash `kinds_of`/`resolve_path`: `true` means unknown, `false` means the field does not exist.
+> - `| default(x)` keeps `null` (Jinja only replaces a missing value) unless it is written `default(x, true)`, and the kind of `x` is added. `Ref` records `default_kind` and `default_replaces_null`. Spec 4.5 is updated.
+> - Number literals must be finite.
+>
+> **Templates.**
+> - Field or index access on a filter result (`(x | default({})).y`) is forbidden, because it skipped the reference checks.
+> - A `format: "json"` template without `{{`/`{%` is parsed at validation. A quoted substitution warns. `render.QUOTED_SUBSTITUTION` is now public.
+>
+> **Messages.** Type names are in Korean. Quoted names, references and literals are clipped. A self-reference explains that the first run has no previous result.
+>
+> Suite: 560.
+>
+> **Known and accepted:**
+> - `피드백: {{ start.s | default('') }}` on a nullable string warns, although `null` and `''` render the same.
+> - A slice of a filter result (`(x | trim)[0:3]`) is forbidden along with other field access on filters.
+>
+> **Carried into Plan 2 (roadmap):** template parsing within the 512 KB limit can take about 3–4 s per validation. Run `validate()` off the event loop and rate-limit saves (already listed). Consider charging parsed template nodes to the step budget.
+
 ---
 
 ## Task 15: Run state, routing, and runtime ports (recorder, guard, deps)
