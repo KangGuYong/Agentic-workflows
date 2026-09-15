@@ -71,12 +71,21 @@ def _nested(depth: int) -> object:
     return value
 
 
+def _tuples(depth: int) -> tuple:
+    value: tuple = ()
+    for _ in range(depth):
+        value = (value,)
+    return value
+
+
 def test_check_storable_bounds_depth_and_text_but_check_text_only_text():
     check_storable(_nested(MAX_JSON_DEPTH))
     with pytest.raises(ValueError, match="중첩"):
         check_storable(_nested(MAX_JSON_DEPTH + 1))
     with pytest.raises(ValueError, match="NUL"):
         check_storable({"a\x00": 1})
+    with pytest.raises(ValueError, match="중첩"):
+        check_storable({"t": _tuples(MAX_JSON_DEPTH)})
     check_text(_nested(5000))
     with pytest.raises(ValueError):
         check_text([{"k": "\ud800"}])

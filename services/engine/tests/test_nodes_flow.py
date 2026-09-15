@@ -1,7 +1,7 @@
 import pytest
 
 from engine.errors import ErrorCode, NodeError
-from engine.jsondata import schema_problems
+from engine.jsondata import MAX_JSON_DEPTH, schema_problems
 from engine.nodes.human_approval import HumanApprovalNode, resume_output
 from engine.nodes.merge import MergeNode
 from engine.nodes.registry import default_registry
@@ -228,3 +228,18 @@ def test_merge_of_merges_keeps_its_schema_small():
 
     assert schema_problems(schema) == []
     assert time.perf_counter() - started < 5
+
+
+def _levels(count: int) -> list:
+    value: list = []
+    for _ in range(count - 1):
+        value = [value]
+    return value
+
+
+def test_resume_output_accepts_exactly_what_the_node_output_can_keep():
+    waiting = {**WAITING, "review": []}
+    output = resume_output({"decision": "approve", "editedValue": _levels(MAX_JSON_DEPTH - 1)}, waiting)
+    assert output["editedValue"] == _levels(MAX_JSON_DEPTH - 1)
+    with pytest.raises(NodeError, match="중첩"):  # inside the output it would be one level too deep
+        resume_output({"decision": "approve", "editedValue": _levels(MAX_JSON_DEPTH)}, waiting)

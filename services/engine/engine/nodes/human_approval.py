@@ -103,12 +103,17 @@ def resume_output(answer: Any, waiting: dict[str, Any]) -> dict[str, Any]:
     decision = answer.get("decision")
     if not isinstance(decision, str) or decision not in DECISIONS:
         raise _invalid("decision은 approve 또는 reject여야 합니다")
-    return {
+    output = {
         "decision": decision,
         "comment": _text(answer.get("comment"), "comment", MAX_COMMENT_CHARS),
         "editedValue": _edited_value(answer, waiting),
         "reviewedAt": _reviewed_at(answer.get("reviewedAt")),
     }
+    try:  # the same check the node wrapper applies to the output: an answer it accepts is never lost on resume
+        check_storable(output)
+    except ValueError as exc:
+        raise _invalid(str(exc)) from exc
+    return output
 
 
 def _invalid(reason: str) -> NodeError:

@@ -107,7 +107,7 @@ def check_storable(value: Any, max_depth: int | None = MAX_JSON_DEPTH) -> None:
         if isinstance(item, str):
             if _BAD_TEXT.search(item):
                 raise ValueError("NUL 문자나 짝이 없는 서로게이트는 사용할 수 없습니다")
-        elif isinstance(item, (list, dict)):
+        elif isinstance(item, (list, tuple, dict)):
             if max_depth is not None and depth > max_depth:
                 raise ValueError(f"값의 중첩이 너무 깊습니다 (최대 {max_depth}단계)")
             if isinstance(item, dict):
