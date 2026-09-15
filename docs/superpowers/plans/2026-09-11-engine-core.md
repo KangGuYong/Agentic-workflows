@@ -5308,6 +5308,34 @@ git add services/engine/engine/compiler/wrapper.py services/engine/tests/test_co
 git commit -m "feat(engine): add generic node wrapper with retry, timeout, onError and routing"
 ```
 
+> **Post-review note (Task 16, as implemented):** commits `8f48078`, `17f565b` and `043ed02`.
+>
+> **Stored values.**
+> - Rendered values with NUL or lone surrogates are `TEMPLATE_ERROR`.
+> - `_check_output` replaces `_check_size`: strict JSON (`allow_nan=False`) plus `check_text` (`NODE_FAILED`), and a 1 MB cap (`OUTPUT_TOO_LARGE`).
+> - `defaultOutput` is deep-copied per use and checked the same way before routing.
+>
+> **Resume and replay.**
+> - `resumed` (the execution already recorded `node_waiting`) holds for the whole node call, and a replay reuses the waited attempt. Spec 5.3's "new row per replay" is amended in practice: Plan 2 must accept closing an already-closed attempt and tolerate a duplicate `node_finished`.
+> - Retries take `attempts_so_far() + 1`.
+> - A node that waits must not retry, because a second `interrupt()` in one call waits again without a record. `human_approval` accepts no policy.
+>
+> **Infrastructure faults are not node errors.**
+> - Recorder reads and writes go through `_recorded()`: `RunCancelled` (including `LeaseLost` and `DuplicateAttempt`) passes through, and anything else becomes the new `errors.EngineFault`, which escapes the run.
+> - `node_started` sits outside the attempt `try`.
+> - `on_token` is best effort, and a failure is logged once per attempt.
+> - The re-raise set is `(GraphBubbleUp, RunCancelled, EngineFault)`.
+> - Routing bugs are `NODE_FAILED`, not `TYPE_MISMATCH`, and exception text is clipped.
+>
+> **Tests.** `test_output_too_large` merges two 600 KB branch outputs, because the renderer caps a single field first.
+>
+> Suite: 602.
+>
+> **Carried into Plan 2 (roadmap):**
+> - The worker must release a run whose task raised `EngineFault` or any unexpected exception: stop the heartbeat, or do a fenced requeue with `recovery_count + 1`. Otherwise the lease never expires.
+> - Close orphaned `running` attempt rows at run level, e.g. a cancelled parallel sibling or a crash mid-write.
+> - Token events carry no attempt, so the UI clears streamed text on each `node_started`.
+
 ---
 
 ## Task 17: Compile DSL to LangGraph and run it
@@ -5552,6 +5580,38 @@ Expected: all PASS
 git add services/engine/engine/compiler/build.py services/engine/engine/runtime/runner.py services/engine/tests/test_compiler_build.py
 git commit -m "feat(engine): compile validated DSL to LangGraph and execute runs"
 ```
+
+> **Post-review note (Task 17, as implemented):** commits `c9eb70f` and `842ad66`.
+>
+> **Resume.**
+> - `execute_run(resume=…)` requires the approval's target, `nodeId` (str) and `execIndex` (int), in the answer.
+> - When that approval is the pending interrupt, the answer is checked with `human_approval.resume_output` before `Command(resume=…)`. A bad answer raises the new `ResumeRejected` and nothing reaches the graph. LangGraph keeps the first resume value of an interrupt, so a bad answer would otherwise fail the run forever.
+> - When the named approval is no longer waiting, the answer was already used before a crash, so the run just continues from its checkpoint. A replayed answer never answers a later approval, e.g. the next pass of an approval inside a loop.
+> - A resume for a run with no checkpoint is `ResumeRejected`.
+>
+> **Escaping exceptions** (documented in the docstring):
+> - `LeaseLost` is re-raised; plain `RunCancelled` still returns `cancelled`.
+> - `ResumeRejected`, `EngineFault` and unexpected engine bugs also escape, and the worker handles them.
+> - `inputs` are ignored for a run that already has a checkpoint.
+>
+> **Caching.** `CompiledWorkflow` is bound to one checkpointer and one registry, so a cache keyed only by `dsl_hash` needs a single registry and checkpointer per process.
+>
+> **Confirmed by probes.**
+> - Nested loops at maxIterations 20 run 127 node executions under a `recursion_limit` of 256.
+> - A classifier self-loop exits through `default`.
+> - A loop exit that fans out merges once.
+> - A crash before the merge recovers without extra LLM calls.
+>
+> **Known.** An exhausted loop keeps the branch node's chosen output (e.g. `category: "again"`); `loopExhausted` appears only in the event. Document this for editor users (Plan 3).
+>
+> Suite: 611.
+>
+> **Carried into Task 18:** HITL golden resumes pass the target; add loop-exit fan-out and self-loop flows.
+>
+> **Carried into Plan 2 (roadmap):**
+> - Store `nodeId`/`execIndex` in `resume_payload`, and clear it whenever the resumed invocation returns, whatever the outcome. A leftover payload on a failed run would act like a retry.
+> - On `ResumeRejected`, keep the run `waiting`.
+> - The API still returns `409 RESUME_TARGET_MISMATCH` itself, because the engine silently continues on a mismatched target.
 
 ---
 
