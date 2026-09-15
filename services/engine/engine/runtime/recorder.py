@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from engine.errors import LeaseLost
+from engine.jsondata import check_text
 from engine.nodes.base import Usage
 
 
@@ -62,8 +63,13 @@ class Recorder(Protocol):
 
 
 def _stored(value: Any) -> Any:
-    """What a jsonb column would hold: a JSON copy. Raises TypeError/ValueError for anything else."""
-    return None if value is None else json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
+    """What a jsonb column would hold: a JSON copy. Raises TypeError/ValueError for anything else, including
+    text jsonb rejects (NUL, lone surrogates)."""
+    if value is None:
+        return None
+    copied = json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
+    check_text(copied)
+    return copied
 
 
 class InMemoryRecorder:

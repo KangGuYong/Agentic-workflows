@@ -1,14 +1,18 @@
+import json
+
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from engine.compiler.build import WorkflowInvalid, compile_workflow
 from engine.dsl.models import WorkflowDSL, dsl_hash
 from engine.errors import EngineFault, LeaseLost
+from engine.jsondata import check_text
 from engine.llm.scripted import ScriptedLLM
 from engine.runtime.deps import RunDeps
 from engine.runtime.guard import FlagGuard
 from engine.runtime.recorder import InMemoryRecorder
 from engine.runtime.runner import ResumeRejected, execute_run
+from engine.validator import validate
 
 DSL = {
     "nodes": [
@@ -173,3 +177,76 @@ async def test_a_replayed_answer_never_answers_the_next_approval():
     assert (replayed.status, replayed.waiting["execIndex"]) == ("waiting", 2)
     assert [(r.exec_index, r.status) for r in deps.recorder.for_node("human_approval_1")] == [
         (1, "succeeded"), (2, "waiting")]
+
+
+def _nested(depth: int) -> list:
+    value: list = []
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def _single(node: dict) -> dict:
+    return {
+        "nodes": [{"id": "start", "type": "start"}, node, {"id": "end", "type": "end"}],
+        "edges": [{"id": "e1", "source": "start", "target": node["id"]}, {"id": "e2", "source": node["id"], "target": "end"}],
+    }
+
+
+DEEP_TEMPLATE = _single({"id": "template_1", "type": "template", "config": {"template": json.dumps(_nested(300)), "format": "json"}})
+DEEP_LLM = _single({"id": "llm_1", "type": "llm", "config": {"model": "m", "prompt": "p", "outputSchema": {"type": "object"}}})
+
+
+@pytest.mark.parametrize(
+    ("dsl", "llm", "code", "node_id"),
+    [(DEEP_TEMPLATE, ScriptedLLM([]), "TEMPLATE_ERROR", "template_1"),
+     (DEEP_LLM, ScriptedLLM([{"deep": _nested(300)}]), "NODE_FAILED", "llm_1")],
+    ids=["template", "llm-output"],
+)
+async def test_a_value_nested_too_deeply_for_run_state_fails_the_node(dsl, llm, code, node_id):
+    assert validate(dsl) == []
+    compiled = compile_workflow(dsl, checkpointer=InMemorySaver())
+    deps = RunDeps(run_id="run-deep", llm=llm, recorder=InMemoryRecorder())
+    outcome = await execute_run(compiled, deps=deps, inputs={})
+    assert (outcome.status, outcome.error["code"], outcome.error["nodeId"]) == ("failed", code, node_id)
+    assert "중첩" in outcome.error["message"]
+
+
+@pytest.mark.parametrize("inputs", [{"x": _nested(300)}, {"x": "a\x00"}], ids=["deep", "nul"])
+async def test_inputs_that_run_state_cannot_keep_fail_the_run_at_start(inputs):
+    compiled = compile_workflow(_single({"id": "template_1", "type": "template", "config": {"template": "t"}}),
+                                checkpointer=InMemorySaver())
+    deps = RunDeps(run_id="run-inputs", llm=ScriptedLLM([]), recorder=InMemoryRecorder())
+    outcome = await execute_run(compiled, deps=deps, inputs=inputs)
+    assert (outcome.status, outcome.error["code"], outcome.error["nodeId"]) == ("failed", "NODE_FAILED", "start")
+    assert deps.recorder.records == []
+
+
+async def test_an_edited_value_nested_too_deeply_is_rejected_and_the_run_keeps_waiting():
+    compiled = compile_workflow(HITL, checkpointer=InMemorySaver())
+    deps = RunDeps(run_id="run-edit", llm=ScriptedLLM([]), recorder=InMemoryRecorder())
+    await execute_run(compiled, deps=deps, inputs={"draft": "원고"})
+    target = {"nodeId": "human_approval_1", "execIndex": 1, "decision": "approve"}
+
+    with pytest.raises(ResumeRejected, match="중첩"):
+        await execute_run(compiled, deps=deps, resume={**target, "editedValue": _nested(300)})
+    outcome = await execute_run(compiled, deps=deps, resume={**target, "editedValue": "수정본"})
+
+    assert (outcome.status, outcome.outputs) == ("succeeded", {"final": "수정본"})
+
+
+BAD_KEY_TEMPLATE = '{"a\\u0000": {{ start | length }}, "a\\u0000": 2}'
+
+
+async def test_error_messages_never_quote_unsafe_text_from_a_template():
+    dsl = _single({"id": "template_1", "type": "template", "config": {"template": BAD_KEY_TEMPLATE, "format": "json"}})
+    static = _single({"id": "template_1", "type": "template",
+                      "config": {"template": BAD_KEY_TEMPLATE.replace("{{ start | length }}", "1"), "format": "json"}})
+    compiled = compile_workflow(dsl, checkpointer=InMemorySaver())
+    deps = RunDeps(run_id="run-bad-key", llm=ScriptedLLM([]), recorder=InMemoryRecorder())
+
+    outcome = await execute_run(compiled, deps=deps, inputs={})
+
+    assert (outcome.status, outcome.error["code"]) == ("failed", "TEMPLATE_ERROR")
+    check_text(outcome.error)
+    check_text([issue.to_dict() for issue in validate(static)])

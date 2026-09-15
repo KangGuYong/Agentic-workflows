@@ -3,7 +3,9 @@ import tracemalloc
 
 import pytest
 
+from engine.errors import ErrorCode, NodeError
 from engine.jsondata import (
+    MAX_JSON_DEPTH,
     MAX_MESSAGE_CHARS,
     MAX_SCHEMA_BOUND,
     MAX_SCHEMA_BRANCHES,
@@ -15,11 +17,14 @@ from engine.jsondata import (
     MAX_VIOLATIONS,
     StepBudget,
     ValidationBudgetExceeded,
+    check_storable,
+    check_text,
     clip,
     parse_json,
     schema_problems,
     schema_violations,
 )
+from engine.validator.issues import error
 
 # ---------------------------------------------------------------- parse_json
 
@@ -57,6 +62,41 @@ def test_parse_json_accepts_standard_json():
 def test_clip():
     assert clip("abc", 5) == "abc"
     assert clip("abcdef", 3) == "abc…"
+
+
+def _nested(depth: int) -> object:
+    value: object = "x"
+    for index in range(depth):
+        value = [value] if index % 2 else {"k": value}
+    return value
+
+
+def test_check_storable_bounds_depth_and_text_but_check_text_only_text():
+    check_storable(_nested(MAX_JSON_DEPTH))
+    with pytest.raises(ValueError, match="중첩"):
+        check_storable(_nested(MAX_JSON_DEPTH + 1))
+    with pytest.raises(ValueError, match="NUL"):
+        check_storable({"a\x00": 1})
+    check_text(_nested(5000))
+    with pytest.raises(ValueError):
+        check_text([{"k": "\ud800"}])
+
+
+@pytest.mark.parametrize("text", ['{"a\\u0000": 1, "a\\u0000": 2}', '{"a\\ud800": 1, "a\\ud800": 2}'],
+                         ids=["nul", "lone-surrogate"])
+def test_parse_json_messages_never_quote_unsafe_text(text):
+    with pytest.raises(ValueError) as exc:
+        parse_json(text)
+    message = str(exc.value)
+    assert "중복" in message
+    check_text(message)
+
+
+def test_node_errors_and_issues_never_carry_unsafe_text():
+    node_error = NodeError(ErrorCode.NODE_FAILED, "a\x00b\ud800", retryable=False)
+    issue = error("X", "a\x00", field="config.\ud800")
+    assert (node_error.message, str(node_error)) == ("a\ufffdb\ufffd", "a\ufffdb\ufffd")
+    assert (issue.message, issue.field) == ("a\ufffd", "config.\ufffd")
 
 
 # ---------------------------------------------------------------- schema_problems

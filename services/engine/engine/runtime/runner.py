@@ -9,6 +9,7 @@ from langgraph.types import Command
 from engine.compiler.build import CompiledWorkflow
 from engine.compiler.state import initial_state
 from engine.errors import ErrorCode, LeaseLost, NodeError, NodeFailedError, RunCancelled
+from engine.jsondata import check_storable
 from engine.nodes.human_approval import resume_output
 from engine.runtime.deps import RunDeps
 
@@ -36,7 +37,8 @@ async def execute_run(
 ) -> RunOutcome:
     """Start, resume, or continue (crash recovery / manual retry) the run whose thread id is deps.run_id.
 
-    - `inputs` are used only for a run without a checkpoint; an existing run ignores them.
+    - `inputs` are used only for a run without a checkpoint; an existing run ignores them. Inputs that cannot be
+      kept in run state (unsafe text, too deep) fail the run at `start` without writing a checkpoint.
     - `resume` must name the approval it answers (`nodeId`, `execIndex`). When that approval is no longer
       waiting, the answer was already used before a crash, so the run simply continues from its checkpoint
       (it never answers a later approval). An answer that does not fit the waiting approval raises
@@ -54,6 +56,11 @@ async def execute_run(
     if not snapshot.values:
         if resume is not None:
             raise ResumeRejected("시작되지 않은 실행에는 승인 응답을 보낼 수 없습니다")
+        try:
+            check_storable(inputs or {})  # the first checkpoint stores them before any node can check them
+        except ValueError as exc:
+            message = f"실행 입력을 사용할 수 없습니다: {exc}"
+            return RunOutcome("failed", error={"code": str(ErrorCode.NODE_FAILED), "message": message, "nodeId": "start"})
         graph_input = initial_state(inputs or {})
     elif resume is not None:
         target = _resume_target(resume)

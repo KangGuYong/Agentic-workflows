@@ -7,7 +7,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from engine.errors import ErrorCode, NodeError
-from engine.jsondata import check_text, clip, json_kind
+from engine.jsondata import check_storable, check_text, clip, json_kind
 from engine.nodes.base import TEMPLATE, NodeContext, NodeResult, NodeSpec, TemplateField
 from engine.templates.env import json_value
 
@@ -85,7 +85,8 @@ def resume_output(answer: Any, waiting: dict[str, Any]) -> dict[str, Any]:
     """Check a resume answer against the interrupt payload (`waiting`) it answers and build the node output.
 
     The answer comes from a reviewer through the public API, so nothing in it is trusted. `nodeId` and
-    `execIndex` are optional but must match the waiting approval when given. `reviewedAt` is meant to be
+    `execIndex` must match the waiting approval when given; they are optional here, but `execute_run`
+    requires them to find the approval. `reviewedAt` is meant to be
     set by the API when it accepts the answer (never copied from the request); absent, the current time is
     used. The API can call this before queueing the run; the node calls it again on resume.
     Raises NodeError(NODE_FAILED) for an answer that cannot be used.
@@ -137,7 +138,7 @@ def _edited_value(answer: dict[str, Any], waiting: dict[str, Any]) -> Any:
         raise NodeError(ErrorCode.NODE_FAILED, "수정이 허용되지 않은 승인 노드입니다", retryable=False)
     try:
         edited = json_value(answer["editedValue"])  # JSON data only, size-bounded, never shared with the caller
-        check_text(edited)
+        check_storable(edited)
     except Exception as exc:  # ValueError, TypeError, SecurityError (too large) or RecursionError (too deep)
         raise _invalid(f"editedValue를 사용할 수 없습니다 ({clip(str(exc), 100)})") from exc
     if review is not None and json_kind(edited) != json_kind(review):

@@ -144,9 +144,10 @@ def test_default_output_must_be_storable_json_matching_the_output(default_output
     assert _codes(raw) == ["INVALID_POLICY"]
 
 
-def test_default_output_nested_too_deeply_is_an_invalid_policy():
+@pytest.mark.parametrize("depth", [150, 5000], ids=["deeper-than-run-state", "deeper-than-python"])
+def test_default_output_nested_too_deeply_is_an_invalid_policy(depth):
     nested: dict = {}
-    for _ in range(5000):
+    for _ in range(depth):
         nested = {"x": nested}
     raw = _base()
     raw["nodes"][1]["policy"] = {"onError": "default", "defaultOutput": {"text": "t", "extra": nested}}

@@ -63,6 +63,8 @@ async def test_recorder_stores_json_copies_and_rejects_other_values():
     assert (record.status, record.output, len(recorder.events)) == ("running", None, 1)  # a rejected write changes nothing
     with pytest.raises(TypeError):
         await recorder.node_started("llm_2", 1, 1, {"x": {1, 2}})
+    with pytest.raises(ValueError):  # jsonb rejects NUL
+        await recorder.node_started("llm_3", 1, 1, {"x": "a\x00"})
 
 
 async def test_find_waiting_returns_the_latest_attempt_that_waited():

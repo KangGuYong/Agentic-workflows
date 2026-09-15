@@ -1,5 +1,7 @@
 from enum import StrEnum
 
+from engine.jsondata import safe_text
+
 
 class ErrorCode(StrEnum):
     NODE_TIMEOUT = "NODE_TIMEOUT"
@@ -16,6 +18,7 @@ class NodeError(Exception):
     """Failure of a single node attempt. `retryable` decides whether the policy may retry it."""
 
     def __init__(self, code: ErrorCode, message: str, *, retryable: bool) -> None:
+        message = safe_text(message)  # may quote untrusted text; stored as jsonb and sent as UTF-8
         super().__init__(message)
         self.code = code
         self.message = message

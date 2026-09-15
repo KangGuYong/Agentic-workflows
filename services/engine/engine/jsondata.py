@@ -27,6 +27,9 @@ MAX_SCHEMA_LIST = 256  # entries of one enum or required list (duplicates allowe
 MAX_SCHEMA_BOUND = 10_000  # length/count bounds; Ollama expands them into grammar rules
 MAX_SCHEMA_PROBLEMS = 10
 MAX_VALIDATION_STEPS = 1_000_000  # work in one validation: at most about 3 s of pure Python
+# nesting of data kept in run state; LangGraph's checkpoint serializer fails at about 250 levels and run state
+# wraps every value in a few more
+MAX_JSON_DEPTH = 100
 
 _TYPES = frozenset({"string", "number", "integer", "boolean", "object", "array", "null"})
 _ANNOTATIONS = frozenset({"title", "description", "default", "examples", "$comment", "format"})
@@ -41,6 +44,11 @@ class _Enough(Exception):
 
 def clip(text: str, limit: int = MAX_MESSAGE_CHARS) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+def safe_text(text: str) -> str:
+    """`text` with NUL and lone surrogates replaced by U+FFFD, for messages that may quote untrusted text."""
+    return _BAD_TEXT.sub("\ufffd", text)
 
 
 def _is_number(value: Any) -> bool:
@@ -80,24 +88,33 @@ def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError(f"중복된 키가 있습니다: {clip(key, 40)}")
+            raise ValueError(f"중복된 키가 있습니다: {clip(safe_text(key), 40)}")
         result[key] = value
     return result
 
 
 def check_text(value: Any) -> None:
     """Raise ValueError if any string or key in the JSON data `value` holds NUL or a lone surrogate."""
-    stack = [value]
+    check_storable(value, max_depth=None)
+
+
+def check_storable(value: Any, max_depth: int | None = MAX_JSON_DEPTH) -> None:
+    """Raise ValueError if the JSON data `value` cannot be kept in run state and jsonb: a string or key holds
+    NUL or a lone surrogate, or arrays and objects are nested more than `max_depth` levels."""
+    stack = [(value, 1)]
     while stack:
-        item = stack.pop()
+        item, depth = stack.pop()
         if isinstance(item, str):
             if _BAD_TEXT.search(item):
                 raise ValueError("NUL 문자나 짝이 없는 서로게이트는 사용할 수 없습니다")
-        elif isinstance(item, list):
-            stack.extend(item)
-        elif isinstance(item, dict):
-            stack.extend(item.keys())
-            stack.extend(item.values())
+        elif isinstance(item, (list, dict)):
+            if max_depth is not None and depth > max_depth:
+                raise ValueError(f"값의 중첩이 너무 깊습니다 (최대 {max_depth}단계)")
+            if isinstance(item, dict):
+                stack.extend((key, depth) for key in item)
+                stack.extend((child, depth + 1) for child in item.values())
+            else:
+                stack.extend((child, depth + 1) for child in item)
 
 
 def parse_json(text: str) -> Any:

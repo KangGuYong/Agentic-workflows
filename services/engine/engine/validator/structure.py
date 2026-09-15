@@ -7,7 +7,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from engine.dsl.models import Node, Policy, WorkflowDSL, merge_policy
-from engine.jsondata import StepBudget, ValidationBudgetExceeded, check_text, clip
+from engine.jsondata import StepBudget, ValidationBudgetExceeded, check_storable, clip
 from engine.nodes.base import NodeSpec, schema_violations
 from engine.nodes.registry import NodeRegistry
 from engine.templates.env import json_value
@@ -147,7 +147,7 @@ def _checked_default_output(
     """A validated copy of `output` that can stand in for the node's output, or why it cannot."""
     try:
         checked = json_value(output, MAX_DEFAULT_OUTPUT_CHARS)  # JSON data only, size-bounded, a copy
-        check_text(checked)  # storable as UTF-8 / jsonb
+        check_storable(checked)  # storable in run state and as UTF-8 / jsonb
     except RecursionError:
         return None, "값의 중첩이 너무 깊습니다"
     except Exception as exc:  # ValueError/TypeError (not JSON data) or SecurityError (too large)

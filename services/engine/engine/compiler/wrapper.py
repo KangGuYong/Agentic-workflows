@@ -18,7 +18,7 @@ from engine.compiler.routing import RouteDecision, resolve_route
 from engine.compiler.state import RunState
 from engine.dsl.models import Edge, Node, Policy, RetrySpec
 from engine.errors import EngineFault, ErrorCode, NodeError, NodeFailedError, RunCancelled
-from engine.jsondata import check_text, clip
+from engine.jsondata import check_storable, clip
 from engine.nodes.base import NodeContext, NodeResult, NodeSpec, TemplateField
 from engine.runtime.deps import RunDeps
 from engine.templates.render import TemplateRenderError, render_template
@@ -50,17 +50,18 @@ def backoff_delay(retry: RetrySpec, failed_tries: int) -> float:
 def _render(fields: list[TemplateField], outputs: dict[str, Any]) -> dict[str, Any]:
     rendered = {f.path: render_template(f.source, outputs, f.target) for f in fields}
     try:
-        check_text(rendered)  # recorded as the attempt's input (jsonb) and passed on to outputs and payloads
+        check_storable(rendered)  # recorded as the attempt's input (jsonb) and passed on to outputs and payloads
     except ValueError as exc:
         raise NodeError(ErrorCode.TEMPLATE_ERROR, f"템플릿 결과를 사용할 수 없습니다: {exc}", retryable=False) from exc
     return rendered
 
 
 def _check_output(output: dict[str, Any]) -> None:
-    """A node output is stored in run state and as jsonb: strict JSON, storable text, at most MAX_OUTPUT_BYTES."""
+    """A node output is stored in run state and as jsonb: strict JSON, storable text and depth, at most
+    MAX_OUTPUT_BYTES."""
     try:
+        check_storable(output)
         text = json.dumps(output, ensure_ascii=False, allow_nan=False)
-        check_text(output)
     except (TypeError, ValueError, RecursionError) as exc:
         raise NodeError(ErrorCode.NODE_FAILED, f"노드 출력을 저장할 수 없습니다: {clip(str(exc))}", retryable=False) from exc
     size = len(text.encode("utf-8"))
