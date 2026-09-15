@@ -46,7 +46,9 @@ def analyze(raw: dict[str, Any] | WorkflowDSL, registry: NodeRegistry | None = N
         check_text(data)  # the DSL is stored as jsonb and its text reaches node outputs
     except ValueError as exc:
         return Analysis([error("DSL_INVALID", f"워크플로 형식 오류: {exc}")], dsl)
-    if len(json.dumps(data, ensure_ascii=False).encode("utf-8")) > MAX_DSL_BYTES:
+    # measured without filled-in defaults, close to the body the API receives
+    stored = dsl.model_dump(mode="json", exclude_defaults=True)
+    if len(json.dumps(stored, ensure_ascii=False).encode("utf-8")) > MAX_DSL_BYTES:
         return Analysis([error("LIMIT_EXCEEDED", f"워크플로가 너무 큽니다 (최대 {MAX_DSL_BYTES // 1024}KB)")], dsl)
     issues, parsed = check_structure(dsl, registry, StepBudget())
     if has_errors(issues):

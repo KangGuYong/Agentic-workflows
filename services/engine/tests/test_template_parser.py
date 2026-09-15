@@ -124,3 +124,15 @@ def test_default_filter_details_are_recorded(source, kind, replaces_null):
 @pytest.mark.parametrize("source", ["{{ (llm_a | default({})).text }}", "{{ (llm_a | default([]))[0] }}"])
 def test_field_access_on_a_filter_result_is_forbidden(source):
     assert any("필터 결과" in problem for problem in parse_template(source).problems)
+
+
+@pytest.mark.parametrize(
+    ("source", "kind", "replaces_null"),
+    [
+        ("{{ start.n | default(default_value=0, boolean=true) }}", "number", True),
+        ("{{ start.n | default(none) }}", "null", False),
+    ],
+)
+def test_default_filter_keyword_and_null_values(source, kind, replaces_null):
+    ref = parse_template(source).whole_value
+    assert (ref.default_kind, ref.default_replaces_null) == (kind, replaces_null)

@@ -111,7 +111,7 @@ def _check_field(
 
 def _check_json_template(source: str, parsed: ParsedTemplate, where: dict[str, str]) -> list[Issue]:
     """JSON templates are parsed after rendering; catch what is already wrong before any run."""
-    if "{{" not in source and "{%" not in source:
+    if "{{" not in source and "{%" not in source and "{#" not in source:
         try:
             parse_json(source)
         except ValueError as exc:

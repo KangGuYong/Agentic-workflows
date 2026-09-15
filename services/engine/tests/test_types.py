@@ -126,3 +126,7 @@ def test_boolean_subschemas_are_unknown_or_absent():
     assert resolve_path(schema, ("never",)) is None
     assert resolve_path(schema, ("list", "0")) == {}
     assert resolve_path(schema, ("list", "0", "x")) == {}
+
+
+def test_a_false_subschema_in_the_middle_of_a_path_is_absent():
+    assert resolve_path({"type": "object", "properties": {"a": False}}, ("a", "b")) is None

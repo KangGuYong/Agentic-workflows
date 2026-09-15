@@ -148,11 +148,10 @@ def _literal_kind(node: nodes.Node) -> str:
 def _ref(root: str, path: tuple[str, ...], default: nodes.Filter | None, direct: bool) -> Ref:
     if default is None:
         return Ref(root, path, False, direct)
-    kind = _literal_kind(default.args[0]) if default.args else "string"  # `default()` alone gives ""
-    if len(default.args) > 1:
-        flag = default.args[1]
-    else:
-        flag = next((keyword.value for keyword in default.kwargs if keyword.key == "boolean"), None)
+    keywords = {keyword.key: keyword.value for keyword in default.kwargs}
+    value = default.args[0] if default.args else keywords.get("default_value")
+    kind = "string" if value is None else _literal_kind(value)  # `default()` alone gives ""
+    flag = default.args[1] if len(default.args) > 1 else keywords.get("boolean")
     replaces_null = isinstance(flag, nodes.Const) and flag.value is True
     return Ref(root, path, True, direct, kind, replaces_null)
 

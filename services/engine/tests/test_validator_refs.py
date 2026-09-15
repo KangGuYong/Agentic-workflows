@@ -319,3 +319,20 @@ def test_oversized_workflows_are_rejected():
         {"id": f"template_{i}", "type": "template", "config": {"template": "y" * 19_000}} for i in range(30)
     ]
     assert _codes(raw) == [("error", "LIMIT_EXCEEDED")]
+
+
+def test_json_template_with_only_a_comment_is_not_parsed_as_a_literal():
+    assert validate(json_template('{"a": 1} {# note #}')) == []
+
+
+def test_size_limit_ignores_filled_in_defaults():
+    raw = chain("p")
+    raw["nodes"] += [{"id": f"template_{i}", "type": "template", "config": {"template": "y" * 16_000}} for i in range(31)]
+    raw["edges"] += [{"id": f"x{i}", "source": "llm_1", "target": f"template_{i}"} for i in range(250)]
+    assert ("error", "LIMIT_EXCEEDED") not in _codes(raw)
+
+
+def test_multibyte_text_counts_in_bytes():
+    raw = chain("가" * 19_000)
+    raw["nodes"] += [{"id": f"template_{i}", "type": "template", "config": {"template": "나" * 19_000}} for i in range(9)]
+    assert _codes(raw) == [("error", "LIMIT_EXCEEDED")]
