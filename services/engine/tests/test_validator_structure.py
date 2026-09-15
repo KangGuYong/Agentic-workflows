@@ -1,8 +1,12 @@
+import re
+
 import pytest
 
-from engine.dsl.models import WorkflowDSL
+from engine.dsl.models import NODE_ID_PATTERN, WorkflowDSL
+from engine.jsondata import StepBudget
+from engine.nodes.llm import LLMNode
 from engine.nodes.registry import default_registry
-from engine.validator.structure import check_structure
+from engine.validator.structure import RESERVED_IDS, check_structure
 
 
 def _base() -> dict:
@@ -102,10 +106,23 @@ def test_issue_serialization_omits_empty_locations():
     }
 
 
-@pytest.mark.parametrize("node_id", ["self", "true", "false", "none", "not"])
-def test_template_keywords_cannot_be_node_ids(node_id):
+@pytest.mark.parametrize("node_id", ["self", "true", "false", "none", "not", "checkpoint_ns", "configurable"])
+def test_template_and_langgraph_names_cannot_be_node_ids(node_id):
     raw = _base()
     raw["nodes"].append({"id": node_id, "type": "template", "config": {"template": "x"}})
+    assert "RESERVED_NODE_ID" in _codes(raw)
+
+
+def test_every_langgraph_reserved_name_that_is_a_valid_node_id_is_reserved():
+    from langgraph._internal._constants import RESERVED
+
+    assert {name for name in RESERVED if re.fullmatch(NODE_ID_PATTERN, name)} <= RESERVED_IDS
+
+
+def test_end_id_is_reserved_for_the_end_node():
+    raw = _base()
+    raw["nodes"].append({"id": "end", "type": "template", "config": {"template": "x"}})
+    raw["nodes"] = [node for node in raw["nodes"] if node["type"] != "end"]
     assert "RESERVED_NODE_ID" in _codes(raw)
 
 
@@ -114,14 +131,16 @@ def test_template_keywords_cannot_be_node_ids(node_id):
     [
         {"text": "t", "extra": float("nan")},
         {"text": "a\x00b"},
-        {"text": "x" * 1_000_001},
+        {"text": "x" * 64_001},
         {"text": "t", "extra": {1, 2}},
+        {"wrong": 1},
     ],
-    ids=["nan", "nul", "too-large", "not-json"],
+    ids=["nan", "nul", "too-large", "not-json", "schema"],
 )
-def test_default_output_must_be_storable_json(default_output):
+@pytest.mark.parametrize("on_error", ["default", "fail"])
+def test_default_output_must_be_storable_json_matching_the_output(default_output, on_error):
     raw = _base()
-    raw["nodes"][1]["policy"] = {"onError": "default", "defaultOutput": default_output}
+    raw["nodes"][1]["policy"] = {"onError": on_error, "defaultOutput": default_output}
     assert _codes(raw) == ["INVALID_POLICY"]
 
 
@@ -134,29 +153,101 @@ def test_default_output_nested_too_deeply_is_an_invalid_policy():
     assert _codes(raw) == ["INVALID_POLICY"]
 
 
-def test_default_output_too_costly_to_validate_is_an_invalid_policy():
-    branches = [{"type": "object", "required": [f"z{i}"]} for i in range(15)] + [{"type": "integer"}]
-    raw = _base()
-    raw["nodes"][1]["config"]["outputSchema"] = {
-        "type": "object",
-        "properties": {"a": {"type": "array", "items": {"anyOf": branches}}},
-        "required": ["a"],
+def _costly_llm(node_id: str, items: int) -> dict:
+    inner = {"anyOf": [{"type": "object", "required": [f"z{i}"]} for i in range(15)] + [{"type": "string"}]}
+    return {
+        "id": node_id,
+        "type": "llm",
+        "config": {
+            "model": "m",
+            "prompt": "p",
+            "outputSchema": {
+                "type": "object",
+                "properties": {"a": {"type": "array", "items": {"anyOf": [inner] * 13 + [{"type": "integer"}]}}},
+                "required": ["a"],
+            },
+        },
+        "policy": {"onError": "default", "defaultOutput": {"a": [0] * items}},
     }
-    raw["nodes"][1]["policy"] = {"onError": "default", "defaultOutput": {"a": list(range(100_000))}}
+
+
+def test_default_output_too_costly_to_validate_is_an_invalid_policy():
+    raw = _base()
+    raw["nodes"][1] = _costly_llm("llm_1", 20_000)
     assert _codes(raw) == ["INVALID_POLICY"]
+
+
+def test_schema_validation_work_is_bounded_for_the_whole_workflow():
+    raw = _base()
+    raw["nodes"][1] = _costly_llm("llm_1", 100)
+    raw["nodes"].append(_costly_llm("llm_2", 100))
+    budget = StepBudget(30_000)
+
+    issues, parsed = check_structure(WorkflowDSL.model_validate(raw), default_registry(), budget)
+
+    assert "llm_1" in parsed
+    assert [(issue.code, issue.nodeId) for issue in issues] == [("INVALID_POLICY", "llm_2")]
+    assert budget.remaining == 0
+
+
+def test_parsed_policy_holds_a_validated_copy_of_the_default_output():
+    raw = _base()
+    raw["nodes"][1]["policy"] = {"onError": "default", "defaultOutput": {"text": "대체 답변"}}
+    dsl = WorkflowDSL.model_validate(raw)
+
+    _, parsed = check_structure(dsl, default_registry())
+    policy = parsed["llm_1"].policy
+
+    assert policy.defaultOutput == {"text": "대체 답변"}
+    assert policy.defaultOutput is not dsl.nodes[1].policy["defaultOutput"]
+    assert policy is not LLMNode.default_policy
+    assert parsed["llm_1"].policy is not check_structure(dsl, default_registry())[1]["llm_1"].policy
+
+
+def test_nodes_with_problems_are_left_out_of_parsed():
+    raw = _base()
+    raw["nodes"][1]["policy"] = {"timeoutSec": 0}
+    _, parsed = check_structure(WorkflowDSL.model_validate(raw), default_registry())
+    assert set(parsed) == {"start", "end"}
+
+
+def test_handles_are_checked_when_only_the_policy_is_invalid():
+    raw = _base()
+    raw["nodes"][1]["policy"] = {"timeoutSec": 0}
+    raw["edges"].append({"id": "e9", "source": "llm_1", "sourceHandle": "true", "target": "end"})
+    assert _codes(raw) == ["INVALID_POLICY", "EDGE_UNKNOWN_HANDLE"]
+
+
+def test_duplicate_connections_are_reported():
+    raw = _base()
+    raw["edges"].append({"id": "e9", "source": "llm_1", "target": "end"})
+    assert _codes(raw) == ["DUPLICATE_EDGE"]
+
+
+@pytest.mark.parametrize("node_type", ["start", "end", "condition"])
+def test_an_empty_policy_is_no_override(node_type):
+    raw = _base()
+    if node_type == "condition":
+        raw["nodes"].append(
+            {"id": "condition_1", "type": "condition", "config": {"conditions": [{"left": "a", "op": "is_empty"}]}}
+        )
+    node = next(node for node in raw["nodes"] if node["type"] == node_type)
+    node["policy"] = {}
+    assert "POLICY_NOT_SUPPORTED" not in _codes(raw)
 
 
 def test_issues_are_bounded_in_number_and_size():
     raw = _base()
-    raw["nodes"][1]["config"].update({f"k{i}": 1 for i in range(1000)})
+    raw["nodes"].append({"id": "llm_2", "type": "llm", "config": {f"k{i}": 1 for i in range(1000)}})
     raw["nodes"].append({"id": "x_1", "type": "t" * 100_000})
     raw["edges"].append({"id": "e9", "source": "llm_1", "sourceHandle": "h" * 100_000, "target": "end"})
     raw["edges"].extend({"id": f"g{i}", "source": "s" * 10_000, "target": "end"} for i in range(250))
 
     issues, _ = check_structure(WorkflowDSL.model_validate(raw), default_registry())
 
-    assert len(issues) <= 100
+    assert len(issues) == 100
     assert len([i for i in issues if i.code == "INVALID_CONFIG"]) == 10
+    assert "EDGE_UNKNOWN_HANDLE" in [i.code for i in issues]
     assert all(len(str(issue.to_dict())) < 500 for issue in issues)
 
 

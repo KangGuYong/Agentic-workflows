@@ -430,15 +430,32 @@ class _Validator:
                         path.pop()
 
 
-def schema_violations(schema: dict[str, Any], value: Any, *, max_steps: int = MAX_VALIDATION_STEPS) -> list[str]:
+class StepBudget:
+    """Validation steps shared by several `schema_violations` calls, e.g. every check of one workflow."""
+
+    def __init__(self, steps: int = MAX_VALIDATION_STEPS) -> None:
+        self.remaining = steps
+
+
+def schema_violations(
+    schema: dict[str, Any],
+    value: Any,
+    *,
+    max_steps: int = MAX_VALIDATION_STEPS,
+    budget: StepBudget | None = None,
+) -> list[str]:
     """Up to MAX_VIOLATIONS short violations of `value` against a schema accepted by `schema_problems`
     ([] when `value` is valid). Raises ValidationBudgetExceeded instead of blocking the caller when the
-    check needs more than `max_steps` steps; that is not a violation the value's author can fix."""
-    validator = _Validator(MAX_VIOLATIONS, max_steps)
+    check needs more than `max_steps` steps, or more than `budget` has left (the steps spent are charged
+    to `budget` either way); that is not a violation the value's author can fix."""
+    validator = _Validator(MAX_VIOLATIONS, max_steps if budget is None else min(max_steps, budget.remaining))
     try:
         validator.validate(schema, value)
     except _Enough:
         pass
     except _TooMuchWork:
         raise ValidationBudgetExceeded("값이 너무 크거나 복잡해서 스키마 검증을 끝낼 수 없습니다") from None
+    finally:
+        if budget is not None:
+            budget.remaining = max(0, budget.remaining - validator.steps)
     return validator.found

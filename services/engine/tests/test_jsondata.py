@@ -13,6 +13,7 @@ from engine.jsondata import (
     MAX_SCHEMA_NODES,
     MAX_SCHEMA_PROBLEMS,
     MAX_VIOLATIONS,
+    StepBudget,
     ValidationBudgetExceeded,
     clip,
     parse_json,
@@ -337,3 +338,14 @@ def test_default_budget_bounds_pathological_accepted_schemas():
 def test_default_budget_allows_ordinary_large_data():
     schema = {"type": "array", "items": {"type": "object", "properties": {"v": {"type": "integer"}}}}
     assert schema_violations(schema, [{"v": i} for i in range(100_000)]) == []
+
+
+def test_a_step_budget_is_shared_across_validations():
+    schema = {"type": "array", "items": {"type": "integer"}}
+    budget = StepBudget(150)  # one validation of 100 items costs 101 steps
+
+    assert schema_violations(schema, list(range(100)), budget=budget) == []
+    assert budget.remaining == 49
+    with pytest.raises(ValidationBudgetExceeded):
+        schema_violations(schema, list(range(100)), budget=budget)
+    assert budget.remaining == 0

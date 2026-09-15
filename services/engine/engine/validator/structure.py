@@ -7,7 +7,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from engine.dsl.models import Node, Policy, WorkflowDSL, merge_policy
-from engine.jsondata import ValidationBudgetExceeded, check_text, clip
+from engine.jsondata import StepBudget, ValidationBudgetExceeded, check_text, clip
 from engine.nodes.base import NodeSpec, schema_violations
 from engine.nodes.registry import NodeRegistry
 from engine.templates.env import json_value
@@ -18,13 +18,19 @@ MAX_EDGES = 300
 MAX_ISSUES = 100  # issues reported by one phase; the rest are dropped
 MAX_FIELD_ISSUES = 10  # pydantic errors reported for one config or policy
 MAX_NAME_CHARS = 80  # tenant-chosen names (node types, edge ends, handles) quoted in messages
-# Template roots ("secret", Jinja's "loop" and "self", the literals true/false/none, the operator "not")
-# and LangGraph state keys cannot be node ids.
+MAX_DEFAULT_OUTPUT_CHARS = 64_000  # a stand-in output needs far less than a real node output
 RESERVED_IDS = frozenset(
-    {"secret", "loop", "self", "true", "false", "none", "not", "inputs", "outputs", "routes", "loop_counters",
-     "exec_counts"}
+    {
+        # template roots: "secret", Jinja's "loop" and "self", the literals true/false/none, the operator "not"
+        "secret", "loop", "self", "true", "false", "none", "not",
+        # run state keys
+        "inputs", "outputs", "routes", "loop_counters", "exec_counts",
+        # names LangGraph refuses as node names when compiling (langgraph._internal._constants.RESERVED)
+        "checkpoint_id", "checkpoint_map", "checkpoint_ns", "configurable",
+    }
 )
 FIXED_IDS = {"start": "start", "end": "end"}  # node type -> required id
+FIXED_LABELS = {"start": "시작", "end": "끝"}
 
 
 @dataclass(frozen=True)
@@ -32,27 +38,33 @@ class ParsedNode:
     node: Node
     spec: NodeSpec
     config: BaseModel
-    policy: Policy | None  # effective policy; None for node types without policies
+    policy: Policy | None  # effective policy, owned by this ParsedNode; None for node types without policies
 
 
 def pydantic_issues(exc: ValidationError, code: str, prefix: str, **where: Any) -> list[Issue]:
+    what = "설정 오류" if code == "INVALID_CONFIG" else "실행 정책 오류"
     issues = []
     for err in exc.errors()[:MAX_FIELD_ISSUES]:
         location = clip(".".join(str(part) for part in err["loc"]), MAX_NAME_CHARS)
-        issues.append(error(code, f"설정 오류: {clip(err['msg'])}", field=f"{prefix}{location}".rstrip("."), **where))
+        issues.append(error(code, f"{what}: {clip(err['msg'])}", field=f"{prefix}{location}".rstrip("."), **where))
     return issues
 
 
-def check_structure(dsl: WorkflowDSL, registry: NodeRegistry) -> tuple[list[Issue], dict[str, ParsedNode]]:
+def check_structure(
+    dsl: WorkflowDSL, registry: NodeRegistry, budget: StepBudget | None = None
+) -> tuple[list[Issue], dict[str, ParsedNode]]:
+    """`budget` bounds the schema validation work of the whole workflow; later phases may share it."""
+    budget = budget if budget is not None else StepBudget()
     issues: list[Issue] = []
     if len(dsl.nodes) > MAX_NODES:
         issues.append(error("LIMIT_EXCEEDED", f"노드는 최대 {MAX_NODES}개까지 사용할 수 있습니다"))
     if len(dsl.edges) > MAX_EDGES:
         issues.append(error("LIMIT_EXCEEDED", f"연결은 최대 {MAX_EDGES}개까지 사용할 수 있습니다"))
-    if issues:  # checking an oversized workflow node by node would only produce more noise and work
+    if issues:  # the user has to remove nodes or edges first; node-level issues would only add noise and work
         return issues, {}
 
     parsed: dict[str, ParsedNode] = {}
+    configs: dict[str, tuple[NodeSpec, BaseModel]] = {}  # every node whose config parsed, for handle checks
     node_ids: set[str] = set()
     for node in dsl.nodes:
         if node.id in node_ids:
@@ -70,18 +82,17 @@ def check_structure(dsl: WorkflowDSL, registry: NodeRegistry) -> tuple[list[Issu
         except ValidationError as exc:
             issues.extend(pydantic_issues(exc, "INVALID_CONFIG", "config.", nodeId=node.id))
             continue
-        policy, policy_issues = _effective_policy(node, spec, config)
+        configs[node.id] = (spec, config)
+        policy, policy_issues = _effective_policy(node, spec, config, budget)
         issues.extend(policy_issues)
         if not policy_issues:
             parsed[node.id] = ParsedNode(node, spec, config, policy)
 
-    for node_type in FIXED_IDS:
+    for node_type, label in FIXED_LABELS.items():
         count = sum(1 for node in dsl.nodes if node.type == node_type)
         if count != 1:
-            issues.append(
-                error(f"{node_type.upper()}_COUNT", f"'{node_type}' 노드는 정확히 1개여야 합니다 (현재 {count}개)")
-            )
-    issues.extend(_check_edges(dsl, parsed, node_ids))
+            issues.append(error(f"{node_type.upper()}_COUNT", f"{label} 노드는 정확히 1개여야 합니다 (현재 {count}개)"))
+    issues.extend(_check_edges(dsl, configs, node_ids))
     return issues[:MAX_ISSUES], parsed
 
 
@@ -90,17 +101,19 @@ def _check_id(node: Node) -> list[Issue]:
         return [error("RESERVED_NODE_ID", f"'{node.id}'는 예약된 id입니다", nodeId=node.id)]
     fixed = FIXED_IDS.get(node.type)
     if fixed is not None and node.id != fixed:
-        return [error("RESERVED_NODE_ID", f"'{node.type}' 노드의 id는 '{fixed}'여야 합니다", nodeId=node.id)]
+        return [error("RESERVED_NODE_ID", f"{FIXED_LABELS[node.type]} 노드의 id는 '{fixed}'여야 합니다", nodeId=node.id)]
     if node.id in FIXED_IDS.values() and node.type != node.id:
-        return [error("RESERVED_NODE_ID", f"'{node.id}' id는 {node.id} 노드 전용입니다", nodeId=node.id)]
+        return [error("RESERVED_NODE_ID", f"'{node.id}' id는 {FIXED_LABELS[node.id]} 노드 전용입니다", nodeId=node.id)]
     return []
 
 
-def _effective_policy(node: Node, spec: NodeSpec, config: BaseModel) -> tuple[Policy | None, list[Issue]]:
+def _effective_policy(
+    node: Node, spec: NodeSpec, config: BaseModel, budget: StepBudget
+) -> tuple[Policy | None, list[Issue]]:
     if spec.default_policy is None:
-        if node.policy is not None:
+        if node.policy:  # an empty policy object means no override, as in merge_policy
             return None, [
-                error("POLICY_NOT_SUPPORTED", f"'{spec.type}' 노드는 실행 정책을 지원하지 않습니다",
+                error("POLICY_NOT_SUPPORTED", f"'{spec.label}' 노드는 실행 정책을 지원하지 않습니다",
                       nodeId=node.id, field="policy")
             ]
         return None, []
@@ -108,38 +121,50 @@ def _effective_policy(node: Node, spec: NodeSpec, config: BaseModel) -> tuple[Po
         policy = merge_policy(spec.default_policy, node.policy)
     except ValidationError as exc:
         return None, pydantic_issues(exc, "INVALID_POLICY", "policy.", nodeId=node.id)
-    if policy.onError == "default":
-        output = policy.defaultOutput if policy.defaultOutput is not None else spec.fallback_output(config)
-        if output is None:
+    # A copy, so the node type's default policy is never shared; defaultOutput is replaced by a checked copy below.
+    policy = policy.model_copy(update={"retry": policy.retry.model_copy()})
+    if policy.defaultOutput is not None:  # checked even while onError is "fail", so switching it is safe
+        checked, problem = _checked_default_output(spec, config, policy.defaultOutput, budget)
+        if problem is not None:
             return None, [
-                error("DEFAULT_OUTPUT_REQUIRED", "onError가 default이면 defaultOutput이 필요합니다",
+                error("INVALID_POLICY", f"defaultOutput을 사용할 수 없습니다: {problem}",
                       nodeId=node.id, field="policy.defaultOutput")
             ]
-        problem = _default_output_problem(spec, config, output)
-        if problem:
-            return None, [
-                error("INVALID_POLICY", f"defaultOutput이 노드 출력 형식과 맞지 않습니다: {problem}",
-                      nodeId=node.id, field="policy.defaultOutput")
-            ]
+        policy = policy.model_copy(update={"defaultOutput": checked})
+    if policy.onError == "default" and policy.defaultOutput is None and spec.fallback_output(config) is None:
+        return None, [
+            error("DEFAULT_OUTPUT_REQUIRED", "onError가 default이면 defaultOutput이 필요합니다",
+                  nodeId=node.id, field="policy.defaultOutput")
+        ]
     return policy, []
 
 
-def _default_output_problem(spec: NodeSpec, config: BaseModel, output: dict[str, Any]) -> str | None:
-    """Why `output` cannot stand in for the node's output (None when it can)."""
+def _checked_default_output(
+    spec: NodeSpec, config: BaseModel, output: dict[str, Any], budget: StepBudget
+) -> tuple[dict[str, Any] | None, str | None]:
+    """A validated copy of `output` that can stand in for the node's output, or why it cannot."""
     try:
-        check_text(json_value(output))  # JSON data only, at most MAX_OUTPUT_CHARS, storable text
-    except Exception as exc:  # ValueError/TypeError, SecurityError (too large) or RecursionError (too deep)
-        return clip(str(exc))
+        checked = json_value(output, MAX_DEFAULT_OUTPUT_CHARS)  # JSON data only, size-bounded, a copy
+        check_text(checked)  # storable as UTF-8 / jsonb
+    except RecursionError:
+        return None, "값의 중첩이 너무 깊습니다"
+    except Exception as exc:  # ValueError/TypeError (not JSON data) or SecurityError (too large)
+        return None, clip(str(exc))
     try:
-        violations = schema_violations(spec.output_schema(config, {}), output)
+        violations = schema_violations(spec.output_schema(config, {}), checked, budget=budget)
     except ValidationBudgetExceeded as exc:
-        return clip(str(exc))
-    return "; ".join(violations) or None
+        return None, clip(str(exc))
+    if violations:
+        return None, "노드 출력 형식과 맞지 않습니다 (" + "; ".join(violations) + ")"
+    return checked, None
 
 
-def _check_edges(dsl: WorkflowDSL, parsed: dict[str, ParsedNode], node_ids: set[str]) -> list[Issue]:
+def _check_edges(
+    dsl: WorkflowDSL, configs: dict[str, tuple[NodeSpec, BaseModel]], node_ids: set[str]
+) -> list[Issue]:
     issues: list[Issue] = []
     edge_ids: set[str] = set()
+    connections: set[tuple[str, str, str]] = set()
     for edge in dsl.edges:
         if edge.id in edge_ids:
             issues.append(error("DUPLICATE_EDGE_ID", f"연결 id가 중복되었습니다: {edge.id}", edgeId=edge.id))
@@ -151,10 +176,22 @@ def _check_edges(dsl: WorkflowDSL, parsed: dict[str, ParsedNode], node_ids: set[
                 error("EDGE_UNKNOWN_NODE", f"연결이 존재하지 않는 노드를 가리킵니다: {', '.join(missing)}", edgeId=edge.id)
             )
             continue
+        connection = (edge.source, edge.sourceHandle, edge.target)
+        if connection in connections:
+            issues.append(error("DUPLICATE_EDGE", "같은 출력과 노드를 잇는 연결이 이미 있습니다", edgeId=edge.id))
+            continue
+        connections.add(connection)
         if edge.target == "start":
             issues.append(error("EDGE_INTO_START", "시작 노드로 들어오는 연결은 만들 수 없습니다", edgeId=edge.id))
-        source = parsed.get(edge.source)
-        if source is not None and edge.sourceHandle not in source.spec.handles(source.config):
+        if edge.source not in configs:  # the source's config is invalid, so its handles are unknown
+            continue
+        spec, config = configs[edge.source]
+        handles = spec.handles(config)
+        if not handles:
+            issues.append(
+                error("EDGE_UNKNOWN_HANDLE", f"'{edge.source}' 노드에서는 연결을 시작할 수 없습니다", edgeId=edge.id)
+            )
+        elif edge.sourceHandle not in handles:
             handle = clip(edge.sourceHandle, MAX_NAME_CHARS)
             issues.append(
                 error("EDGE_UNKNOWN_HANDLE", f"'{edge.source}' 노드에 '{handle}' 출력이 없습니다", edgeId=edge.id)
