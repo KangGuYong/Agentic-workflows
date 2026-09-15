@@ -1180,6 +1180,7 @@ git commit -m "feat(engine): add sandboxed template env and reference parser"
 > **Carried into later tasks:** Task 5's renderer also maps `TypeError`/`ValueError`/`ArithmeticError` from filters to `TemplateRenderError` and caps rendered output size (streamed via `Template.generate`, aborted past `MAX_OUTPUT_CHARS`); Task 12 adds `self` to `RESERVED_IDS`.
 >
 > Pre-dispatch probes of the plan code (run against the extracted plan tree) added two more:
+>
 > - Task 6 gateway: `json.loads` also raises `RecursionError` (deeply nested output) and plain `ValueError` (integers over 4300 digits), and accepts `NaN`/`Infinity`. The gateway parses with `parse_constant` rejecting non-standard constants and treats `(ValueError, RecursionError)` as a repairable "not JSON" failure.
 > - Task 7 Ollama transport: a malformed body or NDJSON line leaked `JSONDecodeError`, a body without `message` (or with an `error` field) leaked `KeyError`, and a stream cut before `done: true` returned partial text as success. All three become retryable `LLM_UNAVAILABLE`.
 
@@ -1339,6 +1340,7 @@ git commit -m "feat(engine): add typed template renderer"
 ---
 
 > **Post-review note (Task 5, as implemented):** the code quality review found raw exceptions escaping the renderer (compile-time SyntaxError/RecursionError from deep nesting, >4300-digit ints), size amplification past the cap (whole values, chained `tojson`, `~`, list literals), non-JSON results (bound methods, nested Undefined, inf) and aliasing of context objects. The fix (commit `01f021b`) makes the rule "templates operate on JSON data only; every value a template builds is JSON data of serialized size ≤ `MAX_OUTPUT_CHARS`, checked while building":
+>
 > - `env.py`: all arithmetic operators are numbers-only; `MAX_POWER_BITS` became `MAX_INT_BITS`, which also bounds `*`. `getattr` and `getitem` read mapping keys and sequence indexes only (`LoopContext` excepted), never Python attributes. New `json_value()` gives a validated, size-budgeted deep copy, used by printing, `tojson` and `join`.
 > - `parser.py`: rejects `~` and whole-AST nesting deeper than `MAX_NESTING_DEPTH` = 50. Python fails to compile Jinja's output at about 200 (expressions) or 102 (nested `if`).
 > - `render.py`: passes the context positionally. Whole values go through `json_value`. Any failure becomes `TemplateRenderError`, and string results are capped.
@@ -1680,6 +1682,7 @@ git commit -m "feat(engine): add LLM client contract, scripted double and struct
 ```
 
 > **Post-review note (Task 6, as implemented):** commits `49a1df8` and `d0c10dc` made these changes on review:
+>
 > - A `RecursionError` from `iter_errors` (deep valid output against a recursive schema) is now repaired instead of escaping.
 > - jsonschema messages are clipped: 200 chars per message and 1000 in total. The invalid answer echoed back is clipped to 4000 chars.
 > - `1e400` is rejected.
@@ -1688,12 +1691,14 @@ git commit -m "feat(engine): add LLM client contract, scripted double and struct
 > Deferred to Plan 2 (roadmap): usage of failed attempts.
 >
 > The review also found two schema-side problems:
+>
 > - A tenant schema `pattern` can backtrack catastrophically (`^(a+)+$` on 31 chars took 48 s on the event loop).
 > - An unresolvable `$ref` passes `check_schema` but raises inside `iter_errors`.
 >
 > Both belong at save time and are handled in Task 8's `check_object_schema`. Suite: 170.
 >
 > **Carried into Task 8:** the strict JSON parsing and short schema messages move to a shared `engine/jsondata.py` (`parse_json`, `schema_violations`, `clip`), used by the gateway and the template node. `check_object_schema` then does three things:
+>
 > - It rejects `pattern`/`patternProperties`.
 > - It allows only local `#/...` `$ref`s that resolve.
 > - It maps `RecursionError` (a too-deep schema) to a validation error.
@@ -2355,6 +2360,7 @@ git commit -m "feat(engine): add node spec contract, registry and start/end/temp
 > **Post-review note (Task 8, as implemented):** four review rounds changed this task substantially. The commits are `251c9e5`, `0900992`, `59069c1`, `4ec4f4d` and `61208a6`.
 >
 > **`engine/jsondata.py`** is shared by the LLM gateway, the nodes and later the validator.
+>
 > - **Parsing.** `parse_json` accepts standard JSON only. It rejects NaN/Infinity, overflowing numbers, integers over 4300 digits, duplicate keys, NUL, lone surrogates and too-deep nesting.
 > - **Accepted schemas.** `schema_problems` limits tenant schemas to a subset:
 >   - Keywords: `type`, `properties`, `required`, `additionalProperties`, `items`, `anyOf`, `oneOf`, `enum`, `const`, numeric bounds, length/count bounds (at most 10,000), annotations, `format` and `x-*`.
@@ -2367,11 +2373,13 @@ git commit -m "feat(engine): add node spec contract, registry and start/end/temp
 >   - A differential test against jsonschema on about 176K random cases found 0 mismatches.
 >
 > **Template target `"json"`** (`dsl/types.py`, `templates/env.py`, `templates/render.py`).
+>
 > - In a JSON template each `{{ }}` inserts a JSON value, and the renderer parses the result. Data can therefore never add JSON structure.
 > - `TemplateNode` format `json` uses this target and never re-parses strings. The old re-parsing allowed injection through `{"a": "{{start.name}}"}`.
 > - Writing `"{{ x }}"` inside quotes is an error and comes with a hint.
 >
 > **Node changes.**
+>
 > - Output names are checked with `fullmatch`.
 > - Start inputs are deep-copied.
 > - The registry rejects duplicate types.
@@ -2381,6 +2389,7 @@ git commit -m "feat(engine): add node spec contract, registry and start/end/temp
 > Suite: 319.
 >
 > **Carried into later tasks:**
+>
 > - **Task 9:** the LLM node's `outputSchema` goes through `check_object_schema`. `outputSchema` must be a schema the tenant subset accepts before it is sent to Ollama as `format`.
 > - **Task 12:** the validator's `defaultOutput` check calls `schema_violations`, and must catch `ValidationBudgetExceeded` and report it as an `INVALID_POLICY` issue. Task 12 also adds `self` to `RESERVED_IDS` (see Task 4/5).
 
@@ -2689,6 +2698,7 @@ git commit -m "feat(engine): add llm and classifier nodes"
 ```
 
 > **Post-review note (Task 9, as implemented):** commits `a0c14b2` and `424d0af`.
+>
 > - The registry keeps the duplicate-type check and only adds the new nodes. Task 11 does the same.
 > - Model names match `MODEL_NAME` (`^\S+$`) and are at most 200 chars.
 > - `temperature` is `strict=True`: bool is rejected, int is accepted.
@@ -2911,6 +2921,7 @@ git commit -m "feat(engine): add condition node"
 > **Loose `==`.** The plan's version used Python equality, so `true == 1` and `"1_000" == 1000` were both true. It is now JSON equality via `engine.jsondata.json_equal`, which replaces the old private `_json_equal`. A string still matches the JSON value it spells, parsed with `parse_json`: `"5" == 5`, `"true" == true`, `"" == null`.
 >
 > **Operand checks.**
+>
 > - `contains`/`not_contains` need a non-empty `right` template.
 > - A `null` needle never matches inside a string. It still matches a `null` array item.
 > - Numeric ops and `contains` raise `TypeError` on mismatched operands. `execute` maps this to non-retryable `TYPE_MISMATCH`.
@@ -2920,6 +2931,7 @@ git commit -m "feat(engine): add condition node"
 > Suite: 379.
 >
 > **Carried into Task 11** (prepared, not yet applied):
+>
 > - **`human_approval`:** check the resume answer's shape.
 >   - Only the keys `decision`, `comment`, `editedValue`, `reviewedAt` are allowed.
 >   - `comment` is a str of at most 10,000 chars.
@@ -3224,6 +3236,34 @@ git add services/engine/engine/nodes services/engine/tests/test_nodes_flow.py
 git commit -m "feat(engine): add merge and human approval nodes"
 ```
 
+> **Post-review note (Task 11, as implemented):** commits `83e9fdb` and `e33e71e`.
+>
+> **`merge`.**
+>
+> - Each upstream output is copied with `json_value`. A missing output, an output that is too large, or one nested too deeply raises non-retryable `NODE_FAILED`.
+> - `output_schema` deep-copies predecessor schemas. When the combined schema leaves the `schema_problems` subset (too deep or too large), each branch becomes `{}`; `required` is kept. This also stops merge-of-merge schemas from doubling in size.
+>
+> **`human_approval`.**
+>
+> - `route` checks `decision` is `approve` or `reject`.
+> - A blank rendered message raises `TEMPLATE_ERROR` before the interrupt. The output schema bounds `comment` and sets `additionalProperties: false`.
+> - Public `resume_output(answer, waiting)` checks the answer against the interrupt payload it answers, and builds the output. The node calls it on resume; Plan 2's API should call it before `waiting → queued`.
+>   - Allowed keys are `nodeId`, `execIndex`, `decision`, `comment`, `editedValue` and `reviewedAt`. `nodeId`/`execIndex` are optional, but must equal the waiting values with the same type.
+>   - `comment` is a str of at most 10,000 chars, with no NUL or lone surrogates.
+>   - `editedValue` needs `allowEdit`. It goes through `json_value` and `jsondata.check_text`, and must have the review value's `json_kind` when the review is not null.
+>   - `reviewedAt` must be ISO 8601 with a timezone and is normalized to UTC. The API sets it when it accepts the answer; it is never copied from the request. When absent, the server time is used.
+> - `engine.jsondata` now exports `check_text` and `json_kind` (formerly `_check_text`, `_kind`).
+>
+> Suite: 412.
+>
+> **Carried into Task 12** (in addition to the Task 10 carry-over):
+>
+> - A `merge` needs at least 2 distinct forward predecessors and may not sit inside a branch chain (spec rule 8). Its `pred_ids` must be unique.
+> - A merge output holds every branch output, so it can exceed the 1 MB node output cap even when each branch fits. Report this as a warning when two or more predecessors can produce large outputs, or document it in the node help text.
+> - The merge schema fallback is all-or-nothing: when the combined schema is rejected, every branch loses its type, not only the largest. This is acceptable for the MVP; a later refinement could untype the largest branches first. Add a regression test that a merge of merges (e.g. 40 layers) stays inside `schema_problems`.
+>
+> **Carried into Task 16:** rendered values can still hold NUL or lone surrogates (e.g. `{{ '\x00' }}`, or a start input that contains one). They would reach node outputs and interrupt payloads and break `jsonb` storage. Call `jsondata.check_text` once in the wrapper, next to the output size check, on both the rendered values and the output. `resume_output` expects `waiting` to be the exact interrupt payload; it raises `KeyError` if `nodeId` or `execIndex` is missing.
+
 ---
 
 ## Task 12: Validator phase 1 — structure
@@ -3356,7 +3396,6 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'engine.validator'`
 **File:** `services/engine/engine/validator/__init__.py`
 
 ```python
-
 ```
 
 **File:** `services/engine/engine/validator/issues.py`
