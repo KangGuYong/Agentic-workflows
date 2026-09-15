@@ -57,7 +57,8 @@ class Recorder(Protocol):
 
     async def node_waiting(self, node_id: str, exec_index: int, attempt: int, payload: dict[str, Any]) -> None: ...
 
-    async def node_token(self, node_id: str, exec_index: int, text: str) -> None: ...
+    async def node_token(self, node_id: str, exec_index: int, text: str) -> None:
+        """Best effort: the wrapper logs and ignores a failure here (tokens are a live preview only)."""
 
 
 def _stored(value: Any) -> Any:

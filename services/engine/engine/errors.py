@@ -34,6 +34,11 @@ class NodeFailedError(Exception):
         self.error = error
 
 
+class EngineFault(Exception):
+    """Infrastructure failure inside a node call (e.g. the recorder's database write). Not the user's node
+    error: it escapes the run so the worker stops and crash recovery (lease expiry) continues the run."""
+
+
 class RunCancelled(Exception):
     """Raised when the run guard observes a cancellation request (or, as LeaseLost, a lost lease)."""
 

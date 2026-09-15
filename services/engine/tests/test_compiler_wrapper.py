@@ -1,3 +1,5 @@
+import dataclasses
+
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -6,9 +8,10 @@ from pydantic import BaseModel
 from engine.compiler.state import RunState, initial_state
 from engine.compiler.wrapper import NodePlan, _fallback_output, backoff_delay, make_node_fn
 from engine.dsl.models import Edge, Node, Policy, RetrySpec
-from engine.errors import ErrorCode, NodeError, NodeFailedError, RunCancelled
+from engine.errors import EngineFault, ErrorCode, NodeError, NodeFailedError, RunCancelled
 from engine.llm.scripted import ScriptedLLM
 from engine.nodes.base import NodeResult, NodeSpec
+from engine.nodes.classifier import ClassifierNode
 from engine.nodes.condition import ConditionNode
 from engine.nodes.llm import LLMNode
 from engine.nodes.merge import MergeNode
@@ -136,8 +139,7 @@ async def test_template_error_is_recorded_as_failed_attempt():
 async def test_output_too_large():
     # each branch fits the renderer's 1,000,000-char cap, but the merged output does not fit 1 MB
     deps, _, _ = _deps()
-    plan = _plan(MergeNode(), {})
-    plan = NodePlan(**{**plan.__dict__, "pred_ids": ("a", "b")})
+    plan = dataclasses.replace(_plan(MergeNode(), {}), pred_ids=("a", "b"))
     with pytest.raises(NodeFailedError) as exc:
         await _run(plan, deps, start={"topic": "AI"}, outputs={"a": {"text": "x" * 600_000}, "b": {"text": "y" * 600_000}})
     assert exc.value.error.code == ErrorCode.OUTPUT_TOO_LARGE
@@ -258,3 +260,58 @@ async def test_a_duplicate_attempt_stops_the_node_like_a_lost_lease():
     recorder.attempts_so_far = stale_count
     with pytest.raises(DuplicateAttempt):
         await _run(_plan(LLMNode(), LLM_CONFIG, policy=LLMNode.default_policy), deps)
+
+
+class _FlakyRecorder(InMemoryRecorder):
+    def __init__(self, broken: str) -> None:
+        super().__init__()
+        self.broken = broken
+
+    async def node_token(self, node_id, exec_index, text):
+        if self.broken == "node_token":
+            raise ConnectionError("redis publish failed")
+        await super().node_token(node_id, exec_index, text)
+
+    async def node_started(self, node_id, exec_index, attempt, input):
+        if self.broken == "node_started":
+            raise ConnectionError("db connection reset")
+        await super().node_started(node_id, exec_index, attempt, input)
+
+
+async def test_a_failed_token_publish_does_not_fail_the_node():
+    deps, _, _ = _deps(ScriptedLLM(["답"]))
+    deps.recorder = _FlakyRecorder("node_token")
+    result = await _run(_plan(LLMNode(), LLM_CONFIG, policy=LLMNode.default_policy), deps)
+    assert result["outputs"]["n"] == {"text": "답"}
+
+
+async def test_a_recorder_failure_escapes_as_an_engine_fault_not_a_node_error():
+    deps, _, _ = _deps(ScriptedLLM(["답"]))
+    deps.recorder = _FlakyRecorder("node_started")
+    with pytest.raises(EngineFault):
+        await _run(_plan(LLMNode(), LLM_CONFIG, policy=LLMNode.default_policy), deps)
+    assert deps.recorder.events == []
+
+
+async def test_a_timeout_is_retried_and_can_succeed():
+    deps, recorder, _ = _deps(ScriptedLLM([TimeoutError(), "답"]))
+    policy = Policy(timeoutSec=5, retry=RetrySpec(maxAttempts=2, initialDelaySec=0.5))
+    result = await _run(_plan(LLMNode(), LLM_CONFIG, policy=policy), deps)
+    assert result["outputs"]["n"] == {"text": "답"}
+    assert [(r.attempt, r.status, (r.error or {}).get("code")) for r in recorder.records] == [
+        (1, "failed", "NODE_TIMEOUT"), (2, "succeeded", None)]
+
+
+async def test_classifier_on_error_default_routes_through_its_default_handle():
+    edges = {
+        "a": [Edge(id="ea", source="n", sourceHandle="a", target="llm_a")],
+        "default": [Edge(id="ed", source="n", sourceHandle="default", target="end")],
+    }
+    config = {"model": "m", "input": "{{start.topic}}", "categories": [{"id": "a", "description": "A"}]}
+    policy = Policy(retry=RetrySpec(maxAttempts=1), onError="default")
+    deps, recorder, _ = _deps(ScriptedLLM([ValueError("bad")]))
+
+    result = await _run(_plan(ClassifierNode(), config, policy=policy, handle_edges=edges), deps)
+
+    assert result["routes"] == {"n": ["end"]}
+    assert (recorder.records[-1].status, recorder.records[-1].meta["handle"]) == ("defaulted", "default")

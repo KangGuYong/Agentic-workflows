@@ -4,10 +4,11 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
-from langgraph.errors import GraphInterrupt
+from langgraph.errors import GraphBubbleUp
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 from pydantic import BaseModel
@@ -15,13 +16,16 @@ from pydantic import BaseModel
 from engine.compiler.routing import RouteDecision, resolve_route
 from engine.compiler.state import RunState
 from engine.dsl.models import Edge, Node, Policy, RetrySpec
-from engine.errors import ErrorCode, NodeError, NodeFailedError, RunCancelled
+from engine.errors import EngineFault, ErrorCode, NodeError, NodeFailedError, RunCancelled
 from engine.jsondata import check_text, clip
 from engine.nodes.base import NodeContext, NodeResult, NodeSpec, TemplateField
 from engine.runtime.deps import RunDeps
 from engine.templates.render import TemplateRenderError, render_template
 
 MAX_OUTPUT_BYTES = 1_000_000
+CONTROL_FLOW = (GraphBubbleUp, RunCancelled, EngineFault)  # never node errors: they end or pause the node call
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -79,8 +83,8 @@ def _decide(plan: NodePlan, output: dict[str, Any], loop_counters: dict[str, int
     try:
         chosen = plan.spec.route(plan.config, output)
         return resolve_route(plan.spec.type, chosen, plan.handle_edges, plan.back_edge_ids, loop_counters)
-    except (KeyError, ValueError) as exc:
-        raise NodeError(ErrorCode.TYPE_MISMATCH, f"분기를 결정할 수 없습니다: {clip(str(exc))}", retryable=False) from exc
+    except (KeyError, ValueError) as exc:  # a routing bug, not a type problem in the user's data
+        raise NodeError(ErrorCode.NODE_FAILED, f"분기를 결정할 수 없습니다: {clip(str(exc))}", retryable=False) from exc
 
 
 def _fallback_output(plan: NodePlan) -> dict[str, Any] | None:
@@ -92,18 +96,33 @@ def _fallback_output(plan: NodePlan) -> dict[str, Any] | None:
     return plan.spec.fallback_output(plan.config)
 
 
+async def _recorded(write: Any) -> None:
+    """Await a recorder write; an infrastructure failure becomes EngineFault, never a node error."""
+    try:
+        await write
+    except RunCancelled:
+        raise
+    except Exception as exc:
+        raise EngineFault(f"recorder write failed: {type(exc).__name__}") from exc
+
+
 def _context(
     plan: NodePlan, deps: RunDeps, state: RunState, exec_index: int, attempt: int, resumed: bool
 ) -> NodeContext:
     node_id = plan.node.id
 
     async def on_token(text: str) -> None:
-        await deps.recorder.node_token(node_id, exec_index, text)
+        try:  # tokens are a best-effort live preview (spec 7.2): a failed publish never fails the node
+            await deps.recorder.node_token(node_id, exec_index, text)
+        except Exception:  # noqa: BLE001
+            log.warning("node_token failed for %s#%s", node_id, exec_index, exc_info=True)
 
     async def wait_for_human(payload: dict[str, Any]) -> Any:
         # On resume LangGraph re-runs the node and interrupt() returns the resume value instead of raising.
+        # A node that waits must not retry (human_approval accepts no policy): a second interrupt() in the
+        # same call would wait again without a node_waiting record.
         if not resumed:
-            await deps.recorder.node_waiting(node_id, exec_index, attempt, payload)
+            await _recorded(deps.recorder.node_waiting(node_id, exec_index, attempt, payload))
         return interrupt(payload)
 
     return NodeContext(
@@ -138,9 +157,9 @@ async def _succeed(
         if decision.counters:
             write["loop_counters"] = decision.counters
         meta = {"handle": decision.handle, "loopExhausted": decision.loop_exhausted}
-    await deps.recorder.node_succeeded(
+    await _recorded(deps.recorder.node_succeeded(
         node_id, exec_index, attempt, result.output, result.usage, defaulted=defaulted, meta=meta
-    )
+    ))
     return write
 
 
@@ -166,29 +185,33 @@ def make_node_fn(plan: NodePlan):
         error: NodeError | None = None
 
         for tries in range(1, max_attempts + 1):
+            error = None
             try:
-                rendered = _render(fields, outputs)
-                if not started:
-                    await recorder.node_started(node_id, exec_index, attempt, rendered)
-                    started = True
-                ctx = _context(plan, deps, state, exec_index, attempt, resumed)
-                async with asyncio.timeout(timeout):
-                    result = await plan.spec.execute(ctx, plan.config, rendered)
-                _check_output(result.output)
-                decision = _decide(plan, result.output, loop_counters)
-            except (GraphInterrupt, RunCancelled):
-                raise
-            except Exception as exc:  # noqa: BLE001 - every other failure is a node error
-                error = _as_node_error(exc, timeout)
-            else:
-                return await _succeed(plan, deps, exec_index, attempt, result, decision, defaulted=False)
-
+                rendered: dict[str, Any] | None = _render(fields, outputs)
+            except Exception as exc:  # noqa: BLE001 - a template failure is this attempt's node error
+                rendered, error = None, _as_node_error(exc, timeout)
             if not started:
-                await recorder.node_started(node_id, exec_index, attempt, None)
+                await _recorded(recorder.node_started(node_id, exec_index, attempt, rendered))
+                started = True
+            if error is None:
+                try:
+                    ctx = _context(plan, deps, state, exec_index, attempt, resumed)
+                    async with asyncio.timeout(timeout):
+                        result = await plan.spec.execute(ctx, plan.config, rendered)
+                    _check_output(result.output)
+                    decision = _decide(plan, result.output, loop_counters)
+                except CONTROL_FLOW:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - every other failure is a node error
+                    error = _as_node_error(exc, timeout)
+                else:
+                    return await _succeed(plan, deps, exec_index, attempt, result, decision, defaulted=False)
+
             will_retry = error.retryable and tries < max_attempts
-            await recorder.node_failed(node_id, exec_index, attempt, error.to_dict(), will_retry=will_retry)
+            await _recorded(recorder.node_failed(node_id, exec_index, attempt, error.to_dict(), will_retry=will_retry))
             if not will_retry:
                 break
+            # Plan 2 cancels the running task directly; this check covers an in-process FlagGuard.
             await deps.sleep(backoff_delay(plan.policy.retry, tries))
             deps.guard.check()
             # a new attempt number from the log, so a replay that reused a waited attempt never collides
