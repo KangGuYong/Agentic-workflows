@@ -243,7 +243,7 @@ requires-dist = [
 dev = [
     { name = "pytest", specifier = ">=9,<10" },
     { name = "pytest-asyncio", specifier = ">=1.4,<2" },
-    { name = "ruff", specifier = ">=0.8" },
+    { name = "ruff", specifier = ">=0.8,<1" },
 ]
 
 [[package]]

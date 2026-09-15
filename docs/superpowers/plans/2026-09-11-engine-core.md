@@ -6020,6 +6020,24 @@ git commit -m "chore(engine): lint fixes"
 
 > **Verification (Task 19):** at `d9dc140`, `uv run pytest -q` reports 631 passed, with no warnings (also clean under `-W error::RuntimeWarning`), and `uv run ruff check .` reports `All checks passed!`. No lint fixes were needed. The coverage table below still holds.
 
+> **Final branch review:** commits `7a2dae0` and `2179ddd`.
+>
+> **Run state depth.** LangGraph's checkpoint serializer fails at about 250 nesting levels with a raw `TypeError`, below what the engine's checks allowed. The fix:
+> - `engine.jsondata.MAX_JSON_DEPTH` (100) and `check_storable` apply to rendered fields (`TEMPLATE_ERROR`), node outputs (`NODE_FAILED`), `defaultOutput` (`INVALID_POLICY`) and fresh run inputs (a failed outcome at `start`).
+> - `resume_output` checks the whole approval output, so an answer it accepts always fits the node output.
+>
+> **Unsafe text in messages.** The duplicate-key message quoted raw keys, putting NUL and lone surrogates into `NodeError` and `Issue` messages. `safe_text` now cleans that message. `NodeError` and `Issue` replace unsafe characters as a backstop, and `InMemoryRecorder` rejects them as jsonb would.
+>
+> **Also.** `ruff` is bounded `<1`. The roadmap interface table now names the real modules.
+>
+> **Carried into Plan 2 (roadmap):** quadratic checkpoint growth, one shared node registry, `dsl_hash` of `policy: {}`, run input depth at the API.
+>
+> **Known follow-ups.**
+> - A JSON template with no `{{ }}` nested deeper than 99 passes `validate()` but always fails at runtime; `_check_json_template` could run `check_storable` on the parsed value.
+> - `_is_number` is duplicated in `jsondata`, `templates/env` and `nodes/condition`.
+>
+> Suite: 643.
+
 ---
 
 ## Spec coverage (Plan 1)
