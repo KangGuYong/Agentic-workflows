@@ -174,34 +174,47 @@ def _costly_llm(node_id: str, items: int) -> dict:
 def test_default_output_too_costly_to_validate_is_an_invalid_policy():
     raw = _base()
     raw["nodes"][1] = _costly_llm("llm_1", 20_000)
-    assert _codes(raw) == ["INVALID_POLICY"]
+    assert _codes(raw) == ["INVALID_POLICY", "VALIDATION_TOO_COSTLY"]
 
 
 def test_schema_validation_work_is_bounded_for_the_whole_workflow():
     raw = _base()
     raw["nodes"][1] = _costly_llm("llm_1", 100)
     raw["nodes"].append(_costly_llm("llm_2", 100))
+    raw["nodes"].append(
+        {"id": "llm_3", "type": "llm", "config": {"model": "m", "prompt": "p"}, "policy": {"defaultOutput": {"text": "t"}}}
+    )
     budget = StepBudget(30_000)
 
     issues, parsed = check_structure(WorkflowDSL.model_validate(raw), default_registry(), budget)
 
-    assert "llm_1" in parsed
-    assert [(issue.code, issue.nodeId) for issue in issues] == [("INVALID_POLICY", "llm_2")]
+    assert {"llm_1", "llm_3"} <= set(parsed)  # llm_3 is not blamed for the spent budget
+    assert [(issue.code, issue.nodeId) for issue in issues] == [
+        ("INVALID_POLICY", "llm_2"),
+        ("VALIDATION_TOO_COSTLY", None),
+    ]
     assert budget.remaining == 0
 
 
 def test_parsed_policy_holds_a_validated_copy_of_the_default_output():
     raw = _base()
-    raw["nodes"][1]["policy"] = {"onError": "default", "defaultOutput": {"text": "대체 답변"}}
+    raw["nodes"][1]["policy"] = {"onError": "default", "defaultOutput": {"text": "대체 답변", "extra": {"k": [1]}}}
     dsl = WorkflowDSL.model_validate(raw)
 
     _, parsed = check_structure(dsl, default_registry())
     policy = parsed["llm_1"].policy
 
-    assert policy.defaultOutput == {"text": "대체 답변"}
-    assert policy.defaultOutput is not dsl.nodes[1].policy["defaultOutput"]
+    assert policy.defaultOutput == {"text": "대체 답변", "extra": {"k": [1]}}
+    assert policy.defaultOutput["extra"] is not dsl.nodes[1].policy["defaultOutput"]["extra"]
+
+
+def test_parsed_policy_never_shares_the_node_type_default():
+    _, parsed = check_structure(WorkflowDSL.model_validate(_base()), default_registry())
+    policy = parsed["llm_1"].policy
+
+    assert policy == LLMNode.default_policy
     assert policy is not LLMNode.default_policy
-    assert parsed["llm_1"].policy is not check_structure(dsl, default_registry())[1]["llm_1"].policy
+    assert policy.retry is not LLMNode.default_policy.retry
 
 
 def test_nodes_with_problems_are_left_out_of_parsed():
@@ -215,7 +228,37 @@ def test_handles_are_checked_when_only_the_policy_is_invalid():
     raw = _base()
     raw["nodes"][1]["policy"] = {"timeoutSec": 0}
     raw["edges"].append({"id": "e9", "source": "llm_1", "sourceHandle": "true", "target": "end"})
-    assert _codes(raw) == ["INVALID_POLICY", "EDGE_UNKNOWN_HANDLE"]
+
+    issues, _ = check_structure(WorkflowDSL.model_validate(raw), default_registry())
+
+    assert [issue.code for issue in issues] == ["INVALID_POLICY", "EDGE_UNKNOWN_HANDLE"]
+    assert issues[0].message.startswith("실행 정책 오류: ")
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda r: r["edges"].append({"id": "e9", "source": "end", "target": "llm_1"}),
+         "'end' 노드에서는 연결을 시작할 수 없습니다"),
+        (lambda r: r["nodes"][0].update(id="begin") or r["edges"][0].update(source="begin"),
+         "시작 노드의 id는 'start'여야 합니다"),
+        (lambda r: r["nodes"][1].update(policy={"defaultOutput": _deep({"text": "t"}, 5000)}),
+         "defaultOutput을 사용할 수 없습니다: 값의 중첩이 너무 깊습니다"),
+    ],
+    ids=["edge-from-end", "start-label", "deep-default-output"],
+)
+def test_messages_read_well_for_non_developers(mutate, message):
+    raw = _base()
+    mutate(raw)
+    issues, _ = check_structure(WorkflowDSL.model_validate(raw), default_registry())
+    assert message in [issue.message for issue in issues]
+
+
+def _deep(leaf: dict, depth: int) -> dict:
+    value = leaf
+    for _ in range(depth):
+        value = {"text": "t", "x": value}
+    return value
 
 
 def test_duplicate_connections_are_reported():

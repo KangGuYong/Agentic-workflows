@@ -88,6 +88,9 @@ def check_structure(
         if not policy_issues:
             parsed[node.id] = ParsedNode(node, spec, config, policy)
 
+    if budget.remaining == 0:  # later schema checks were skipped rather than blamed on nodes that may be fine
+        message = "워크플로의 기본 출력값을 검증하는 데 필요한 계산량이 너무 큽니다. 기본 출력값이나 출력 스키마를 줄여 주세요"
+        issues.append(error("VALIDATION_TOO_COSTLY", message))
     for node_type, label in FIXED_LABELS.items():
         count = sum(1 for node in dsl.nodes if node.type == node_type)
         if count != 1:
@@ -150,6 +153,8 @@ def _checked_default_output(
         return None, "값의 중첩이 너무 깊습니다"
     except Exception as exc:  # ValueError/TypeError (not JSON data) or SecurityError (too large)
         return None, clip(str(exc))
+    if budget.remaining == 0:  # reported once for the workflow (VALIDATION_TOO_COSTLY)
+        return checked, None
     try:
         violations = schema_violations(spec.output_schema(config, {}), checked, budget=budget)
     except ValidationBudgetExceeded as exc:
