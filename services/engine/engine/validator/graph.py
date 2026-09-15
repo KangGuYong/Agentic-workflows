@@ -111,9 +111,10 @@ def _check_reachability(graph: Graph) -> list[Issue]:
     for edge in graph.edges:
         predecessors[edge.target].append(edge.source)
     dead_ends = _dead_ends(graph)
-    # A node that only fails to reach `end` because a node after it has an unconnected handle is not blamed:
-    # that dead end (reported here and as HANDLE_NOT_CONNECTED) is the mistake to fix.
-    explained = _reach("end", predecessors) | (_reach(dead_ends, predecessors) - dead_ends)
+    cycles = set().union(*(nodes for nodes, _ in _forward_cycles(graph)))
+    # A node that only fails to reach `end` because of a mistake after it is not blamed: a dead end
+    # (reported here and as HANDLE_NOT_CONNECTED) or a forward cycle (reported by _check_loops).
+    explained = _reach("end", predecessors) | (_reach(dead_ends | cycles, predecessors) - dead_ends)
     issues = []
     for node_id in graph.nodes:
         if node_id not in graph.reachable:
@@ -166,31 +167,51 @@ def _check_loops(graph: Graph) -> list[Issue]:
     return issues
 
 
-def _forward_cycle_issues(graph: Graph) -> list[Issue]:
-    """Cycles made only of forward edges: a loop whose closing edge has no maxIterations, or an illegal cycle."""
+def _forward_cycles(graph: Graph) -> list[tuple[frozenset[str], list[Edge]]]:
+    """Cycles made only of forward edges, as (component nodes, forward edges inside it), in edge order."""
     forward_edges = [edge for edge in graph.edges if edge.id not in graph.back_edges]
     forward = _successors(graph.nodes, forward_edges)
     reach = {node_id: _reach(node_id, forward) for node_id in graph.nodes}
+    components: dict[frozenset[str], list[Edge]] = {}
+    for edge in forward_edges:
+        if edge.source in reach[edge.target] and (edge.source != edge.target or edge.target in forward[edge.source]):
+            component = frozenset(node for node in reach[edge.target] if edge.target in reach[node])
+            components.setdefault(component, []).append(edge)
+    return list(components.items())
 
-    def on_cycle(edge: Edge) -> bool:  # the edge's target leads back to its source
-        return edge.source in reach[edge.target] and (edge.source != edge.target or edge.target in forward[edge.source])
 
-    cycle_edges = [edge for edge in forward_edges if on_cycle(edge)]
+def _distances(graph: Graph) -> dict[str, int]:
+    """Forward-edge hop distance from `start` (breadth-first)."""
+    forward = _forward_successors(graph)
+    distance = {"start": 0}
+    queue = ["start"]
+    while queue:
+        node_id = queue.pop(0)
+        for target in forward[node_id]:
+            if target not in distance:
+                distance[target] = distance[node_id] + 1
+                queue.append(target)
+    return distance
+
+
+def _forward_cycle_issues(graph: Graph) -> list[Issue]:
+    """A loop whose closing edge has no maxIterations, or an illegal cycle (no condition/classifier on it)."""
     issues: list[Issue] = []
-    blamed: set[frozenset[str]] = set()  # cycles (as node sets) that already have an issue
-    for edge in cycle_edges:
-        if graph.nodes[edge.source].spec.type in LOOP_SOURCES:
-            issues.append(
-                error("BACK_EDGE_NO_LIMIT", "반복 구간을 닫는 연결에는 최대 반복 횟수(maxIterations)가 필요합니다",
-                      edgeId=edge.id)
-            )
-            blamed.add(frozenset(node for node in reach[edge.target] if edge.target in reach[node]))
-    for edge in cycle_edges:
-        component = frozenset(node for node in reach[edge.target] if edge.target in reach[node])
-        if component not in blamed:
-            blamed.add(component)
+    distance = _distances(graph)
+    far = len(graph.nodes) + 1
+    for _, edges in _forward_cycles(graph):
+        candidates = [edge for edge in edges if graph.nodes[edge.source].spec.type in LOOP_SOURCES]
+        if not candidates:
             issues.append(error("ILLEGAL_CYCLE", "반복 구간은 조건/분류 노드에서 되돌아가는 연결로만 만들 수 있습니다",
-                                edgeId=edge.id))
+                                edgeId=edges[0].id))
+            continue
+        # The closing edge goes back toward start; routing edges inside the loop body go further away.
+        closing = [e for e in candidates if distance.get(e.target, far) <= distance.get(e.source, far)] or candidates
+        issues.extend(
+            error("BACK_EDGE_NO_LIMIT", "반복 구간을 닫는 연결에는 최대 반복 횟수(maxIterations)가 필요합니다",
+                  edgeId=edge.id)
+            for edge in closing
+        )
     return issues
 
 
@@ -198,8 +219,11 @@ def _in_cycle(successors: dict[str, list[str]], node_id: str) -> bool:
     return any(node_id in _reach(target, successors) for target in successors[node_id])
 
 
-def _walk_branch(graph: Graph, source: str, handle: str, first: Edge, back_targets: set[str]) -> tuple[str, str] | Issue:
-    """Follow one fan-out branch to its merge. Returns (merge_id, closing_edge_id) or an Issue."""
+def _walk_branch(
+    graph: Graph, source: str, handle: str, first: Edge, back_targets: set[str], region: set[str]
+) -> tuple[str, str] | Issue:
+    """Follow one fan-out branch to its merge. Returns (merge_id, closing_edge_id) or an Issue.
+    `region` holds the nodes reachable from this fan-out's branches (forward edges)."""
     edge = first
     steps = 0
     while True:
@@ -210,7 +234,9 @@ def _walk_branch(graph: Graph, source: str, handle: str, first: Edge, back_targe
                 return error("INVALID_PARALLEL_REGION", "병렬 분기에는 합치기 전에 노드가 하나 이상 있어야 합니다",
                              edgeId=first.id)
             return target_id, edge.id
-        if len(graph.incoming[target_id]) > 1:
+        fan_out = {e.id for e in graph.out[source][handle]}
+        joined = graph.incoming[target_id]
+        if len(joined) > 1 and all(e.id in fan_out or e.source in region for e in joined):
             return error(
                 "INVALID_PARALLEL_REGION",
                 f"'{source}'에서 갈라진 분기가 합치기 노드 없이 '{target_id}'에서 만나 중복 실행됩니다. "
@@ -221,6 +247,7 @@ def _walk_branch(graph: Graph, source: str, handle: str, first: Edge, back_targe
         is_plain = (
             not target.spec.is_branch
             and target.spec.type not in ("start", "end")
+            and len(graph.incoming[target_id]) == 1  # joined from elsewhere: a merge could wait forever
             and target_id not in back_targets
             and len(out_edges) == 1
             and out_edges[0].id not in graph.back_edges
@@ -252,6 +279,7 @@ def _check_parallel(graph: Graph) -> list[Issue]:
     claimed_merges: set[str] = set()
     back_targets = {edge.target for edge in graph.back_edges.values()}
     successors = _successors(graph.nodes, graph.edges)
+    forward = _forward_successors(graph)
     for node_id, handles in graph.out.items():
         for handle, all_edges in handles.items():
             edges = [edge for edge in all_edges if edge.id not in graph.back_edges]  # loop handles: _check_loops
@@ -262,14 +290,12 @@ def _check_parallel(graph: Graph) -> list[Issue]:
             claimed_merges |= {merge for edge in edges if (merge := _first_merge(graph, edge)) is not None}
             if len(edges) > MAX_FAN_OUT:
                 issues.append(error("LIMIT_EXCEEDED", f"병렬 분기는 최대 {MAX_FAN_OUT}개까지 사용할 수 있습니다", **where))
-            if _in_cycle(successors, node_id):
-                issues.append(error("PARALLEL_IN_LOOP", "반복(루프) 안에서는 병렬 분기를 사용할 수 없습니다", **where))
-                continue
+            region = _reach({edge.target for edge in edges}, forward)  # nodes this fan-out's branches lead to
             merges: set[str] = set()
             closing: set[str] = set()
             branch_issues: list[Issue] = []
             for edge in edges:
-                result = _walk_branch(graph, node_id, handle, edge, back_targets)
+                result = _walk_branch(graph, node_id, handle, edge, back_targets, region)
                 if isinstance(result, Issue):
                     branch_issues.append(result)
                 else:

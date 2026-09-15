@@ -339,3 +339,52 @@ def test_topological_order_follows_node_declaration_order():
     )
     assert codes == []
     assert graph.order == ["start", "llm_1", "llm_2", "merge_1", "end"]
+
+
+def test_a_loop_without_a_limit_is_blamed_on_its_closing_edge_not_on_routing_inside_it():
+    cond_2 = {**COND, "id": "condition_2"}
+    edges = [e("e1", "start", "llm_1"), e("e2", "llm_1", "condition_1"), e("c", "condition_1", "llm_2", "true"),
+             e("d", "condition_1", "llm_3", "false"), e("e3", "llm_2", "template_1"), e("e4", "llm_3", "template_1"),
+             e("e5", "template_1", "condition_2"), e("e6", "condition_2", "end", "true"),
+             e("back", "condition_2", "llm_1", "false")]
+    nodes = [START, llm(1), COND, llm(2), llm(3), tpl(1), cond_2, END]
+    for ordered in (edges, list(reversed(edges))):
+        assert _issues(nodes, ordered) == [("BACK_EDGE_NO_LIMIT", None, "back")]
+
+
+def test_while_loop_that_starts_at_the_condition_is_valid():
+    _, codes = _analyze(
+        [START, COND, llm(1), END],
+        [e("e1", "start", "condition_1"), e("e2", "condition_1", "end", "true"),
+         e("back", "condition_1", "llm_1", "false", 2), e("e3", "llm_1", "condition_1")],
+    )
+    assert codes == []
+
+
+def test_fan_out_on_a_loop_exit_handle_is_valid():
+    _, codes = _analyze(
+        [START, llm(1), COND, llm(2), llm(3), MERGE, END],
+        [e("e1", "start", "llm_1"), e("e2", "llm_1", "condition_1"), e("back", "condition_1", "llm_1", "false", 2),
+         e("e3", "condition_1", "llm_2", "true"), e("e4", "condition_1", "llm_3", "true"),
+         e("e5", "llm_2", "merge_1"), e("e6", "llm_3", "merge_1"), e("e7", "merge_1", "end")],
+    )
+    assert codes == []
+
+
+def test_a_forward_cycle_without_exit_is_not_blamed_on_every_node_before_it():
+    assert sorted(_issues(
+        [START, llm(1), llm(2), END],
+        [e("e1", "start", "llm_1"), e("e2", "llm_1", "llm_2"), e("e3", "llm_2", "llm_1")],
+    )) == [("ILLEGAL_CYCLE", None, "e2"), ("UNREACHABLE_FROM_START", "end", None)]
+
+
+def test_an_exclusive_path_into_a_branch_is_not_described_as_a_duplicate_run():
+    graph, codes = _analyze(
+        [START, COND, llm(1), llm(2), MERGE, END],
+        [e("e1", "start", "condition_1"), e("e2", "condition_1", "llm_1", "true"),
+         e("e3", "condition_1", "llm_2", "true"), e("e4", "condition_1", "llm_2", "false"),
+         e("e5", "llm_1", "merge_1"), e("e6", "llm_2", "merge_1"), e("e7", "merge_1", "end")],
+    )
+    issues = check_graph(graph)
+    assert "INVALID_PARALLEL_REGION" in codes
+    assert not any("만나" in issue.message for issue in issues)
