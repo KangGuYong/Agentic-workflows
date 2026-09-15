@@ -220,3 +220,102 @@ def test_loop_that_starts_at_its_condition_guarantees_what_ran_before_the_condit
 def test_loop_body_output_is_not_guaranteed_at_the_condition():
     assert ("error", "REF_NOT_GUARANTEED") in _codes(while_loop("p", "{{llm_1.text}}"))
     assert validate(while_loop("p", "{{llm_1.text | default('')}}")) == []
+
+
+def _start_with(properties: dict, end_output: str, prompt: str = "p") -> dict:
+    raw = chain(prompt, end_output)
+    raw["nodes"][0] = {"id": "start", "type": "start", "config": {"inputs": {"type": "object", "properties": properties}}}
+    return raw
+
+
+def test_errors_are_never_crowded_out_by_warnings():
+    properties = {f"o{i}": {"type": "object"} for i in range(120)}
+    prompt = " ".join(f"{{{{ start.o{i} }}}}" for i in range(120))
+    analysis = analyze(_start_with(properties, "{{ llm_1.nope }}", prompt))
+    codes = [issue.code for issue in analysis.issues]
+    assert len(codes) == 100
+    assert codes[0] == "REF_UNKNOWN_FIELD"
+
+
+@pytest.mark.parametrize(
+    ("properties", "reference"),
+    [
+        ({"a": True}, "{{ start.a }}"),
+        ({"a": {"type": "array", "items": True}}, "{{ start.a.0 }}"),
+        ({"a": {"anyOf": [True, {"type": "null"}]}}, "{{ start.a }}"),
+        ({"a": False}, "{{ start.a | default('') }}"),
+    ],
+    ids=["true-property", "true-items", "true-branch", "false-property"],
+)
+def test_boolean_subschemas_do_not_crash_validation(properties, reference):
+    validate(_start_with(properties, reference))
+
+
+def number_condition(left: str) -> dict:
+    raw = condition(left, "1")
+    raw["nodes"][0] = {"id": "start", "type": "start", "config": {"inputs": {
+        "type": "object", "properties": {"n": {"type": ["number", "null"]}, "free": {}}}}}
+    return raw
+
+
+def test_default_keeps_null_unless_it_replaces_empty_values():
+    assert ("warning", "TYPE_WARNING") in _codes(number_condition("{{ start.n | default(0) }}"))
+    assert validate(number_condition("{{ start.n | default(0, true) }}")) == []
+
+
+def test_default_value_type_is_checked():
+    assert ("error", "TYPE_INCOMPATIBLE") in _codes(number_condition("{{ start.n | default('', true) }}"))
+
+
+def test_whole_value_of_unknown_type_warns():
+    assert _codes(number_condition("{{ start.free }}")) == [("warning", "TYPE_WARNING")]
+
+
+def test_field_access_after_default_is_forbidden():
+    assert ("error", "TEMPLATE_FORBIDDEN") in _codes(routing("{{ (llm_a | default({})).text }}"))
+
+
+def json_template(template: str) -> dict:
+    raw = chain("p")
+    raw["nodes"][1] = {"id": "template_1", "type": "template", "config": {"template": template, "format": "json"}}
+    raw["edges"] = [{"id": "e1", "source": "start", "target": "template_1"},
+                    {"id": "e2", "source": "template_1", "target": "end"}]
+    raw["nodes"][2] = {"id": "end", "type": "end", "config": {"outputs": {"r": "{{ template_1.data }}"}}}
+    return raw
+
+
+def test_json_templates_are_checked_before_running():
+    assert _codes(json_template("{a: 1}")) == [("error", "TEMPLATE_SYNTAX")]
+    assert _codes(json_template('{"a": "{{ start.topic }}"}')) == [("warning", "TYPE_WARNING")]
+    assert validate(json_template('{"a": {{ start.topic }}, "b": [1, 2]}')) == []
+    assert validate(json_template('{"a": 1}')) == []
+
+
+def test_unknown_node_names_are_clipped():
+    issues = validate(chain("{{ %s.text }}" % ("x" * 19_000)))
+    assert [issue.code for issue in issues] == ["REF_UNKNOWN_NODE"]
+    assert len(issues[0].message) < 200
+
+
+def test_self_reference_message_explains_the_first_run():
+    issues = validate(chain("{{ llm_1.text }}"))
+    assert issues[0].message.startswith("이 노드의 이전 실행 결과는 첫 실행 때 없습니다")
+
+
+def test_loop_body_referencing_itself_needs_default_even_in_a_while_loop():
+    assert ("error", "REF_NOT_GUARANTEED") in _codes(while_loop("{{ llm_1.text }}", "{{ start.topic }}"))
+
+
+def test_graph_is_only_set_after_phases_one_and_two_pass():
+    raw = chain("p")
+    raw["edges"].pop()
+    assert analyze(raw).graph is None
+    assert analyze(chain("{{ llm_9.text }}")).graph is not None
+
+
+def test_oversized_workflows_are_rejected():
+    raw = chain("x" * 19_000)
+    raw["nodes"] += [
+        {"id": f"template_{i}", "type": "template", "config": {"template": "y" * 19_000}} for i in range(30)
+    ]
+    assert _codes(raw) == [("error", "LIMIT_EXCEEDED")]

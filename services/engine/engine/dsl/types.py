@@ -21,9 +21,12 @@ _JSON_TO_KIND = {
 _RANK = {"ok": 0, "warning": 1, "error": 2}
 
 
-def kinds_of(schema: dict[str, Any] | None) -> set[str]:
-    """Value kinds a JSON Schema admits. {"unknown"} when the schema says nothing."""
-    if not schema:
+def kinds_of(schema: dict[str, Any] | bool | None) -> set[str]:
+    """Value kinds a JSON Schema admits. {"unknown"} when the schema says nothing (`{}` or `true`);
+    no kinds for `false`, which admits no value."""
+    if schema is False:
+        return set()
+    if not isinstance(schema, dict) or not schema:
         return {"unknown"}
     branches = (schema.get("anyOf") or []) + (schema.get("oneOf") or [])
     if branches:
@@ -60,7 +63,9 @@ def _kind_of_value(value: Any) -> str:
     return "unknown"
 
 
-def _strip_null(schema: dict[str, Any]) -> dict[str, Any]:
+def _strip_null(schema: dict[str, Any] | bool) -> dict[str, Any] | bool:
+    if not isinstance(schema, dict):
+        return schema
     branches = schema.get("anyOf") or schema.get("oneOf")
     if branches:
         non_null = [b for b in branches if kinds_of(b) != {"null"}]
@@ -69,16 +74,20 @@ def _strip_null(schema: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
-def _is_unknown(schema: dict[str, Any]) -> bool:
+def _is_unknown(schema: dict[str, Any] | bool) -> bool:
+    if not isinstance(schema, dict):
+        return schema is True
     return kinds_of(schema) == {"unknown"} and "properties" not in schema and "items" not in schema
 
 
 def resolve_path(schema: dict[str, Any] | None, path: tuple[str, ...]) -> dict[str, Any] | None:
     """Sub-schema at `path`. `{}` means unknown (not checkable); `None` means the field does not exist."""
-    current: dict[str, Any] = schema or {}
+    current: dict[str, Any] | bool = schema or {}
     for key in path:
         current = _strip_null(current)
-        if _is_unknown(current):
+        if current is False:  # a boolean `false` subschema admits no value
+            return None
+        if not isinstance(current, dict) or _is_unknown(current):
             return {}
         if key.isdigit() and "array" in kinds_of(current):
             current = current.get("items") or {}  # no single items schema: element type is unknown
@@ -98,6 +107,8 @@ def resolve_path(schema: dict[str, Any] | None, path: tuple[str, ...]) -> dict[s
         if "object" in kinds_of(current):
             return {}
         return None
+    if isinstance(current, bool):  # a boolean subschema at the end of the path
+        return {} if current else None
     return current
 
 

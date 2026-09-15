@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 
 from jinja2 import nodes
@@ -45,6 +45,10 @@ class Ref:
     path: tuple[str, ...]  # field path below the root (a dynamic index cuts the path short)
     has_default: bool  # wrapped directly in `| default(...)`
     direct: bool  # printed directly by {{ }} (not a loop/if operand, not filtered)
+    # With has_default: the JSON kind of the default value ("unknown" unless it is a literal), and whether
+    # it also replaces null and other empty values (`default(x, true)`); plain `default(x)` keeps null.
+    default_kind: str | None = field(default=None, compare=False)
+    default_replaces_null: bool = field(default=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -123,6 +127,36 @@ def parse_template(source: str) -> ParsedTemplate:
         raise TemplateParseError("템플릿 중첩이 너무 깊습니다") from exc
 
 
+def _literal_kind(node: nodes.Node) -> str:
+    if isinstance(node, nodes.Const):
+        value = node.value
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, (int, float)):
+            return "number"
+        if isinstance(value, str):
+            return "string"
+    if isinstance(node, nodes.List):
+        return "array"
+    if isinstance(node, nodes.Dict):
+        return "object"
+    return "unknown"
+
+
+def _ref(root: str, path: tuple[str, ...], default: nodes.Filter | None, direct: bool) -> Ref:
+    if default is None:
+        return Ref(root, path, False, direct)
+    kind = _literal_kind(default.args[0]) if default.args else "string"  # `default()` alone gives ""
+    if len(default.args) > 1:
+        flag = default.args[1]
+    else:
+        flag = next((keyword.value for keyword in default.kwargs if keyword.key == "boolean"), None)
+    replaces_null = isinstance(flag, nodes.Const) and flag.value is True
+    return Ref(root, path, True, direct, kind, replaces_null)
+
+
 def _analyze(source: str) -> ParsedTemplate:
     ast = ENV.parse(source)
 
@@ -143,11 +177,13 @@ def _analyze(source: str) -> ParsedTemplate:
         problems.append(f"반복문은 최대 {MAX_LOOP_DEPTH}단계까지만 중첩할 수 있습니다")
     if _ast_depth(ast) > MAX_NESTING_DEPTH:
         problems.append(f"템플릿 중첩이 너무 깊습니다 (최대 {MAX_NESTING_DEPTH}단계)")
+    if any(isinstance(node.node, nodes.Filter) for node in ast.find_all((nodes.Getattr, nodes.Getitem))):
+        problems.append("필터 결과에서는 필드를 꺼낼 수 없습니다. {{ x.field | default(...) }}처럼 필드 뒤에 필터를 쓰세요")
     if next(ast.find_all(nodes.Concat), None) is not None:
         problems.append("'~' 연산자는 사용할 수 없습니다. 값을 이어 붙이려면 {{ a }}{{ b }}처럼 나란히 쓰세요")
 
     inner = {id(n.node) for n in ast.find_all((nodes.Getattr, nodes.Getitem))}
-    defaulted = {id(f.node) for f in ast.find_all(nodes.Filter) if f.name == "default"}
+    defaults = {id(f.node): f for f in ast.find_all(nodes.Filter) if f.name == "default"}
     direct: set[int] = set()
     for output in ast.find_all(nodes.Output):
         for expr in output.nodes:
@@ -164,7 +200,7 @@ def _analyze(source: str) -> ParsedTemplate:
             return
         chain = _chain(node)
         if chain is not None and chain[0] not in scope:
-            refs.append(Ref(chain[0], chain[1], id(node) in defaulted, id(node) in direct))
+            refs.append(_ref(chain[0], chain[1], defaults.get(id(node)), id(node) in direct))
 
     _walk(ast, frozenset(), collect)
 
@@ -178,6 +214,6 @@ def _analyze(source: str) -> ParsedTemplate:
         chain = _chain(target)
         match = _WHOLE.fullmatch(source)
         if chain is not None and chain[2] and match:
-            whole = Ref(chain[0], chain[1], is_default, True)
+            whole = _ref(chain[0], chain[1], expr if is_default else None, True)
             expression = match.group(1).strip()
     return ParsedTemplate(tuple(refs), whole, expression, tuple(problems))

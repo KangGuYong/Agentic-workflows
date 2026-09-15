@@ -9,8 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from engine.dsl.models import Edge, WorkflowDSL
-from engine.validator.issues import Issue, error
-from engine.validator.structure import MAX_ISSUES, ParsedNode
+from engine.validator.issues import Issue, bounded, error
+from engine.validator.structure import ParsedNode
 
 MAX_FAN_OUT = 10
 MAX_BACK_EDGES = 10
@@ -93,8 +93,7 @@ def check_graph(graph: Graph) -> list[Issue]:
         *_check_loops(graph),
         *_check_parallel(graph),
     ]
-    unique = list(dict.fromkeys(issues))  # one mistake found along several paths is reported once
-    return unique[:MAX_ISSUES]
+    return bounded(issues)  # one mistake found along several paths is reported once
 
 
 def _dead_ends(graph: Graph) -> set[str]:

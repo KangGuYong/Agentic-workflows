@@ -114,3 +114,15 @@ def test_coerce_runtime_other_targets():
 def test_coerce_runtime_rejects_non_finite_numbers(text):
     with pytest.raises(TypeError):
         coerce_runtime(text, "number")
+
+
+def test_boolean_subschemas_are_unknown_or_absent():
+    schema = {"type": "object", "properties": {"any": True, "never": False, "list": {"type": "array", "items": True}}}
+    assert kinds_of(True) == {"unknown"}
+    assert kinds_of(False) == set()
+    assert kinds_of({"anyOf": [True, {"type": "null"}]}) == {"unknown", "null"}
+    assert resolve_path(schema, ("any",)) == {}
+    assert resolve_path(schema, ("any", "deeper")) == {}
+    assert resolve_path(schema, ("never",)) is None
+    assert resolve_path(schema, ("list", "0")) == {}
+    assert resolve_path(schema, ("list", "0", "x")) == {}

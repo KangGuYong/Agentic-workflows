@@ -388,3 +388,11 @@ def test_an_exclusive_path_into_a_branch_is_not_described_as_a_duplicate_run():
     issues = check_graph(graph)
     assert "INVALID_PARALLEL_REGION" in codes
     assert not any("만나" in issue.message for issue in issues)
+
+
+def test_a_while_shaped_loop_without_a_limit_is_reported():
+    assert _issues(
+        [START, COND, llm(1), END],
+        [e("e1", "start", "condition_1"), e("e2", "condition_1", "end", "true"),
+         e("f", "condition_1", "llm_1", "false"), e("e3", "llm_1", "condition_1")],
+    ) == [("BACK_EDGE_NO_LIMIT", None, "f")]

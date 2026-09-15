@@ -102,3 +102,25 @@ def test_nesting_depth_ok_within_limit():
 def test_concat_operator_is_forbidden():
     assert parse_template("{{ a ~ b }}").problems != ()
     assert parse_template("{{ a }}{{ b }}").problems == ()
+
+
+@pytest.mark.parametrize(
+    ("source", "kind", "replaces_null"),
+    [
+        ("{{ start.n | default(0) }}", "number", False),
+        ("{{ start.n | default('', true) }}", "string", True),
+        ("{{ start.n | default([], boolean=true) }}", "array", True),
+        ("{{ start.n | default({}) }}", "object", False),
+        ("{{ start.n | default(start.m) }}", "unknown", False),
+        ("{{ start.n | default }}", "string", False),
+    ],
+)
+def test_default_filter_details_are_recorded(source, kind, replaces_null):
+    ref = parse_template(source).whole_value
+    assert ref is not None and ref.has_default
+    assert (ref.default_kind, ref.default_replaces_null) == (kind, replaces_null)
+
+
+@pytest.mark.parametrize("source", ["{{ (llm_a | default({})).text }}", "{{ (llm_a | default([]))[0] }}"])
+def test_field_access_on_a_filter_result_is_forbidden(source):
+    assert any("필터 결과" in problem for problem in parse_template(source).problems)

@@ -11,11 +11,10 @@ from engine.jsondata import StepBudget, ValidationBudgetExceeded, check_text, cl
 from engine.nodes.base import NodeSpec, schema_violations
 from engine.nodes.registry import NodeRegistry
 from engine.templates.env import json_value
-from engine.validator.issues import Issue, error
+from engine.validator.issues import Issue, bounded, error
 
 MAX_NODES = 100
 MAX_EDGES = 300
-MAX_ISSUES = 100  # issues reported by one phase; the rest are dropped
 MAX_FIELD_ISSUES = 10  # pydantic errors reported for one config or policy
 MAX_NAME_CHARS = 80  # tenant-chosen names (node types, edge ends, handles) quoted in messages
 MAX_DEFAULT_OUTPUT_CHARS = 64_000  # a stand-in output needs far less than a real node output
@@ -96,7 +95,7 @@ def check_structure(
         if count != 1:
             issues.append(error(f"{node_type.upper()}_COUNT", f"{label} 노드는 정확히 1개여야 합니다 (현재 {count}개)"))
     issues.extend(_check_edges(dsl, configs, node_ids))
-    return issues[:MAX_ISSUES], parsed
+    return bounded(issues), parsed
 
 
 def _check_id(node: Node) -> list[Issue]:

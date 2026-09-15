@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 Severity = Literal["error", "warning"]
 
+MAX_ISSUES = 100  # issues reported for one workflow; errors are kept before warnings
+
 
 @dataclass(frozen=True)
 class Issue:
@@ -29,3 +31,11 @@ def warning(code: str, message: str, **where: Any) -> Issue:
 
 def has_errors(issues: list[Issue]) -> bool:
     return any(issue.severity == "error" for issue in issues)
+
+
+def bounded(issues: list[Issue]) -> list[Issue]:
+    """De-duplicated, errors before warnings (each in the order found), at most MAX_ISSUES. Never drops
+    every error, so `has_errors` on the result is the same as on the input."""
+    unique = list(dict.fromkeys(issues))
+    errors = [issue for issue in unique if issue.severity == "error"]
+    return (errors + [issue for issue in unique if issue.severity != "error"])[:MAX_ISSUES]
