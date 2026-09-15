@@ -465,7 +465,7 @@ class ErrorCode(StrEnum):
     TYPE_MISMATCH = "TYPE_MISMATCH"
     TEMPLATE_ERROR = "TEMPLATE_ERROR"
     STRUCTURED_OUTPUT_FAILED = "STRUCTURED_OUTPUT_FAILED"
-    LLM_UNAVAILABLE = "LLM_UNAVAILABLE"
+    2LLM_UNAVAILABLE = "LLM_UNAVAILABLE"
     OUTPUT_TOO_LARGE = "OUTPUT_TOO_LARGE"
     ENGINE_RECURSION_LIMIT = "ENGINE_RECURSION_LIMIT"
 
@@ -3396,6 +3396,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'engine.validator'`
 **File:** `services/engine/engine/validator/__init__.py`
 
 ```python
+
 ```
 
 **File:** `services/engine/engine/validator/issues.py`
@@ -3591,21 +3592,25 @@ git commit -m "feat(engine): add structural validation phase"
 > **Post-review note (Task 12, as implemented):** commits `2e5e7c8`, `256876d` and `d864f89`.
 >
 > **Ids.** `RESERVED_IDS` adds the following, and a test keeps the LangGraph list in sync on upgrades:
+>
 > - Template names that break a root: `self`, `true`, `false`, `none`, `not`.
 > - Names LangGraph refuses as node names at compile time: `checkpoint_id`, `checkpoint_map`, `checkpoint_ns`, `configurable`.
 >
 > **Bounded work and output.**
+>
 > - Over `MAX_NODES`/`MAX_EDGES`, `check_structure` returns only `LIMIT_EXCEEDED` and an empty `parsed`.
 > - At most 100 issues per phase and 10 pydantic errors per config or policy. Tenant-chosen names in messages are clipped to 80 chars.
 > - `check_structure(dsl, registry, budget=None)` charges every schema validation to one `jsondata.StepBudget` (default `MAX_VALIDATION_STEPS`). `schema_violations(..., budget=)` caps its steps at what the budget has left. **Task 14's `validate()` must create one budget and pass it through every phase.**
 > - Once the budget is spent, later schema checks are skipped rather than blamed on nodes that may be fine, and one workflow-level `VALIDATION_TOO_COSTLY` error is added. The node whose check ran out still gets `INVALID_POLICY`. Task 14 should follow the same rule.
 >
 > **Policies.**
+>
 > - `defaultOutput` is checked whenever present, even with `onError: "fail"`. It must be JSON data of at most 64,000 chars (`json_value`), storable text (`check_text`), and match the node's output schema. A spent budget gives `INVALID_POLICY`.
 > - `ParsedNode.policy` owns its data: `retry` is copied and `defaultOutput` is the validated copy.
 > - `policy: {}` means no override, so policy-less nodes accept it.
 >
 > **Edges.**
+>
 > - `DUPLICATE_EDGE` is reported for a repeated `(source, sourceHandle, target)`.
 > - Handles are checked whenever the source config parsed, even if its policy failed.
 > - An edge from `end` says the node cannot start a connection.
@@ -3615,6 +3620,7 @@ git commit -m "feat(engine): add structural validation phase"
 > **Carried into Task 16:** `_fallback_output` returns `plan.policy.defaultOutput` itself, so every run of a cached compiled workflow would share one dict. Return a copy per use, and apply the output size and text checks on the fallback path too.
 >
 > **Carried into Plan 2/3 (roadmap):**
+>
 > - Pydantic's English messages appear inside Korean issue text; localize them by error `type`.
 > - `Policy`/`RetrySpec` coerce loosely (`timeoutSec: true` → 1). Consider strict mode at the DSL boundary.
 
@@ -4081,6 +4087,38 @@ Expected: all PASS
 git add services/engine/engine/validator/graph.py services/engine/tests/test_validator_graph.py
 git commit -m "feat(engine): add graph validation phase (loops, parallel regions)"
 ```
+
+> **Post-review note (Task 13, as implemented):** commits `9daaab9` and `68759e5`.
+>
+> **Back-edges are declared, not discovered.** The plan's DFS back-edges depended on edge declaration order. Deleting and redrawing one edge could flip a valid workflow to `ILLEGAL_CYCLE`, and change `incoming`, the Task 14 "runs before" sets and loop counters. Now (spec 4.8 rule 4 updated):
+>
+> - `back_edges` are the edges that carry `maxIterations`, and the forward edges must be acyclic.
+> - A forward cycle containing a condition or classifier edge gives `BACK_EDGE_NO_LIMIT` on those edges. A forward cycle with neither gives one `ILLEGAL_CYCLE` per cycle.
+> - A declared back-edge must close a cycle through forward edges (else `MAX_ITERATIONS_ON_FORWARD_EDGE`) and start at a condition or classifier (else `ILLEGAL_CYCLE`). Handle-conflict checks apply only to loop sources.
+> - `order` is Kahn's algorithm, with ties broken by node declaration order.
+>
+> **Parallel regions.**
+>
+> - `PARALLEL_IN_LOOP` is also reported when the region's merge is a back-edge target or lies on a cycle. Before this, a back-edge into a merge passed and re-ran only the nodes after the merge.
+> - A fan-out handle counts only forward edges.
+> - Branches that meet at a non-merge node are reported once, on the fan-out handle, telling the user to add a merge.
+>
+> **Less noise.**
+>
+> - Issues are de-duplicated and capped at `MAX_ISSUES`.
+> - A merge a broken region heads for is not also reported as `MERGE_WITHOUT_FAN_OUT`.
+> - Unreachable nodes get no `HANDLE_NOT_CONNECTED`.
+> - `CANNOT_REACH_END` is reported only on the dead end itself, not on the nodes upstream of it.
+>
+> **Guaranteed by the rules** (Task 11 carry-over): a reachable merge in a valid graph has at least 2 distinct forward predecessors, all of them branch-chain ends, and never sits inside a branch chain. The 40-layer merge-of-merges schema regression test is in `test_nodes_flow.py`.
+>
+> Suite: 503. The plan's Task 14 refs tests pass on top.
+>
+> **Carried into Plan 3 (editor):**
+>
+> - When the user draws an edge that closes a cycle from a condition or classifier, ask for `maxIterations`. That edge becomes the back-edge.
+> - A condition self-loop (`false → itself`) is accepted but re-evaluates the same inputs; show a warning.
+> - A merge output holds every branch output and can exceed the 1 MB node output cap; say so in the merge node's help text.
 
 ---
 
