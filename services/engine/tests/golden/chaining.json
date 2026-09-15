@@ -1,0 +1,17 @@
+{
+  "version": "1",
+  "nodes": [
+    {"id": "start", "type": "start", "label": "시작",
+     "config": {"inputs": {"type": "object", "properties": {"topic": {"type": "string"}}, "required": ["topic"]}}},
+    {"id": "llm_1", "type": "llm", "label": "개요",
+     "config": {"model": "qwen2.5:14b", "prompt": "{{start.topic}} 글의 개요를 써줘"}},
+    {"id": "llm_2", "type": "llm", "label": "본문",
+     "config": {"model": "qwen2.5:14b", "prompt": "다음 개요로 본문을 써줘:\n{{llm_1.text}}"}},
+    {"id": "end", "type": "end", "label": "끝", "config": {"outputs": {"result": "{{llm_2.text}}"}}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start", "target": "llm_1"},
+    {"id": "e2", "source": "llm_1", "target": "llm_2"},
+    {"id": "e3", "source": "llm_2", "target": "end"}
+  ]
+}

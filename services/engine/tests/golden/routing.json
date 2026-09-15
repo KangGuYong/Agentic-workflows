@@ -1,0 +1,28 @@
+{
+  "version": "1",
+  "nodes": [
+    {"id": "start", "type": "start", "label": "시작",
+     "config": {"inputs": {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]}}},
+    {"id": "classifier_1", "type": "classifier", "label": "문의 분류",
+     "config": {"model": "qwen2.5:14b", "input": "{{start.question}}",
+                "categories": [{"id": "billing", "description": "결제·환불 문의"}, {"id": "tech", "description": "기술 지원"}]}},
+    {"id": "llm_billing", "type": "llm", "label": "결제 답변",
+     "config": {"model": "qwen2.5:14b", "prompt": "결제 문의에 답해줘: {{start.question}}"}},
+    {"id": "llm_tech", "type": "llm", "label": "기술 답변",
+     "config": {"model": "qwen2.5:14b", "prompt": "기술 문의에 답해줘: {{start.question}}"}},
+    {"id": "template_1", "type": "template", "label": "안내", "config": {"template": "담당 부서를 찾지 못했습니다."}},
+    {"id": "end", "type": "end", "label": "끝",
+     "config": {"outputs": {
+       "category": "{{classifier_1.category}}",
+       "answer": "{{llm_billing.text | default('')}}{{llm_tech.text | default('')}}{{template_1.text | default('')}}"}}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start", "target": "classifier_1"},
+    {"id": "e2", "source": "classifier_1", "sourceHandle": "billing", "target": "llm_billing"},
+    {"id": "e3", "source": "classifier_1", "sourceHandle": "tech", "target": "llm_tech"},
+    {"id": "e4", "source": "classifier_1", "sourceHandle": "default", "target": "template_1"},
+    {"id": "e5", "source": "llm_billing", "target": "end"},
+    {"id": "e6", "source": "llm_tech", "target": "end"},
+    {"id": "e7", "source": "template_1", "target": "end"}
+  ]
+}

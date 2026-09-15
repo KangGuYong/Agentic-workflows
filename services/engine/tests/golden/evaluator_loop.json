@@ -1,0 +1,26 @@
+{
+  "version": "1",
+  "nodes": [
+    {"id": "start", "type": "start", "label": "시작",
+     "config": {"inputs": {"type": "object", "properties": {"topic": {"type": "string"}}, "required": ["topic"]}}},
+    {"id": "llm_gen", "type": "llm", "label": "작성",
+     "config": {"model": "qwen2.5:14b",
+                "prompt": "{{start.topic}}에 대한 글을 써줘. 이전 피드백: {{llm_eval.feedback | default('없음')}}"}},
+    {"id": "llm_eval", "type": "llm", "label": "평가",
+     "config": {"model": "qwen2.5:14b", "prompt": "다음 글을 10점 만점으로 평가해줘:\n{{llm_gen.text}}",
+                "outputSchema": {"type": "object",
+                                 "properties": {"score": {"type": "number"}, "feedback": {"type": "string"}},
+                                 "required": ["score", "feedback"]}}},
+    {"id": "condition_1", "type": "condition", "label": "통과?",
+     "config": {"conditions": [{"left": "{{llm_eval.score}}", "op": ">=", "right": "8"}]}},
+    {"id": "end", "type": "end", "label": "끝",
+     "config": {"outputs": {"text": "{{llm_gen.text}}", "score": "{{llm_eval.score}}"}}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start", "target": "llm_gen"},
+    {"id": "e2", "source": "llm_gen", "target": "llm_eval"},
+    {"id": "e3", "source": "llm_eval", "target": "condition_1"},
+    {"id": "e4", "source": "condition_1", "sourceHandle": "true", "target": "end"},
+    {"id": "e5", "source": "condition_1", "sourceHandle": "false", "target": "llm_gen", "maxIterations": 2}
+  ]
+}
