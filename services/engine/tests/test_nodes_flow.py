@@ -214,3 +214,17 @@ def test_merge_output_schema_stays_in_the_subset_and_copies_predecessor_schemas(
     assert too_deep["properties"]["branches"]["properties"] == {"llm_1": {}, "llm_2": {}}
     assert too_deep["properties"]["branches"]["required"] == ["llm_1", "llm_2"]
     assert schema_problems(too_deep) == []
+
+
+def test_merge_of_merges_keeps_its_schema_small():
+    import time
+
+    spec = MergeNode()
+    config = spec.parse_config({})
+    schema = {"type": "object", "properties": {"text": {"type": "string"}}}
+    started = time.perf_counter()
+    for _ in range(40):
+        schema = spec.output_schema(config, {"merge_a": schema, "merge_b": schema})
+
+    assert schema_problems(schema) == []
+    assert time.perf_counter() - started < 5
