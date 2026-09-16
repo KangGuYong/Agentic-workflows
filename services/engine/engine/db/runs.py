@@ -119,3 +119,61 @@ async def get_version_dsl(conn: AsyncConnection, version_id: str) -> dict[str, A
         "SELECT dsl, dsl_hash FROM workflow_versions WHERE id=%s", (version_id,)
     )).fetchone()
     return row
+
+
+# ---------------------------------------------------------------- API: create and read (Task 13)
+
+MAX_INPUT_BYTES = 256_000  # design 8.4; well under MAX_BODY_BYTES so the message names the right limit
+
+
+async def insert_queued(conn: AsyncConnection, *, workflow_id: str, version_id: str, workspace_id: str,
+                        inputs: dict[str, Any], idempotency_key: str | None,
+                        store_run_data: bool) -> dict[str, Any]:
+    return await (await conn.execute(
+        "INSERT INTO runs (id, workspace_id, workflow_id, workflow_version_id, status, inputs,"
+        " idempotency_key, store_run_data) VALUES (gen_random_uuid(), %s, %s, %s, 'queued', %s, %s, %s)"
+        " RETURNING *",
+        (workspace_id, workflow_id, version_id, Jsonb(inputs), idempotency_key, store_run_data),
+    )).fetchone()
+
+
+async def find_by_idempotency_key(conn: AsyncConnection, workflow_id: str, key: str) -> dict[str, Any] | None:
+    return await (await conn.execute(
+        "SELECT * FROM runs WHERE workflow_id=%s AND idempotency_key=%s", (workflow_id, key)
+    )).fetchone()
+
+
+async def lock_run(conn: AsyncConnection, run_id: str) -> dict[str, Any] | None:
+    return await (await conn.execute("SELECT * FROM runs WHERE id=%s FOR UPDATE", (run_id,))).fetchone()
+
+
+async def list_for_workflow(conn: AsyncConnection, workflow_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    return await (await conn.execute(
+        "SELECT id, status, created_at, started_at, finished_at, retry_count, workflow_version_id"
+        " FROM runs WHERE workflow_id=%s ORDER BY created_at DESC LIMIT %s", (workflow_id, limit)
+    )).fetchall()
+
+
+async def list_node_runs(conn: AsyncConnection, run_id: str) -> list[dict[str, Any]]:
+    return await (await conn.execute(
+        "SELECT node_id, exec_index, attempt, status, input, output, error, meta, tokens_in, tokens_out,"
+        " truncated, started_at, finished_at FROM node_runs WHERE run_id=%s"
+        " ORDER BY started_at, exec_index, attempt", (run_id,)
+    )).fetchall()
+
+
+async def waiting_payload(conn: AsyncConnection, run_id: str, node_id: str, exec_index: int) -> dict[str, Any] | None:
+    """The interrupt payload of the approval this run is parked on (stored by the recorder)."""
+    row = await (await conn.execute(
+        "SELECT meta->'waiting' AS waiting FROM node_runs"
+        " WHERE run_id=%s AND node_id=%s AND exec_index=%s AND waited ORDER BY attempt DESC LIMIT 1",
+        (run_id, node_id, exec_index),
+    )).fetchone()
+    return row["waiting"] if row else None
+
+
+async def has_checkpoint(conn: AsyncConnection, run_id: str) -> bool:
+    row = await (await conn.execute(
+        "SELECT 1 FROM checkpoints WHERE thread_id=%s LIMIT 1", (str(run_id),)
+    )).fetchone()
+    return row is not None
