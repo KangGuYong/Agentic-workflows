@@ -2584,6 +2584,17 @@ git add services/engine/engine/worker services/engine/tests/test_worker_run.py s
 git commit -m "feat(engine): claim and execute runs in a worker"
 ```
 
+> **Post-review note (Task 7, as implemented):** commits `3faef91` and `eedea0f`.
+>
+> - The plan's `_execute` stranded the run when `execute_run` raised `ResumeRejected`: `claim_next` had already flipped the row to `running`, and clearing the payload never put it back, so an answer the API accepted but the engine rejected froze the run forever. It now calls `set_waiting` with the claimed row's `waiting_node_id`/`waiting_exec_index`, which releases the lease and clears the payload in one statement.
+> - Nothing bounded the background tasks. A second failure in the listen-reconnect path — the branch that runs exactly when Postgres is unhealthy — ended `_claim_loop` with `_running` still true and nothing logged: a worker that looks alive and claims nothing. `get_version_dsl` returning `None` for a version deleted between queueing and claiming killed the task the same way. The loop now retries after logging, `_execute` has an outer boundary that expires the lease, and a missing version fails the run.
+> - `stop()` awaited each cancelled task under `suppress(CancelledError, Exception)`, which swallowed a cancellation aimed at its own caller: a shutdown deadline around `await worker.stop()` hung indefinitely. It now gathers with `return_exceptions=True`. `CancelledError` also bypassed the generic handler, so every rolling restart left in-flight runs holding their leases and burned one of the three recovery attempts; `_execute` hands the lease back before the cancellation lands.
+> - `run_started` was emitted after compiling, so a run whose stored DSL no longer validates produced an event stream of just `run_failed`.
+> - The suite was a rubber stamp: 12 of 13 mutations survived, including every fencing mutation and `run_id = row["id"]` — a raw `uuid.UUID` breaks every Redis publish, and both publishers swallowed the failure. `test_only_one_of_two_workers_runs_a_given_run` was vacuous, because the second worker never claims; it was replaced by a fencing test that rewrites `lease_owner` mid-run and a duplicate-attempt test. Nine more tests cover the recovery event, the compile cache, the Redis channel, `storeRunData`, an invalid stored DSL, a stale resume payload, an infrastructure error and a missing version.
+> - Also: the compile cache is capped at 32 (design 8.4), `_publish` logs instead of dropping silently, and `_wait_for_work` uses psycopg's own `notifies(timeout=…)` — `asyncio.timeout` around it lost the rest of a notification batch.
+>
+> Suite: 709.
+
 ---
 
 ## Task 8: Lease heartbeat, cancellation and the run time limit
