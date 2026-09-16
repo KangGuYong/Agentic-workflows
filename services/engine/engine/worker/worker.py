@@ -15,7 +15,7 @@ from engine.config import EngineConfig
 from engine.db import runs as run_db
 from engine.db.checkpointer import make_checkpointer
 from engine.errors import ErrorCode, LeaseLost
-from engine.events.publish import RedisPublisher
+from engine.events.publish import RedisPublisher, control_messages
 from engine.events.recorder import PostgresRecorder
 from engine.events.writer import append_event
 from engine.llm.base import LLMClient
@@ -47,6 +47,7 @@ class Worker:
         self._checkpointer = make_checkpointer(pool, config)  # encrypted unless dev-insecure (design 5.3)
         self._compiled: dict[str, CompiledWorkflow] = {}
         self._guards: dict[str, FlagGuard] = {}
+        self._timed_out: set[str] = set()  # run ids the heartbeat cancelled for exceeding run_max_active_ms
         self._tasks: set[asyncio.Task] = set()
         self._listen: AsyncConnection | None = None
         self._running = False
@@ -57,6 +58,7 @@ class Worker:
         self._running = True
         await self._reconnect_listen()
         self._spawn(self._claim_loop())
+        self._spawn(self._control_loop())
 
     async def stop(self) -> None:
         self._running = False
@@ -120,6 +122,21 @@ class Worker:
                 await self._listen.close()
             await self._reconnect_listen()
 
+    async def _control_loop(self) -> None:
+        """One subscription per worker; messages are routed to the guard of a run we hold."""
+        while self._running:
+            try:
+                async for message in control_messages(self._redis):
+                    guard = self._guards.get(str(message.get("runId")))
+                    if guard is not None and message.get("action") == "cancel":
+                        guard.cancel()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Redis is a convenience path; a lost cancel is still noticed by the next heartbeat poll
+                log.warning("control channel dropped; resubscribing", exc_info=True)
+                await asyncio.sleep(1)
+
     # ------------------------------------------------------------------ one run
 
     async def _execute(self, row: dict[str, Any]) -> None:
@@ -144,6 +161,32 @@ class Worker:
         async with self._pool.connection() as conn:
             await run_db.expire_lease(conn, run_id=run_id, owner=self.owner)
 
+    async def _heartbeat(self, run_id: str, guard: FlagGuard, task: asyncio.Task) -> None:
+        """Extend the lease, notice cancels, and stop a run that used up its active time.
+
+        A cancel or a timeout both force the run's own task to stop: `guard.check()` alone only fires at a
+        node boundary (compiler/wrapper.py's comment on this), so a run blocked inside a single long node
+        call (an LLM request, in particular) would otherwise ignore both until that call finally returns.
+        """
+        interval = self._config.heartbeat_sec
+        while True:
+            await asyncio.sleep(interval)
+            async with self._pool.connection() as conn:
+                beat = await run_db.heartbeat(conn, run_id=run_id, owner=self.owner,
+                                              lease_sec=self._config.lease_sec,
+                                              delta_ms=int(interval * 1000))
+            if beat is None:  # the lease is gone: stop the run without writing anything
+                guard.lose_lease()
+                return
+            if beat["cancel_requested_at"] is not None:
+                guard.cancel()
+                task.cancel()  # interrupt whatever the run is doing now, not just its next node boundary
+                return
+            if beat["active_ms"] > self._config.run_max_active_ms:
+                self._timed_out.add(run_id)
+                task.cancel()
+                return
+
     async def _run(self, run_id: str, row: dict[str, Any], guard: FlagGuard) -> None:
         await self._event(run_id, "run_recovered" if row["recovery_count"] else "run_started")
 
@@ -166,6 +209,8 @@ class Worker:
         recorder = PostgresRecorder(self._pool, run_id, publisher=self._publisher,
                                     store_run_data=row["store_run_data"])
         deps = RunDeps(run_id=run_id, llm=self._llm, recorder=recorder, guard=guard, render=self._render)
+        task = asyncio.current_task()
+        beat = self._spawn(self._heartbeat(run_id, guard, task))
         try:
             outcome = await execute_run(compiled, deps=deps, inputs=row["inputs"] or {},
                                         resume=row["resume_payload"])
@@ -179,10 +224,31 @@ class Worker:
                                          node_id=row["waiting_node_id"] or "",
                                          exec_index=row["waiting_exec_index"] or 0)
             return
+        except asyncio.CancelledError:
+            # the heartbeat cancelled us: figure out why before deciding whether to re-raise. Both branches
+            # below stop the cancellation here, so the task must be told it is no longer cancelling
+            # (Task.uncancel) or the next unrelated await in this same task could be cancelled again.
+            timed_out = run_id in self._timed_out
+            self._timed_out.discard(run_id)  # cleared on every path so this set can never grow
+            if not timed_out and not guard.cancelled:
+                raise  # stop() shutting the worker down: _execute's handler expires the lease
+            asyncio.current_task().uncancel()
+            clear_inputs = not row["store_run_data"]
+            if timed_out:
+                # the terminal write must land even though this task was just cancelled: an await here can
+                # have the cancellation re-delivered to it, so shield it from that.
+                await asyncio.shield(self._terminal(run_id, "failed", error={
+                    "code": str(ErrorCode.RUN_TIMEOUT), "message": "실행 시간이 한도를 넘었습니다"},
+                    clear_inputs=clear_inputs))
+            else:
+                await asyncio.shield(self._terminal(run_id, "cancelled", clear_inputs=clear_inputs))
+            return
         except Exception as exc:  # infrastructure problem: let recovery retry
             log.error("run %s aborted: %s", run_id, type(exc).__name__, exc_info=True)
             await self._expire_lease(run_id)
             return
+        finally:
+            beat.cancel()
 
         await self._write_outcome(run_id, row, outcome)
 
