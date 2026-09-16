@@ -19,15 +19,32 @@ from engine.db.pool import make_pool
 
 log = logging.getLogger(__name__)
 
-if sys.platform == "win32":
-    # psycopg's async connections cannot use Windows' default ProactorEventLoop (development only; see the
-    # same note in engine/worker/main.py). Setting the policy here is necessary but not sufficient: it is
-    # what makes `python -m engine.api.main` below work, since that path drives its own asyncio.run() and
-    # so honours the current policy -- but the plain `uvicorn` CLI does not. uvicorn picks its loop via an
-    # explicit `loop_factory` (uvicorn/loops/asyncio.py) that hardcodes ProactorEventLoop on win32
-    # regardless of the policy in effect, `--loop asyncio` included, so `uvicorn engine.api.main:app`
-    # fails immediately on startup here. Windows development therefore needs `python -m engine.api.main`.
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+def _windows_selector_loop() -> None:
+    """psycopg's async connections cannot use Windows' default ProactorEventLoop (development only; see
+    the same-named helper in engine/worker/main.py). Unlike the worker -- whose only entrypoint is
+    `python -m engine.worker.main`, so confining this call to `__main__` loses nothing -- this module is
+    also imported directly by the plain `uvicorn engine.api.main:app` CLI (the Linux/deployment
+    invocation), so it is called here at import scope rather than from `__main__` below.
+
+    That placement is deliberate, not an oversight: verified against this repo's own dev containers,
+    `uvicorn engine.api.main:app --loop none` and `--reload` both start cleanly on Windows *because* this
+    runs on import, and disabling that import-time call reproduces the exact `psycopg.InterfaceError:
+    ... cannot use the 'ProactorEventLoop'` failure `--loop asyncio` always gives -- nothing else in that
+    invocation would set a compatible loop policy for them. `--loop asyncio` (uvicorn's default) is
+    unaffected either way: uvicorn's own `loop_factory` (uvicorn/loops/asyncio.py) forces
+    ProactorEventLoop itself after import, regardless of any policy already in effect, which is why that
+    flag -- and the bare `uvicorn engine.api.main:app` invocation, which defaults to it -- still fails on
+    Windows and `python -m engine.api.main` remains the documented way to run this here (see the module
+    docstring and README). `_run` below also relies on this: it drives its own `asyncio.run()`, which
+    honours whatever policy is already in effect at that point, same as before this was pulled out into
+    a function.
+    """
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
+_windows_selector_loop()
 
 
 def build() -> FastAPI:
@@ -39,14 +56,18 @@ def build() -> FastAPI:
 
     @contextlib.asynccontextmanager
     async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-        await prepare_database(config.database_url)
-        await pool.open(wait=True)
         try:
+            await prepare_database(config.database_url)
+            await pool.open(wait=True)
             yield
         finally:
-            # Mirrors the worker's shutdown discipline (engine/worker/main.py): each resource is closed
-            # independently so one failure never skips the other, and neither replaces an exception
-            # already propagating from the block above.
+            # Mirrors the worker's shutdown discipline (engine/worker/main.py): prepare_database and
+            # pool.open are inside this try specifically so a failure partway through startup -- either
+            # one raising -- still reaches this finally instead of skipping it, same as a failure after
+            # yield would. redis.aclose() and pool.close() are both safe to call on a client/pool that was
+            # never opened (redis.asyncio.Redis is lazy; AsyncConnectionPool.close() on an unopened pool
+            # is a no-op), and each shutdown is independently guarded so one failure never skips the
+            # other, and neither replaces an exception already propagating from the block above.
             for name, shutdown in (("redis client", redis.aclose), ("db pool", pool.close)):
                 try:
                     await shutdown()
