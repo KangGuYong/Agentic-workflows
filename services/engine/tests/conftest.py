@@ -1,7 +1,9 @@
 """Shared fixtures. Tests that ask for `db_url` or `redis_url` start containers; the rest need no Docker."""
 from __future__ import annotations
 
+import asyncio
 import os
+import sys
 from collections.abc import AsyncIterator, Iterator
 
 import pytest
@@ -12,6 +14,14 @@ from psycopg_pool import AsyncConnectionPool
 
 APP_TABLES = ("run_events", "node_runs", "runs", "workflow_versions", "workflows")
 CHECKPOINT_TABLES = ("checkpoint_blobs", "checkpoint_writes", "checkpoints")  # not checkpoint_migrations
+
+
+def pytest_asyncio_loop_factories(config, item):
+    """psycopg's async connections refuse Windows' default ProactorEventLoop, so development on Windows
+    runs tests on the selector loop. Deployment is Linux, where None leaves the default alone."""
+    if sys.platform == "win32":
+        return {"selector": asyncio.SelectorEventLoop}
+    return None
 
 
 def pytest_collection_modifyitems(items):
