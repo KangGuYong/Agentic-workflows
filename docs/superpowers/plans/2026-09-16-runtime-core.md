@@ -410,6 +410,15 @@ git add services/engine/pyproject.toml services/engine/uv.lock services/engine/e
 git commit -m "chore(engine): add runtime dependencies, dev services and container fixtures"
 ```
 
+> **Post-review note (Task 0, as implemented):** commits `c0963b1` and `94e1043`.
+>
+> - `langgraph-checkpoint-postgres` had to be `>=3.1,<4`: the 2.x line needs `langgraph-checkpoint` 2.x, while our pinned `langgraph` pulls 4.2.
+> - Both spikes passed on Windows: pebble kills an overrunning task and keeps serving, and `EncryptedSerializer.from_pycryptodome_aes()` round-trips without storing the payload in the clear.
+> - The encryption smoke test first asserted a single byte was absent from a 39-byte ciphertext, which collided about 12% of the time; it now checks a 29-character marker (fixed in `f9917f7`).
+> - Known: `load_config` accepts a whitespace-only database URL and non-positive integers. The render pool clamps its own size, so nothing downstream breaks today.
+>
+> Suite: 648.
+
 ---
 
 ## Task 1: One checkpoint channel per node
@@ -602,6 +611,19 @@ Run: `uv run ruff check .` → `All checks passed!`
 git add services/engine/engine/compiler services/engine/engine/runtime/runner.py services/engine/tests
 git commit -m "perf(engine): give every node its own checkpoint channel"
 ```
+
+> **Post-review note (Task 1, as implemented):** commits `8bd51a2` and `f9917f7`.
+>
+> **Plan errors found while implementing.**
+> - `node_fn`'s `state` parameter must be annotated `dict[str, Any]`, not `RunState`. LangGraph reads the first parameter's hint and, when it is a TypedDict, uses it as the node's input schema — every `out_*` channel would have been hidden from the node. Restoring the old annotation fails 29 tests.
+> - The `_chain` helper needs `config.inputs` on the start node, or the validator rejects `{{ start.text }}`.
+> - `_SizedSaver` needs `ensure_ascii=False`; escaped Korean inflates the byte count about six times.
+>
+> **Measured** (payload 20,000 chars, `_SizedSaver` accounting): a 6-node chain went from 23.1x to 8.0x the payload, 10 nodes from 57.1x to 12.1x, 18 nodes from 173.4x to 20.2x. After the change the cost is `(nodes + 2) x payload` — linear.
+>
+> **Known.** `RunState` is now exported but unused, and `RESERVED_IDS` still reserves `outputs` (harmless: it keeps older workflows valid) with a comment that no longer matches.
+>
+> Suite: 651.
 
 ---
 
