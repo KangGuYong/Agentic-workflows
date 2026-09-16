@@ -4476,6 +4476,7 @@ git commit -m "feat(engine): add reference/type validation phase and validate fa
 > **Post-review note (Task 14, as implemented):** commits `f2bca1f`, `5c0faa3`, `7d2bc53` and `e158ccb`; the Task 13 follow-up is `e55dca5`.
 >
 > **Facade (`analyze`).**
+>
 > - DSL text with NUL or lone surrogates, or values nested too deeply to serialize, is `DSL_INVALID` ("워크플로 형식 오류").
 > - A DSL over 512 KB (UTF-8 JSON, measured without filled-in defaults) is `LIMIT_EXCEEDED`.
 > - One `StepBudget` is shared by every phase.
@@ -4485,11 +4486,13 @@ git commit -m "feat(engine): add reference/type validation phase and validate fa
 > **Guaranteed-before sets** are a greatest fixpoint over every reachable predecessor, including back-edges (∩, and ∪ for merge). The plan's forward-only rule wrongly rejected `{{ start.x }}` inside a loop that starts at its condition (start → condition → body → condition). `graph.order` is a forward topological order, not first-execution order.
 >
 > **Types.**
+>
 > - `true`/`false` JSON subschemas no longer crash `kinds_of`/`resolve_path`: `true` means unknown, `false` means the field does not exist.
 > - `| default(x)` keeps `null` (Jinja only replaces a missing value) unless it is written `default(x, true)`, and the kind of `x` is added. `Ref` records `default_kind` and `default_replaces_null`. Spec 4.5 is updated.
 > - Number literals must be finite.
 >
 > **Templates.**
+>
 > - Field or index access on a filter result (`(x | default({})).y`) is forbidden, because it skipped the reference checks.
 > - A `format: "json"` template without `{{`/`{%` is parsed at validation. A quoted substitution warns. `render.QUOTED_SUBSTITUTION` is now public.
 >
@@ -4498,6 +4501,7 @@ git commit -m "feat(engine): add reference/type validation phase and validate fa
 > Suite: 560.
 >
 > **Known and accepted:**
+>
 > - `피드백: {{ start.s | default('') }}` on a nullable string warns, although `null` and `''` render the same.
 > - A slice of a filter result (`(x | trim)[0:3]`) is forbidden along with other field access on filters.
 >
@@ -4891,6 +4895,7 @@ git commit -m "feat(engine): add run state, routing and runtime ports"
 > **Resume detection.** `Recorder.find_waiting` returns the latest attempt of the execution that ever recorded `node_waiting`, even after that attempt finished. The plan's version returned `None` once the row closed, so a replay after a crash (resume succeeded, checkpoint not yet saved) opened attempt 2 and emitted a bogus `node_waiting`. The plan test now expects `1`. A replay therefore reuses the waited attempt and closes it again, which duplicates `node_finished`. Spec 5.3 describes a new row per replay; Task 16 decides.
 >
 > **Lost lease.**
+>
 > - `errors.LeaseLost` subclasses `RunCancelled`, and `FlagGuard.lose_lease()` raises it before `cancelled` is checked.
 > - `DuplicateAttempt`, raised when an attempt already exists (the Postgres unique key), is a `LeaseLost`, so the wrapper's `except RunCancelled: raise` stops instead of treating it as a node error.
 >
@@ -4899,6 +4904,7 @@ git commit -m "feat(engine): add run state, routing and runtime ports"
 > Suite: 577. The plan's Task 16–18 code and tests pass on top, except `test_output_too_large` (see below).
 >
 > **Carried into Task 16:**
+>
 > - `test_output_too_large` fails because the template renderer caps output first. Build the oversized output another way.
 > - `_check_size` uses `json.dumps(default=str)`, so a non-JSON output passes it and the recorder then raises outside the wrapper's `try`. Use strict `json.dumps(..., allow_nan=False)` so it becomes a node error.
 > - Pass `resuming` for the whole node call. Otherwise a retry after a resumed interrupt records `node_waiting` again.
@@ -4907,6 +4913,7 @@ git commit -m "feat(engine): add run state, routing and runtime ports"
 > **Carried into Task 17:** the runner maps `LeaseLost` to "stop and write nothing", not to `cancelled`.
 >
 > **Carried into Plan 2 (roadmap):**
+>
 > - Closing an attempt must work on a row that is already closed (replays).
 > - Run-level cancel closes `running` rows as `cancelled` (spec 5.9).
 > - Token usage of failed attempts (already listed).
@@ -5311,16 +5318,19 @@ git commit -m "feat(engine): add generic node wrapper with retry, timeout, onErr
 > **Post-review note (Task 16, as implemented):** commits `8f48078`, `17f565b` and `043ed02`.
 >
 > **Stored values.**
+>
 > - Rendered values with NUL or lone surrogates are `TEMPLATE_ERROR`.
 > - `_check_output` replaces `_check_size`: strict JSON (`allow_nan=False`) plus `check_text` (`NODE_FAILED`), and a 1 MB cap (`OUTPUT_TOO_LARGE`).
 > - `defaultOutput` is deep-copied per use and checked the same way before routing.
 >
 > **Resume and replay.**
+>
 > - `resumed` (the execution already recorded `node_waiting`) holds for the whole node call, and a replay reuses the waited attempt. Spec 5.3's "new row per replay" is amended in practice: Plan 2 must accept closing an already-closed attempt and tolerate a duplicate `node_finished`.
 > - Retries take `attempts_so_far() + 1`.
 > - A node that waits must not retry, because a second `interrupt()` in one call waits again without a record. `human_approval` accepts no policy.
 >
 > **Infrastructure faults are not node errors.**
+>
 > - Recorder reads and writes go through `_recorded()`: `RunCancelled` (including `LeaseLost` and `DuplicateAttempt`) passes through, and anything else becomes the new `errors.EngineFault`, which escapes the run.
 > - `node_started` sits outside the attempt `try`.
 > - `on_token` is best effort, and a failure is logged once per attempt.
@@ -5332,6 +5342,7 @@ git commit -m "feat(engine): add generic node wrapper with retry, timeout, onErr
 > Suite: 602.
 >
 > **Carried into Plan 2 (roadmap):**
+>
 > - The worker must release a run whose task raised `EngineFault` or any unexpected exception: stop the heartbeat, or do a fenced requeue with `recovery_count + 1`. Otherwise the lease never expires.
 > - Close orphaned `running` attempt rows at run level, e.g. a cancelled parallel sibling or a crash mid-write.
 > - Token events carry no attempt, so the UI clears streamed text on each `node_started`.
@@ -5584,12 +5595,14 @@ git commit -m "feat(engine): compile validated DSL to LangGraph and execute runs
 > **Post-review note (Task 17, as implemented):** commits `c9eb70f` and `842ad66`.
 >
 > **Resume.**
+>
 > - `execute_run(resume=…)` requires the approval's target, `nodeId` (str) and `execIndex` (int), in the answer.
 > - When that approval is the pending interrupt, the answer is checked with `human_approval.resume_output` before `Command(resume=…)`. A bad answer raises the new `ResumeRejected` and nothing reaches the graph. LangGraph keeps the first resume value of an interrupt, so a bad answer would otherwise fail the run forever.
 > - When the named approval is no longer waiting, the answer was already used before a crash, so the run just continues from its checkpoint. A replayed answer never answers a later approval, e.g. the next pass of an approval inside a loop.
 > - A resume for a run with no checkpoint is `ResumeRejected`.
 >
 > **Escaping exceptions** (documented in the docstring):
+>
 > - `LeaseLost` is re-raised; plain `RunCancelled` still returns `cancelled`.
 > - `ResumeRejected`, `EngineFault` and unexpected engine bugs also escape, and the worker handles them.
 > - `inputs` are ignored for a run that already has a checkpoint.
@@ -5597,6 +5610,7 @@ git commit -m "feat(engine): compile validated DSL to LangGraph and execute runs
 > **Caching.** `CompiledWorkflow` is bound to one checkpointer and one registry, so a cache keyed only by `dsl_hash` needs a single registry and checkpointer per process.
 >
 > **Confirmed by probes.**
+>
 > - Nested loops at maxIterations 20 run 127 node executions under a `recursion_limit` of 256.
 > - A classifier self-loop exits through `default`.
 > - A loop exit that fans out merges once.
@@ -5609,6 +5623,7 @@ git commit -m "feat(engine): compile validated DSL to LangGraph and execute runs
 > **Carried into Task 18:** HITL golden resumes pass the target; add loop-exit fan-out and self-loop flows.
 >
 > **Carried into Plan 2 (roadmap):**
+>
 > - Store `nodeId`/`execIndex` in `resume_payload`, and clear it whenever the resumed invocation returns, whatever the outcome. A leftover payload on a failed run would act like a retry.
 > - On `ResumeRejected`, keep the run `waiting`.
 > - The API still returns `409 RESUME_TARGET_MISMATCH` itself, because the engine silently continues on a mismatched target.
@@ -5986,6 +6001,7 @@ git commit -m "test(engine): golden pattern flows and recovery scenarios"
 > **Post-review note (Task 18, as implemented):** commit `d9dc140`.
 >
 > **Deviations.**
+>
 > - The HITL golden resume sends `{"nodeId": "human_approval_1", "execIndex": 1, **answer}`, because Task 17 made `execute_run` require the approval's target.
 > - Added `test_a_loop_exit_can_fan_out_and_merges_once` (exit on `true` and exit when exhausted) and `test_a_condition_self_loop_stops_at_its_limit`.
 >
@@ -6023,6 +6039,7 @@ git commit -m "chore(engine): lint fixes"
 > **Final branch review:** commits `7a2dae0` and `2179ddd`.
 >
 > **Run state depth.** LangGraph's checkpoint serializer fails at about 250 nesting levels with a raw `TypeError`, below what the engine's checks allowed. The fix:
+>
 > - `engine.jsondata.MAX_JSON_DEPTH` (100) and `check_storable` apply to rendered fields (`TEMPLATE_ERROR`), node outputs (`NODE_FAILED`), `defaultOutput` (`INVALID_POLICY`) and fresh run inputs (a failed outcome at `start`).
 > - `resume_output` checks the whole approval output, so an answer it accepts always fits the node output.
 >
@@ -6033,6 +6050,7 @@ git commit -m "chore(engine): lint fixes"
 > **Carried into Plan 2 (roadmap):** quadratic checkpoint growth, one shared node registry, `dsl_hash` of `policy: {}`, run input depth at the API.
 >
 > **Known follow-ups.**
+>
 > - A JSON template with no `{{ }}` nested deeper than 99 passes `validate()` but always fails at runtime; `_check_json_template` could run `check_storable` on the parsed value.
 > - `_is_number` is duplicated in `jsondata`, `templates/env` and `nodes/condition`.
 >
