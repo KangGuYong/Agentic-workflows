@@ -182,17 +182,22 @@ async def test_a_duplicate_attempt_is_treated_as_a_lost_lease(pool, redis, caplo
     assert not any(r.levelno >= logging.ERROR for r in caplog.records)
 
 
-# B3: a run picked up with recovery_count > 0 (the reaper requeued it after a crash) must announce itself
-# as a recovery, not a fresh start.
-async def test_a_recovered_run_emits_run_recovered_first(pool, worker_factory):
+# B3: the reaper (not the worker) owns `run_recovered` — it is the event for the act of recovering, done
+# once by the reaper when it requeues an abandoned run. A worker claiming that requeued run still writes a
+# plain `run_started`, carrying how many times the run has been recovered so far, for every attempt to run.
+async def test_a_recovered_run_still_starts_with_run_started(pool, worker_factory):
     run_id = await make_run(pool, dsl=CHAIN, status="queued", inputs={"topic": "AI"})
     async with pool.connection() as conn:
         await conn.execute("UPDATE runs SET recovery_count=1 WHERE id=%s", (run_id,))
     await worker_factory(ScriptedLLM(["요약본"]))
 
     await _status(pool, run_id)
-    types = [e["type"] for e in await _events(pool, run_id)]
-    assert types[0] == "run_recovered"
+    async with pool.connection() as conn:
+        rows = await (await conn.execute(
+            "SELECT type, payload FROM run_events WHERE run_id=%s ORDER BY seq", (run_id,))).fetchall()
+    assert rows[0]["type"] == "run_started"
+    assert rows[0]["payload"] == {"recoveryCount": 1}
+    assert "run_recovered" not in [row["type"] for row in rows]  # the worker itself never writes this
 
 
 # B4: one worker runs two differently-shaped workflows; the compiled-workflow cache must be keyed by the

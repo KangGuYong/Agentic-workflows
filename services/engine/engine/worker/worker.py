@@ -24,6 +24,7 @@ from engine.nodes.registry import NodeRegistry, default_registry
 from engine.runtime.deps import RunDeps
 from engine.runtime.guard import FlagGuard
 from engine.runtime.runner import ResumeRejected, RunOutcome, execute_run
+from engine.worker.reaper import Reaper
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class Worker:
         self._registry = registry or default_registry()
         self._render = render
         self._publisher = RedisPublisher(redis)
+        self._reaper = Reaper(config, pool, redis)  # every worker has one; an advisory lock picks the sweeper
         self._checkpointer = make_checkpointer(pool, config)  # encrypted unless dev-insecure (design 5.3)
         self._compiled: dict[str, CompiledWorkflow] = {}
         self._guards: dict[str, FlagGuard] = {}
@@ -61,9 +63,11 @@ class Worker:
         await self._reconnect_listen()
         self._spawn(self._claim_loop())
         self._spawn(self._control_loop())
+        await self._reaper.start()
 
     async def stop(self) -> None:
         self._running = False
+        await self._reaper.stop()  # before our own tasks: its task is not tracked in self._tasks
         tasks = list(self._tasks)
         for task in tasks:
             task.cancel()
@@ -220,7 +224,10 @@ class Worker:
         beat = self._spawn(self._heartbeat(run_id, guard, task))
         try:
             try:
-                await self._event(run_id, "run_recovered" if row["recovery_count"] else "run_started")
+                # The reaper owns `run_recovered`: it is the event for the act of recovering an abandoned
+                # run, written once when it requeues one. Every attempt to run still starts with
+                # `run_started`, carrying how many times this run has been recovered so far.
+                await self._event(run_id, "run_started", payload={"recoveryCount": row["recovery_count"]})
 
                 try:
                     compiled = await self._compile(row)
