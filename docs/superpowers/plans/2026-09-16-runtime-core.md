@@ -3646,6 +3646,20 @@ git add services/engine/engine/api services/engine/tests/test_api_basics.py serv
 git commit -m "feat(engine): add the API skeleton with token auth and strict bodies"
 ```
 
+> **Post-review note (Task 11, as implemented):** commits `84617af` and `fe87887`.
+>
+> - `read_json`'s size limit bounded nothing. `Content-Length` is absent on a chunked request, and `await request.body()` buffers whatever arrives before the second check runs: a chunked POST against a 1 KB limit pulled 67 MB into the process and *then* returned 413. It streams now and stops at the limit.
+> - A non-ASCII `Authorization` header was a 500 with a logged traceback, from an unauthenticated client — `hmac.compare_digest` refuses two non-ASCII `str`, h11 permits obs-text in header values and Starlette decodes them latin-1. Comparing bytes fixes it; anyone who could reach the port had a free log-flood until then.
+> - `dependencies=[Depends(require_token)]` on the app does not cover FastAPI's own docs routes: they are registered through Starlette's `add_route`, which never sees that list, so `/openapi.json`, `/docs`, `/redoc` and `/docs/oauth2-redirect` answered 200 with no token while `/node-types` answered 401. After Tasks 12-15 that is an unauthenticated map of every route and node schema. The check is a plain ASGI middleware now, in front of routing, covering every path and anything mounted later — plain ASGI rather than `BaseHTTPMiddleware` because Task 14 streams SSE through it.
+> - `/healthz` had no deadline on either backend check, so a wedged Postgres meant probes piled up holding pool slots and the probe never reported `degraded` — it never answered at all. Each check has a 2 s timeout.
+> - `parse_json` passes `max_depth=None`, so a deeply nested body reached a route and blew up in its own `check_storable` as a 500. `read_json` bounds the depth itself, which matters for Task 13: deep `inputs` would otherwise get a 202 and a failed run instead of a 4xx at submit.
+> - The plan's `@app.get("/healthz", dependencies=[])` cannot opt out of an app-level dependency, and its comment said otherwise. `/healthz` stays behind the token; a container healthcheck must send it.
+> - Four mutations survived the plan's tests, including dropping the `Content-Length` pre-check (the test that named it used an oversized body too, so the post-check killed it either way), dropping the scheme check, and a `/healthz` that always reports `ok`. Thirteen tests were added, including a raw-ASGI chunked upload that counts how many chunks the server accepted.
+> - Also: `int()` on a `Content-Length` of `"²"` was a 500, `_http_error` dropped `Allow`/`WWW-Authenticate` headers, `field()` rejected a JSON `3` for a float and 422'd an explicit `null` on an optional field (both would have bitten Task 12), and `/node-types` rebuilt eight pydantic schemas on every call.
+> - Unchanged by design: an unset `ENGINE_API_TOKEN` still passes requests through unauthenticated (design 8.1 asks for a warning, not a refusal) — the warning now comes from `create_app`, so it cannot be skipped by a caller that does not use the entrypoint. `ENGINE_API_TOKEN=""` is indistinguishable from unset.
+>
+> Suite: 777.
+
 ---
 
 ## Task 12: Workflows — CRUD, optimistic locking, validation
