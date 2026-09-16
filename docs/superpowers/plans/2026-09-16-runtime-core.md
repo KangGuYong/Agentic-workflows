@@ -4357,6 +4357,18 @@ git add services/engine/engine/db/runs.py services/engine/engine/api services/en
 git commit -m "feat(engine): create runs against a pinned version and read them back"
 ```
 
+> **Post-review note (Task 13, as implemented):** commits `44c7e23` and `41475ab`.
+>
+> - The plan's router omitted the UUID path guard, the `_sanitize` pass and the logged publish that Task 12 established; all three were added before review.
+> - A present-but-empty `Idempotency-Key` pinned a workflow to its first run forever: `if key:` skipped the lookup but the insert still stored `""`, which is not NULL and so joins the partial unique index, so every later create hit `UniqueViolation` and the recovery answered with the first run's id. A key over the btree's row limit (3 KB) raised `ProgramLimitExceeded`, which the recovery does not catch — a 500 from a header h11 happily accepts at 16 KB. The key is normalised to `None` when blank and rejected over 200 bytes.
+> - `GET /runs/{id}/nodes` had no limit and each row can carry 256 KB of input and 256 KB of output: 1000 rows of 100 KB measured 200 MB in 2.0 s, 308 ms of it `_sanitize` on the event loop — and the recursion limit permits ~20,000 node executions. It pages now (`limit` 1-200, default 50, plus `hasMore`), and `GET /workflows/{id}/runs` finally accepts the `cursor` and `limit` design 8.1 specifies, as a keyset over `(created_at DESC, id DESC)`.
+> - Design 8.3's order — lock, then validate, then pin — holds the workflow's `FOR UPDATE` lock across `analyze` in a thread. Measured on a maximal legal 512 KB draft: an autosave `PUT` blocked 60 ms behind it, four concurrent creates serialised to 216 ms against design 11.2's 200 ms target, and `/healthz` went from 1 ms to 82 ms. The draft is read and analysed off the lock now, and the transaction re-checks `revision` before pinning — equivalent, because `revision` bumps on every save.
+> - Nine of 23 mutations survived, mostly because the list tests held a single row: ordering and `LIMIT 1` on the run list, the node-run `ORDER BY` (heap order matched insertion order for three rows), the idempotency fast path (the `UniqueViolation` recovery gives the same answer), the `run_queued` payload and `GET /runs/{id}`'s own 404.
+> - Verified and left alone: the idempotency index matches the lookup including its partial predicate; a `UniqueViolation` cannot see an uncommitted winner, because both callers serialise on the workflow lock first; `dsl_hash` is over the normalised DSL, so a position-only edit reuses the version; nothing leaks when `storeRunData` is false, and `meta` holds no internals; `run_queued` is always seq 1.
+> - Known and deferred: `_sanitize` is unreachable on these routes (jsonb cannot hold a NUL or a lone surrogate) but kept for consistency; `waiting_payload`'s `ORDER BY attempt DESC` is dead, because a resumed node never records `node_waiting` twice; `lock_run` and `has_checkpoint` are unused until Task 15; a full node trace can still be ~100 pages at the maximum page size.
+>
+> Suite: 830.
+
 ---
 
 ## Task 14: Live events over SSE
