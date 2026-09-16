@@ -4006,6 +4006,18 @@ git add services/engine/engine/db/workflows.py services/engine/engine/api servic
 git commit -m "feat(engine): serve workflow CRUD and validation"
 ```
 
+> **Post-review note (Task 12, as implemented):** commits `fcc6a09` and `9624b32`.
+>
+> - The plan's snippets needed five changes to hold up under concurrency and hostile input, all made before review: `/validate` lets one authority decide what is too big; the 409 body is re-read after the failed CAS, because the pre-CAS read can describe a revision that did not win; `delete_workflow` takes the row `FOR UPDATE`, since an `INSERT` into `runs` takes `FOR KEY SHARE` on the parent and a plain read lets a run slip past the active-run check into `ON DELETE CASCADE`; anything echoed back goes through `safe_text`, because a lone surrogate in `details` is a 500; and the path id is parsed as a UUID before it reaches Postgres, or a non-UUID is a `DataError` 500 instead of a 404.
+> - `read_json` bounds a body at `max_body_bytes` (1,000,000) but `MAX_DSL_BYTES` is 524,288, so `/validate` accepted drafts twice the size it would ever save, and `analyze` reaches its own size check only after validating ~15k nodes and dumping them twice: 236 ms versus 8.9 ms for the raw check. `asyncio.to_thread`'s executor holds the GIL, so a handful of those stall the event loop, `/healthz` and Task 14's SSE with it. The route answers the same `LIMIT_EXCEEDED` issue without running the validator now.
+> - The delete lock was load-bearing and untested: the pool is autocommit, so removing `conn.transaction()` makes `SELECT … FOR UPDATE` commit at end of statement and the lock vanish before the check — with all 19 tests still green. The test asserts `conn.info.transaction_status` is `INTRANS` now.
+> - `save_workflow`'s pre-CAS read was dead weight (the post-CAS re-read already produces the 404) and the one test that noticed spun on a counter, so dropping it *hung the suite* rather than failing it. The read is gone and every wait in the file is bounded.
+> - Six more mutations survived: validation running on the event loop, the 200-character name bound, `/validate` without its existence check, and three ways to break `list_all` that a one-row list test cannot see.
+> - Verified and left alone: `safe_text` touches only NUL and lone surrogates, so a draft round-trips byte-identical (emoji, ZWJ sequences, combining marks, RTL overrides, 100k-char strings); exactly one of two concurrent PUTs wins under READ COMMITTED; `has_active_runs` matches the non-terminal half of the schema's CHECK; template parsing is linear, so an accepted 512 KB draft costs ~120-150 ms.
+> - Known and deferred: deleting a workflow destroys its run history (design 3.3 asks only for the active-run 409) and orphans the LangGraph checkpoint rows, since retention is not implemented anywhere in this plan; `get`/`save_draft`/`delete` are not workspace-scoped, which is harmless while there is one workspace.
+>
+> Suite: 802.
+
 ---
 
 ## Task 13: Creating and reading runs
