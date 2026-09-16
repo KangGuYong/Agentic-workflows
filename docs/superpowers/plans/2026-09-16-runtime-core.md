@@ -5144,7 +5144,7 @@ git commit -m "test(engine): cover recovery, approval restart and live events en
 - Create: `services/engine/README.md`
 - Modify: `docs/superpowers/plans/2026-09-16-runtime-core.md` (check off the coverage table below)
 
-- [ ]  **Step 1: Write the README**
+- [x]  **Step 1: Write the README**
 
 Create `services/engine/README.md`:
 
@@ -5193,7 +5193,7 @@ uv run ruff check .
 
 ```
 
-- [ ] **Step 2: The API entrypoint**
+- [x] **Step 2: The API entrypoint**
 
 Create `services/engine/engine/api/main.py` so `uvicorn engine.api.main:app` works:
 
@@ -5243,7 +5243,7 @@ app = build()
 If the FastAPI version in use deprecates `on_event`, use a `lifespan` context manager instead — the test
 fixture builds the app directly, so either style works there.
 
-- [ ]  **Step 3: Full verification**
+- [x]  **Step 3: Full verification**
 
 Run: `uv run pytest -q`
 Expected: every test passes, including integration. Note the count.
@@ -5254,7 +5254,7 @@ Expected: passes without Docker running.
 Run: `uv run ruff check .`
 Expected: `All checks passed!`
 
-- [ ]  **Step 4: Confirm the coverage table below still holds, then commit**
+- [x]  **Step 4: Confirm the coverage table below still holds, then commit**
 
 ```bash
 git add services/engine/README.md services/engine/engine/api/main.py docs/superpowers/plans/2026-09-16-runtime-core.md
@@ -5273,7 +5273,7 @@ git commit -m "docs(engine): document running the service and record Plan 2a ver
 | 3 실행 상태 채널 구조      | Task 1                                                                                |
 | 4 CPU 격리                 | Task 2 (hook), Task 10 (pool, deadline, memory)                                       |
 | 5 데이터 계층              | Task 3 (schema, migrations, encrypted checkpointer)                                   |
-| 6.1 점유                   | Task 6, Task 7                                                                        |
+| 6.1 점유                   | Task 6, Task 7, Task 9 (`run_recovered` is the reaper's event, not the worker's — see 6.5) |
 | 6.2 리스와 펜싱            | Task 6, Task 8                                                                        |
 | 6.3 취소                   | Task 8, Task 15 (API side)                                                            |
 | 6.4 실행 루프              | Task 7, Task 8 (timeout), Task 16 (recovery)                                          |
@@ -5281,7 +5281,7 @@ git commit -m "docs(engine): document running the service and record Plan 2a ver
 | 7.1 PostgresRecorder       | Task 4                                                                                |
 | 7.2 저장 정책              | Task 4 (redaction, truncation,`storeRunData`), Task 15 (waiting payload)              |
 | 7.3 SSE                    | Task 14, Task 16                                                                      |
-| 8.1 공통 계층              | Task 11                                                                               |
+| 8.1 공통 계층              | Task 11 (auth as ASGI middleware in front of routing, not a per-route dependency — see Task 11's post-review) |
 | 8.2 엔드포인트             | Tasks 11–15                                                                          |
 | 8.3 레지스트리 하나        | Task 7 (worker), Task 11 (API state)                                                  |
 | 8.4 컴파일 캐시            | Task 7                                                                                |
