@@ -314,7 +314,9 @@ Create `services/engine/tests/conftest.py`:
 """Shared fixtures. Tests that ask for `db_url` or `redis_url` start containers; the rest need no Docker."""
 from __future__ import annotations
 
+import asyncio
 import os
+import sys
 from collections.abc import AsyncIterator, Iterator
 
 import pytest
@@ -325,6 +327,14 @@ from psycopg_pool import AsyncConnectionPool
 
 APP_TABLES = ("run_events", "node_runs", "runs", "workflow_versions", "workflows")
 CHECKPOINT_TABLES = ("checkpoint_blobs", "checkpoint_writes", "checkpoints")  # not checkpoint_migrations
+
+
+def pytest_asyncio_loop_factories(config, item):
+    """psycopg's async connections refuse Windows' default ProactorEventLoop, so development on Windows
+    runs tests on the selector loop. Deployment is Linux, where None leaves the default alone."""
+    if sys.platform == "win32":
+        return {"selector": asyncio.SelectorEventLoop}
+    return None
 
 
 def pytest_collection_modifyitems(items):
@@ -873,6 +883,7 @@ Create `services/engine/engine/db/alembic.ini`:
 [alembic]
 script_location = migrations
 prepend_sys_path = .
+path_separator = os
 ```
 
 Create `services/engine/engine/db/migrations/script.py.mako`:
@@ -3164,6 +3175,12 @@ from engine.worker.worker import Worker
 log = logging.getLogger(__name__)
 
 
+def _windows_selector_loop() -> None:
+    """psycopg's async connections cannot use Windows' default ProactorEventLoop (development only)."""
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
 async def run() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     config = load_config()
@@ -3197,6 +3214,7 @@ async def run() -> None:
 
 
 if __name__ == "__main__":
+    _windows_selector_loop()  # call before asyncio.run, and pass --loop asyncio to uvicorn on Windows
     asyncio.run(run())
 ```
 
