@@ -96,6 +96,25 @@ async def until(check, *, timeout: float = 15.0, interval: float = 0.05):
 
 
 @pytest_asyncio.fixture
+async def api(pool, redis):
+    """An httpx client bound to the app, sharing the test's pool and Redis."""
+    import dataclasses
+
+    from httpx import ASGITransport, AsyncClient
+
+    from engine.api.app import create_app
+    from engine.config import load_config
+
+    config = dataclasses.replace(load_config(), api_token="test-token")
+    app = create_app(config, pool, redis)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://api",
+                           headers={"Authorization": "Bearer test-token"}) as client:
+        client.config = config  # tests that need the token or limits
+        yield client
+
+
+@pytest_asyncio.fixture
 async def worker_factory(pool, redis, db_url):
     """Builds workers sharing the test's pool and Redis; every worker is stopped at teardown."""
     from engine.config import load_config
