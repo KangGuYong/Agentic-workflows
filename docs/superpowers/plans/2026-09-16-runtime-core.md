@@ -3091,6 +3091,17 @@ git add services/engine/engine/worker services/engine/engine/errors.py services/
 git commit -m "feat(engine): recover abandoned runs and expire stale approvals"
 ```
 
+> **Post-review note (Task 9, as implemented):** commits `8f31222` and `eeddad8`.
+>
+> - `Reaper.stop()` reintroduced the bug Task 7's review removed from `Worker.stop()`: `suppress(CancelledError)` around `await self._task` runs in the *caller's* task, so a shutdown deadline is eaten. With Postgres unresponsive — the reason you are shutting down — `exclusive()`'s `finally` waits on `pg_advisory_unlock` forever and `Worker.stop()` then hangs in its own gather. It now gathers with `return_exceptions=True`.
+> - The three adaptations the task called for were applied to `_recover_one` but not to `_expire_waiting`, which is also a terminal path: a 31-day-old approval on a `storeRunData=false` run kept its inputs forever, and any node row it closed got no event. `_take` also never cleared `resume_payload`, so a reviewer's edited answer survived on a failed run that had dropped its inputs; it is cleared on the two terminal paths and kept on the requeue path, where `execute_run` tolerates a stale resume.
+> - The advisory lock is one global key and the pool issues no `DISCARD ALL`, so an unlock that fails on an otherwise healthy connection would hold `LOCK_KEY` with no owner and silently stop recovery in every process until the pool recycled that connection. A failed unlock now closes the connection, and a sweep that cannot take the lock says so.
+> - One bad row aborted the whole sweep, skipped `_expire_waiting` and — the batch being `ORDER BY lease_expires_at` — came back first on every tick. Both loops isolate per row now.
+> - Five mutations survived the plan's tests: both of `_take`'s CAS predicates, `notify_queued`, cancelling every waiting run regardless of age, and never starting the reaper from `Worker.start()` (all 31 worker tests stayed green without it). Eight tests cover them, including an end-to-end recovery through a real worker's own reaper and a sweep held off by another reaper's lock.
+> - The design doc said the worker writes `run_recovered` when `recovery_count > 0`; Step 3 moved that event to the reaper, so section 6.1 was corrected rather than left contradicting the code.
+>
+> Suite: 735.
+
 ---
 
 ## Task 10: Render pool and the worker entrypoint
