@@ -3,12 +3,16 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
+from engine.nodes.registry import NodeRegistry
+
 router = APIRouter()
 
 
-@router.get("/node-types")
-async def node_types(request: Request) -> dict:
-    registry = request.app.state.registry
+def build_payload(registry: NodeRegistry) -> dict:
+    """The /node-types response body for `registry`. Each spec's `Config.model_json_schema()` walks a
+    pydantic model (~1.8ms of event-loop CPU across the built-in specs) -- call this once in create_app
+    and cache the result, rather than rebuilding it on every request for data that never changes after
+    the registry is built."""
     return {"nodeTypes": [
         {
             "type": spec.type,
@@ -21,3 +25,8 @@ async def node_types(request: Request) -> dict:
         }
         for spec in registry.all()
     ]}
+
+
+@router.get("/node-types")
+async def node_types(request: Request) -> dict:
+    return request.app.state.node_types_payload

@@ -28,15 +28,23 @@ def _body(code: str, message: str, details: Any = None) -> dict[str, Any]:
     return {"error": error}
 
 
+def api_error_response(exc: ApiError) -> JSONResponse:
+    """Build the JSON response for an ApiError. Shared by the exception handler below and by
+    TokenAuthMiddleware, which cannot raise into `app.exception_handler` (middleware runs outside it)
+    and must build the response itself."""
+    return JSONResponse(_body(exc.code, exc.message, exc.details), status_code=exc.status)
+
+
 def install(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
-        return JSONResponse(_body(exc.code, exc.message, exc.details), status_code=exc.status)
+        return api_error_response(exc)
 
     @app.exception_handler(HTTPException)
     async def _http_error(_: Request, exc: HTTPException) -> JSONResponse:
         code = "NOT_FOUND" if exc.status_code == 404 else "REQUEST_ERROR"
-        return JSONResponse(_body(code, str(exc.detail)), status_code=exc.status_code)
+        # e.g. a 405 carries an Allow header -- dropping exc.headers here would silently discard it.
+        return JSONResponse(_body(code, str(exc.detail)), status_code=exc.status_code, headers=exc.headers)
 
     @app.exception_handler(RequestValidationError)
     async def _validation(_: Request, exc: RequestValidationError) -> JSONResponse:
