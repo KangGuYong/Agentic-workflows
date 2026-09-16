@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
 from psycopg.errors import UniqueViolation
 
 from engine.api.body import field, read_json, require_object
@@ -19,6 +20,7 @@ from engine.db import runs as run_db
 from engine.db import workflows as workflow_db
 from engine.dsl.models import dsl_hash
 from engine.events.publish import RedisPublisher
+from engine.events.stream import event_stream
 from engine.events.writer import append_event
 from engine.jsondata import safe_text
 from engine.validator import analyze, has_errors
@@ -64,6 +66,27 @@ def _parse_limit(request: Request) -> int:
     if not (1 <= value <= MAX_LIMIT):
         raise ApiError(422, "REQUEST_ERROR", f"limit은 1~{MAX_LIMIT} 사이여야 합니다")
     return value
+
+
+MAX_AFTER_DIGITS = 20  # comfortably covers any real `seq` (bigint, max 19 digits) with room to spare
+
+
+def _parse_after(request: Request) -> int:
+    """`Last-Event-ID` (a reconnect) or `?after=` (a first connect), defaulting to 0 -- a full replay.
+
+    Both are client-controlled strings that only need to pass `.isdigit()` before reaching `int()` in the
+    plan's own sketch, and that is not enough: `str.isdigit()` is also true for non-ASCII decimal-ish
+    characters (e.g. superscript digits) that `int()` cannot parse and raises `ValueError` on, exactly the
+    `Content-Length: "²"` bug the Task 11 review found in a different header. A digit string with no
+    length bound is also free CPU: `int()` on an enormous digit string is quadratic in its length. Neither
+    case is an error worth surfacing to the caller -- an SSE reconnect id that fails to parse should just
+    fall back to a full replay, not a 4xx -- so anything that is not a short run of ASCII digits is
+    treated the same as "absent" rather than raising (same reasoning as the plan's `.isdigit()` fallback,
+    just closing the two gaps in it)."""
+    raw = request.headers.get("last-event-id") or request.query_params.get("after") or "0"
+    if raw.isascii() and raw.isdigit() and len(raw) <= MAX_AFTER_DIGITS:
+        return int(raw)
+    return 0
 
 
 def _encode_cursor(created_at: datetime, run_id: str) -> str:
@@ -266,6 +289,28 @@ async def get_node_runs(run_id: str, request: Request) -> dict[str, Any]:
         rows = await run_db.list_node_runs(conn, run_id, limit=limit + 1)
     page, has_more = rows[:limit], len(rows) > limit
     return {"nodeRuns": [_node_run_view(row) for row in page], "hasMore": has_more}
+
+
+@router.get("/runs/{run_id}/events")
+async def stream_events(run_id: str, request: Request) -> StreamingResponse:
+    """Live events for one run over SSE (design 7.3): subscribes on Redis, then replays what is already
+    in Postgres, then plays the live channel, filling any gap from Postgres and dropping the oldest queued
+    event if the client falls behind -- see `engine.events.stream` for why both are safe.
+
+    Same UUID guard and `_run_or_404` as every other route in this file, checked on a connection borrowed
+    just for that lookup and released before streaming starts -- unlike the ordinary JSON routes, this one
+    then holds a *separate* Redis pubsub connection open for as long as the client keeps reading, so the
+    number of concurrent streams this process can serve is bounded by the Redis client's own connection
+    pool, not by anything here. `request.app.state.pool` (Postgres) is only borrowed briefly, to page in
+    stored events, exactly like `get_node_runs` above.
+    """
+    run_id = _run_id(run_id)
+    async with request.app.state.pool.connection() as conn:
+        await _run_or_404(conn, run_id)
+    after = _parse_after(request)
+    stream = event_stream(request.app.state.pool, request.app.state.redis, run_id, after=after)
+    return StreamingResponse(stream, media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 async def _publish(request: Request, run_id: str, event: dict[str, Any]) -> None:

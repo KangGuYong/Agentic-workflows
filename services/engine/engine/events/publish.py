@@ -5,6 +5,7 @@ lost cancel is noticed by the worker's next heartbeat.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -52,13 +53,29 @@ async def control_messages(redis: Any) -> AsyncIterator[dict[str, Any]]:
         await pubsub.aclose()
 
 
-async def run_events(redis: Any, run_id: str) -> AsyncIterator[dict[str, Any]]:
-    """Live events for one run, for the SSE endpoint."""
+async def run_events(redis: Any, run_id: str, *,
+                     ready: asyncio.Event | None = None) -> AsyncIterator[dict[str, Any]]:
+    """Live events for one run, for the SSE endpoint.
+
+    `ready`, if given, is set once Redis has actually confirmed the subscription -- the first `subscribe`
+    control message read back on this connection -- not merely once `pubsub.subscribe()` below has
+    returned. redis-py's `subscribe()` only *sends* the SUBSCRIBE command and returns (see
+    `PubSub.execute_command`, which deliberately does not read the reply, to avoid stealing a real message
+    off the wire); it does not wait for Redis to acknowledge it. A caller that needs the "subscribed
+    before reading stored state" guarantee (Task 14's SSE stream) must wait on `ready`, since Redis
+    processes commands on a connection in order and so the subscription is already registered server-side
+    by the time that confirmation reply comes back -- one scheduler tick alone gives no such guarantee.
+    """
     pubsub = redis.pubsub()
     await pubsub.subscribe(run_channel(run_id))
     try:
         async for message in pubsub.listen():
-            if message.get("type") != "message":
+            message_type = message.get("type")
+            if message_type == "subscribe":
+                if ready is not None:
+                    ready.set()
+                continue
+            if message_type != "message":
                 continue
             parsed = _decode(message["data"])
             if parsed is not None:
