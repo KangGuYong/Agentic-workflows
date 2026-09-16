@@ -110,3 +110,66 @@ async def test_store_run_data_false_keeps_metadata_only(pool):
     assert (record["input"], record["output"], record["status"]) == (None, None, "succeeded")
     assert record["tokens_out"] == 2
     assert "outputPreview" not in ((await _events(pool, run_id))[-1]["payload"] or {})
+
+
+async def test_event_payloads_are_redacted_and_clipped(pool):
+    run_id = await make_run(pool)
+    recorder = PostgresRecorder(pool, run_id)
+    await recorder.node_started("llm_1", 1, 1, None)
+
+    await recorder.node_failed("llm_1", 1, 1,
+                               {"code": "NODE_FAILED", "message": "실패", "headers": {"api_key": "sk-live"}},
+                               will_retry=False)
+    await recorder.node_started("llm_1", 1, 2, None)
+    await recorder.node_failed("llm_1", 1, 2, {"code": "NODE_FAILED", "message": "가" * 300_000},
+                               will_retry=False)
+
+    redacted, clipped = (await _events(pool, run_id))[-3], (await _events(pool, run_id))[-1]
+    assert redacted["payload"]["error"]["headers"] == {"api_key": "[REDACTED]"}
+    assert "sk-live" not in str(redacted["payload"])
+    assert set(clipped["payload"]["error"]) == {"_truncated"}  # clipped to the preview size
+    assert len(str(clipped["payload"])) < 5_000
+
+
+async def test_an_approval_payload_survives_without_run_data_but_is_not_evented(pool):
+    run_id = await make_run(pool, store_run_data=False)
+    recorder = PostgresRecorder(pool, run_id, store_run_data=False)
+    await recorder.node_started("human_approval_1", 1, 1, None)
+
+    await recorder.node_waiting("human_approval_1", 1, 1, {"message": "검토", "review": "원고"})
+
+    [record] = await _records(pool, run_id)
+    assert record["meta"]["waiting"]["review"] == "원고"  # required to answer the approval
+    waiting_event = (await _events(pool, run_id))[-1]
+    assert waiting_event["payload"] in (None, {})  # the body is run data, so it is not published
+
+
+async def test_text_postgres_cannot_store_is_refused_like_the_in_memory_recorder(pool):
+    run_id = await make_run(pool)
+    recorder = PostgresRecorder(pool, run_id)
+
+    with pytest.raises(ValueError):
+        await recorder.node_started("llm_1", 1, 1, {"prompt": "a\x00b"})
+
+    assert await _records(pool, run_id) == []
+
+
+async def test_closing_an_attempt_that_was_never_opened_is_an_engine_fault(pool):
+    from engine.events.recorder import RecorderInconsistent
+
+    run_id = await make_run(pool)
+
+    with pytest.raises(RecorderInconsistent):
+        await PostgresRecorder(pool, run_id).node_succeeded(
+            "llm_1", 1, 1, {"text": "답"}, Usage(), defaulted=False, meta={})
+
+
+async def test_a_truncated_input_is_flagged(pool):
+    run_id = await make_run(pool)
+    recorder = PostgresRecorder(pool, run_id)
+
+    await recorder.node_started("llm_1", 1, 1, {"prompt": "가" * 300_000})
+    await recorder.node_succeeded("llm_1", 1, 1, {"text": "답"}, Usage(), defaulted=False, meta={})
+
+    [record] = await _records(pool, run_id)
+    assert record["truncated"] and set(record["input"]) == {"_truncated"}

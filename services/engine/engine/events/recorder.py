@@ -10,6 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from engine.events.redact import MAX_EVENT_PREVIEW_BYTES, MAX_STORED_BYTES, clip_json, redact
 from engine.events.writer import append_event
+from engine.jsondata import check_text
 from engine.nodes.base import Usage
 from engine.runtime.recorder import DuplicateAttempt
 
@@ -52,14 +53,14 @@ class PostgresRecorder:
     # ------------------------------------------------------------------ writes
 
     async def node_started(self, node_id: str, exec_index: int, attempt: int, input: dict[str, Any] | None) -> None:
-        stored, _ = self._value(input)
+        stored, truncated = self._value(input)
         async with self._pool.connection() as conn, conn.transaction():
             cursor = conn.cursor()
             await cursor.execute(
-                "INSERT INTO node_runs (id, run_id, node_id, exec_index, attempt, status, input)"
-                " VALUES (%s, %s, %s, %s, %s, 'running', %s) ON CONFLICT DO NOTHING RETURNING id",
+                "INSERT INTO node_runs (id, run_id, node_id, exec_index, attempt, status, input, truncated)"
+                " VALUES (%s, %s, %s, %s, %s, 'running', %s, %s) ON CONFLICT DO NOTHING RETURNING id",
                 (str(uuid.uuid4()), self._run_id, node_id, exec_index, attempt,
-                 Jsonb(stored) if stored is not None else None),
+                 Jsonb(stored) if stored is not None else None, truncated),
             )
             if await cursor.fetchone() is None:
                 # The unique key already holds this attempt: another worker is running the same run.
@@ -88,14 +89,18 @@ class PostgresRecorder:
                           *, will_retry: bool) -> None:
         async with self._pool.connection() as conn, conn.transaction():
             cursor = conn.cursor()
+            safe_error = self._safe(error, MAX_EVENT_PREVIEW_BYTES)
             await self._close(cursor, node_id, exec_index, attempt, "failed", error=error)
             event = await append_event(cursor, self._run_id, "node_failed", node_id=node_id,
                                        exec_index=exec_index, attempt=attempt,
-                                       payload={"error": error, "willRetry": will_retry})
+                                       # the reason a node failed is metadata: kept even without run data,
+                                       # but redacted and clipped like any other payload
+                                       payload={"error": safe_error, "willRetry": will_retry})
         await self._publish(event)
 
     async def node_waiting(self, node_id: str, exec_index: int, attempt: int, payload: dict[str, Any]) -> None:
-        stored, _ = self._value(payload)
+        # Stored even when run data is not kept: without it the approval cannot be answered or shown.
+        stored, _ = clip_json(self._safe(payload), MAX_STORED_BYTES)
         async with self._pool.connection() as conn, conn.transaction():
             cursor = conn.cursor()
             await cursor.execute(
@@ -105,8 +110,9 @@ class PostgresRecorder:
             )
             if cursor.rowcount == 0:
                 raise RecorderInconsistent((node_id, exec_index, attempt))
+            # the event body is a preview like any other: omitted entirely when run data is not kept
             event = await append_event(cursor, self._run_id, "node_waiting", node_id=node_id,
-                                       exec_index=exec_index, attempt=attempt, payload=payload)
+                                       exec_index=exec_index, attempt=attempt, payload=self._preview(payload))
         await self._publish(event)
 
     async def node_token(self, node_id: str, exec_index: int, text: str) -> None:
@@ -123,7 +129,7 @@ class PostgresRecorder:
         usage = usage or Usage()
         await cursor.execute(
             "UPDATE node_runs SET status=%s, output=%s, error=%s, meta=%s, tokens_in=%s, tokens_out=%s,"
-            " truncated=%s, finished_at=now()"
+            " truncated=node_runs.truncated OR %s, finished_at=now()"
             " WHERE run_id=%s AND node_id=%s AND exec_index=%s AND attempt=%s",
             (status, Jsonb(output) if output is not None else None,
              Jsonb(redact(error)) if error is not None else None,
@@ -136,13 +142,21 @@ class PostgresRecorder:
     def _value(self, value: Any) -> tuple[Any, bool]:
         if value is None or not self._store:
             return None, False
-        return clip_json(redact(value), MAX_STORED_BYTES)
+        return clip_json(self._safe(value), MAX_STORED_BYTES)
 
     def _preview(self, value: Any) -> Any:
-        if not self._store:
+        """Event bodies are previews of stored data, so they follow the same rules."""
+        if not self._store or value is None:
             return None
-        clipped, _ = clip_json(redact(value), MAX_EVENT_PREVIEW_BYTES)
-        return clipped
+        return self._safe(value, MAX_EVENT_PREVIEW_BYTES)
+
+    @staticmethod
+    def _safe(value: Any, limit: int | None = None) -> Any:
+        """Redacted, and checked for text jsonb refuses. The engine already rejects NUL and lone surrogates
+        in node outputs; this is the last barrier before the column, as the in-memory recorder does."""
+        safe = redact(value)
+        check_text(safe)
+        return safe if limit is None else clip_json(safe, limit)[0]
 
     async def _publish(self, event: dict[str, Any]) -> None:
         if self._publisher is None:

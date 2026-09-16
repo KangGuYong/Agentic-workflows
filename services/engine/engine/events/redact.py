@@ -35,7 +35,7 @@ def redact(value: Any) -> Any:
 def clip_json(value: Any, limit: int) -> tuple[Any, bool]:
     """(stored value, truncated). Over the limit the shape changes to {"_truncated": "<start of the JSON>"},
     because a cut-off JSON value is not valid JSON and the editor must be able to tell."""
-    text = json.dumps(value, ensure_ascii=False)
+    text = json.dumps(value, ensure_ascii=False, allow_nan=False)
     if len(text.encode("utf-8")) <= limit:
         return value, False
     return {"_truncated": clip(text, limit // 8)}, True
