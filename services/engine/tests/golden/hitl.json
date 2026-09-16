@@ -1,0 +1,20 @@
+{
+  "version": "1",
+  "nodes": [
+    {"id": "start", "type": "start", "label": "시작",
+     "config": {"inputs": {"type": "object", "properties": {"draft": {"type": "string"}}, "required": ["draft"]}}},
+    {"id": "human_approval_1", "type": "human_approval", "label": "검토",
+     "config": {"message": "초안을 검토해 주세요", "review": "{{start.draft}}", "allowEdit": true}},
+    {"id": "template_rejected", "type": "template", "label": "반려 안내", "config": {"template": "반려되었습니다"}},
+    {"id": "end", "type": "end", "label": "끝",
+     "config": {"outputs": {"final": "{{human_approval_1.editedValue}}",
+                            "decision": "{{human_approval_1.decision}}",
+                            "note": "{{template_rejected.text | default('')}}"}}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start", "target": "human_approval_1"},
+    {"id": "e2", "source": "human_approval_1", "sourceHandle": "approve", "target": "end"},
+    {"id": "e3", "source": "human_approval_1", "sourceHandle": "reject", "target": "template_rejected"},
+    {"id": "e4", "source": "template_rejected", "target": "end"}
+  ]
+}

@@ -890,6 +890,10 @@ git commit -m "feat(engine): add template reference type system"
 
 ---
 
+> **Post-review fix (applied during execution, separate commit):** `resolve_path` returns `{}` (unknown) for `additionalProperties: true` and for digit keys into arrays without a single `items` schema (non-digit keys on arrays still return `None`); `coerce_runtime` rejects non-finite numeric strings (`nan`, `inf`). Four tests were appended to `tests/test_types.py` (28 cases; suite 46).
+
+---
+
 ## Task 4: Sandboxed template environment and parser
 
 Spec 4.4. The parser is used by the validator (static checks) and the renderer (whole-value detection).
@@ -1171,6 +1175,17 @@ git commit -m "feat(engine): add sandboxed template env and reference parser"
 
 ---
 
+> **Post-review fixes (applied during execution, two separate commits):** `env.py` now uses a `TemplateEnvironment(ImmutableSandboxedEnvironment)` whose `getattr`/`getitem` read mapping keys before attributes (so `{{ x.items }}` reads the `items` key; missing keys are undefined, dict methods are never exposed). Resource rule — a template can never build data larger than O(template length + data size): intercepted `*`, `**`, `%` work on numbers only, integer powers are bounded by `MAX_POWER_BITS` (4096), `join` is replaced by a size-checked version (≤ `MAX_OUTPUT_CHARS` = 1,000,000, no `attribute` parameter), `round` is replaced by a version that clamps precision to 0–15 (Jinja's builtin computes `10**precision` unbounded), and `tojson` takes no `indent` and fails on undefined. CPU is not fully bounded (a single loop scanning the data is O(data²)) — that is the Plan 2 render deadline. `parser.py` enforces `MAX_TEMPLATE_LENGTH` (20,000 chars) and `MAX_LOOP_DEPTH` (1 — loops cannot nest), maps `RecursionError` to `TemplateParseError`, rejects `_`-prefixed string keys, and extracts references scope-aware (loop variables only shadow inside their loop body). New `tests/test_template_env.py`; suite 85.
+>
+> **Carried into later tasks:** Task 5's renderer also maps `TypeError`/`ValueError`/`ArithmeticError` from filters to `TemplateRenderError` and caps rendered output size (streamed via `Template.generate`, aborted past `MAX_OUTPUT_CHARS`); Task 12 adds `self` to `RESERVED_IDS`.
+>
+> Pre-dispatch probes of the plan code (run against the extracted plan tree) added two more:
+>
+> - Task 6 gateway: `json.loads` also raises `RecursionError` (deeply nested output) and plain `ValueError` (integers over 4300 digits), and accepts `NaN`/`Infinity`. The gateway parses with `parse_constant` rejecting non-standard constants and treats `(ValueError, RecursionError)` as a repairable "not JSON" failure.
+> - Task 7 Ollama transport: a malformed body or NDJSON line leaked `JSONDecodeError`, a body without `message` (or with an `error` field) leaked `KeyError`, and a stream cut before `done: true` returned partial text as success. All three become retryable `LLM_UNAVAILABLE`.
+
+---
+
 ## Task 5: Template renderer
 
 Spec 4.4: whole-value templates keep the value's type, everything else is string interpolation; objects interpolate as JSON.
@@ -1323,6 +1338,14 @@ git commit -m "feat(engine): add typed template renderer"
 ```
 
 ---
+
+> **Post-review note (Task 5, as implemented):** the code quality review found raw exceptions escaping the renderer (compile-time SyntaxError/RecursionError from deep nesting, >4300-digit ints), size amplification past the cap (whole values, chained `tojson`, `~`, list literals), non-JSON results (bound methods, nested Undefined, inf) and aliasing of context objects. The fix (commit `01f021b`) makes the rule "templates operate on JSON data only; every value a template builds is JSON data of serialized size ≤ `MAX_OUTPUT_CHARS`, checked while building":
+>
+> - `env.py`: all arithmetic operators are numbers-only; `MAX_POWER_BITS` became `MAX_INT_BITS`, which also bounds `*`. `getattr` and `getitem` read mapping keys and sequence indexes only (`LoopContext` excepted), never Python attributes. New `json_value()` gives a validated, size-budgeted deep copy, used by printing, `tojson` and `join`.
+> - `parser.py`: rejects `~` and whole-AST nesting deeper than `MAX_NESTING_DEPTH` = 50. Python fails to compile Jinja's output at about 200 (expressions) or 102 (nested `if`).
+> - `render.py`: passes the context positionally. Whole values go through `json_value`. Any failure becomes `TemplateRenderError`, and string results are capped.
+>
+> Known limit: a whole value with a non-string target is budgeted by `json_value`'s lower bound, not an exact serialized size. That is pass-through, not amplification, and Task 16's 1 MB node-output cap applies. Jinja binds the name `self` to its own template reference, so Task 12 reserving `self` is required, not cosmetic. Suite: 154.
 
 ## Task 6: LLM client contract, test double and structured-output gateway
 
@@ -1657,6 +1680,30 @@ Expected: all PASS
 git add services/engine/engine/llm services/engine/tests/test_llm_scripted.py services/engine/tests/test_llm_gateway.py
 git commit -m "feat(engine): add LLM client contract, scripted double and structured-output gateway"
 ```
+
+> **Post-review note (Task 6, as implemented):** commits `49a1df8` and `d0c10dc` made these changes on review:
+>
+> - A `RecursionError` from `iter_errors` (deep valid output against a recursive schema) is now repaired instead of escaping.
+> - jsonschema messages are clipped: 200 chars per message and 1000 in total. The invalid answer echoed back is clipped to 4000 chars.
+> - `1e400` is rejected.
+> - `ScriptedLLM` deep-copies dict responses and records `streamed` in `calls`.
+>
+> Deferred to Plan 2 (roadmap): usage of failed attempts.
+>
+> The review also found two schema-side problems:
+>
+> - A tenant schema `pattern` can backtrack catastrophically (`^(a+)+$` on 31 chars took 48 s on the event loop).
+> - An unresolvable `$ref` passes `check_schema` but raises inside `iter_errors`.
+>
+> Both belong at save time and are handled in Task 8's `check_object_schema`. Suite: 170.
+>
+> **Carried into Task 8:** the strict JSON parsing and short schema messages move to a shared `engine/jsondata.py` (`parse_json`, `schema_violations`, `clip`), used by the gateway and the template node. `check_object_schema` then does three things:
+>
+> - It rejects `pattern`/`patternProperties`.
+> - It allows only local `#/...` `$ref`s that resolve.
+> - It maps `RecursionError` (a too-deep schema) to a validation error.
+>
+> `schema_violations` catches `RecursionError`. The template node's JSON format rejects NaN, overflowing numbers and too-deep nesting as `TEMPLATE_ERROR`.
 
 ---
 
@@ -2310,6 +2357,42 @@ git add services/engine/engine/nodes services/engine/tests/helpers.py services/e
 git commit -m "feat(engine): add node spec contract, registry and start/end/template nodes"
 ```
 
+> **Post-review note (Task 8, as implemented):** four review rounds changed this task substantially. The commits are `251c9e5`, `0900992`, `59069c1`, `4ec4f4d` and `61208a6`.
+>
+> **`engine/jsondata.py`** is shared by the LLM gateway, the nodes and later the validator.
+>
+> - **Parsing.** `parse_json` accepts standard JSON only. It rejects NaN/Infinity, overflowing numbers, integers over 4300 digits, duplicate keys, NUL, lone surrogates and too-deep nesting.
+> - **Accepted schemas.** `schema_problems` limits tenant schemas to a subset:
+>   - Keywords: `type`, `properties`, `required`, `additionalProperties`, `items`, `anyOf`, `oneOf`, `enum`, `const`, numeric bounds, length/count bounds (at most 10,000), annotations, `format` and `x-*`.
+>   - Excluded: `$ref`, `pattern`, `uniqueItems` and everything else.
+>   - Size limits: at most 32,000 chars, depth 32, 256 subschemas, 16 branches, and 256 `enum`/`required` entries.
+>   - Measured reasons: a `pattern` took 48 s on 31 chars, `uniqueItems` took 78 s on 8,000 objects, and unresolvable `$ref`s raise errors.
+> - **Validation.** `schema_violations` is an in-house validator for that subset. It no longer uses the jsonschema library, which built every error and every failing branch's context and blew up to 20 s / 3.6 GB on accepted schemas.
+>   - It stops `anyOf`/`oneOf` early, returns at most 5 messages that never copy data, and looks up scalar `enum` values in a set.
+>   - All work is charged to `MAX_VALIDATION_STEPS` (1,000,000 steps, at most about 3 s). Running out raises `ValidationBudgetExceeded`.
+>   - A differential test against jsonschema on about 176K random cases found 0 mismatches.
+>
+> **Template target `"json"`** (`dsl/types.py`, `templates/env.py`, `templates/render.py`).
+>
+> - In a JSON template each `{{ }}` inserts a JSON value, and the renderer parses the result. Data can therefore never add JSON structure.
+> - `TemplateNode` format `json` uses this target and never re-parses strings. The old re-parsing allowed injection through `{"a": "{{start.name}}"}`.
+> - Writing `"{{ x }}"` inside quotes is an error and comes with a hint.
+>
+> **Node changes.**
+>
+> - Output names are checked with `fullmatch`.
+> - Start inputs are deep-copied.
+> - The registry rejects duplicate types.
+> - Root `anyOf`/`oneOf` is rejected in object schemas.
+> - `StartNode` maps an exhausted budget to `NODE_FAILED`, and the gateway maps it to `OUTPUT_TOO_LARGE`. Neither is retried or repaired.
+>
+> Suite: 319.
+>
+> **Carried into later tasks:**
+>
+> - **Task 9:** the LLM node's `outputSchema` goes through `check_object_schema`. `outputSchema` must be a schema the tenant subset accepts before it is sent to Ollama as `format`.
+> - **Task 12:** the validator's `defaultOutput` check calls `schema_violations`, and must catch `ValidationBudgetExceeded` and report it as an `INVALID_POLICY` issue. Task 12 also adds `self` to `RESERVED_IDS` (see Task 4/5).
+
 ---
 
 ## Task 9: LLM and classifier nodes
@@ -2614,6 +2697,21 @@ git add services/engine/engine/nodes services/engine/tests/test_nodes_ai.py
 git commit -m "feat(engine): add llm and classifier nodes"
 ```
 
+> **Post-review note (Task 9, as implemented):** commits `a0c14b2` and `424d0af`.
+>
+> - The registry keeps the duplicate-type check and only adds the new nodes. Task 11 does the same.
+> - Model names match `MODEL_NAME` (`^\S+$`) and are at most 200 chars.
+> - `temperature` is `strict=True`: bool is rejected, int is accepted.
+> - A `prompt`/`input` that renders empty raises non-retryable `TEMPLATE_ERROR` before any model call.
+> - A system prompt that renders empty is omitted.
+> - Classifier fields are bounded:
+>   - `description` ≤ 500 chars, single line;
+>   - `instructions` ≤ 4000 chars;
+>   - `reason` ≤ 500 chars (`maxLength`).
+> - Classifier `route` raises `NODE_FAILED` for a missing category or one outside `handles()`.
+>
+> Suite: 344.
+
 ---
 
 ## Task 10: Condition node
@@ -2817,6 +2915,32 @@ Expected: all PASS
 git add services/engine/engine/nodes/condition.py services/engine/tests/test_nodes_condition.py
 git commit -m "feat(engine): add condition node"
 ```
+
+> **Post-review note (Task 10, as implemented):** commits `4a1581c` and `d2707c3`.
+>
+> **Loose `==`.** The plan's version used Python equality, so `true == 1` and `"1_000" == 1000` were both true. It is now JSON equality via `engine.jsondata.json_equal`, which replaces the old private `_json_equal`. A string still matches the JSON value it spells, parsed with `parse_json`: `"5" == 5`, `"true" == true`, `"" == null`.
+>
+> **Operand checks.**
+>
+> - `contains`/`not_contains` need a non-empty `right` template.
+> - A `null` needle never matches inside a string. It still matches a `null` array item.
+> - Numeric ops and `contains` raise `TypeError` on mismatched operands. `execute` maps this to non-retryable `TYPE_MISMATCH`.
+> - A `RecursionError` from deeply nested operands becomes `NODE_FAILED`.
+> - `route` requires a bool `result`.
+>
+> Suite: 379.
+>
+> **Carried into Task 11** (prepared, not yet applied):
+>
+> - **`human_approval`:** check the resume answer's shape.
+>   - Only the keys `decision`, `comment`, `editedValue`, `reviewedAt` are allowed.
+>   - `comment` is a str of at most 10,000 chars.
+>   - `reviewedAt` is a str of at most 64 chars.
+>   - `editedValue` goes through `templates.env.json_value`, which enforces JSON data, bounds its size and copies it.
+> - **`merge`:**
+>   - Deep-copy upstream outputs.
+>   - A missing predecessor output raises `NODE_FAILED` instead of `KeyError`.
+> - **Registry:** keep the duplicate-type check.
 
 ---
 
@@ -3111,6 +3235,34 @@ Expected: all PASS
 git add services/engine/engine/nodes services/engine/tests/test_nodes_flow.py
 git commit -m "feat(engine): add merge and human approval nodes"
 ```
+
+> **Post-review note (Task 11, as implemented):** commits `83e9fdb` and `e33e71e`.
+>
+> **`merge`.**
+>
+> - Each upstream output is copied with `json_value`. A missing output, an output that is too large, or one nested too deeply raises non-retryable `NODE_FAILED`.
+> - `output_schema` deep-copies predecessor schemas. When the combined schema leaves the `schema_problems` subset (too deep or too large), each branch becomes `{}`; `required` is kept. This also stops merge-of-merge schemas from doubling in size.
+>
+> **`human_approval`.**
+>
+> - `route` checks `decision` is `approve` or `reject`.
+> - A blank rendered message raises `TEMPLATE_ERROR` before the interrupt. The output schema bounds `comment` and sets `additionalProperties: false`.
+> - Public `resume_output(answer, waiting)` checks the answer against the interrupt payload it answers, and builds the output. The node calls it on resume; Plan 2's API should call it before `waiting → queued`.
+>   - Allowed keys are `nodeId`, `execIndex`, `decision`, `comment`, `editedValue` and `reviewedAt`. `nodeId`/`execIndex` are optional, but must equal the waiting values with the same type.
+>   - `comment` is a str of at most 10,000 chars, with no NUL or lone surrogates.
+>   - `editedValue` needs `allowEdit`. It goes through `json_value` and `jsondata.check_text`, and must have the review value's `json_kind` when the review is not null.
+>   - `reviewedAt` must be ISO 8601 with a timezone and is normalized to UTC. The API sets it when it accepts the answer; it is never copied from the request. When absent, the server time is used.
+> - `engine.jsondata` now exports `check_text` and `json_kind` (formerly `_check_text`, `_kind`).
+>
+> Suite: 412.
+>
+> **Carried into Tasks 13–14** (graph rules and references, where predecessors are known):
+>
+> - A `merge` needs at least 2 distinct forward predecessors and may not sit inside a branch chain (spec rule 8). Its `pred_ids` must be unique.
+> - A merge output holds every branch output, so it can exceed the 1 MB node output cap even when each branch fits. Report this as a warning when two or more predecessors can produce large outputs, or document it in the node help text.
+> - The merge schema fallback is all-or-nothing: when the combined schema is rejected, every branch loses its type, not only the largest. This is acceptable for the MVP; a later refinement could untype the largest branches first. Add a regression test that a merge of merges (e.g. 40 layers) stays inside `schema_problems`.
+>
+> **Carried into Task 16:** rendered values can still hold NUL or lone surrogates (e.g. `{{ '\x00' }}`, or a start input that contains one). They would reach node outputs and interrupt payloads and break `jsonb` storage. Call `jsondata.check_text` once in the wrapper, next to the output size check, on both the rendered values and the output. `resume_output` expects `waiting` to be the exact interrupt payload; it raises `KeyError` if `nodeId` or `execIndex` is missing.
 
 ---
 
@@ -3436,6 +3588,41 @@ Expected: all PASS
 git add services/engine/engine/validator services/engine/tests/test_validator_structure.py
 git commit -m "feat(engine): add structural validation phase"
 ```
+
+> **Post-review note (Task 12, as implemented):** commits `2e5e7c8`, `256876d` and `d864f89`.
+>
+> **Ids.** `RESERVED_IDS` adds the following, and a test keeps the LangGraph list in sync on upgrades:
+>
+> - Template names that break a root: `self`, `true`, `false`, `none`, `not`.
+> - Names LangGraph refuses as node names at compile time: `checkpoint_id`, `checkpoint_map`, `checkpoint_ns`, `configurable`.
+>
+> **Bounded work and output.**
+>
+> - Over `MAX_NODES`/`MAX_EDGES`, `check_structure` returns only `LIMIT_EXCEEDED` and an empty `parsed`.
+> - At most 100 issues per phase and 10 pydantic errors per config or policy. Tenant-chosen names in messages are clipped to 80 chars.
+> - `check_structure(dsl, registry, budget=None)` charges every schema validation to one `jsondata.StepBudget` (default `MAX_VALIDATION_STEPS`). `schema_violations(..., budget=)` caps its steps at what the budget has left. **Task 14's `validate()` must create one budget and pass it through every phase.**
+> - Once the budget is spent, later schema checks are skipped rather than blamed on nodes that may be fine, and one workflow-level `VALIDATION_TOO_COSTLY` error is added. The node whose check ran out still gets `INVALID_POLICY`. Task 14 should follow the same rule.
+>
+> **Policies.**
+>
+> - `defaultOutput` is checked whenever present, even with `onError: "fail"`. It must be JSON data of at most 64,000 chars (`json_value`), storable text (`check_text`), and match the node's output schema. A spent budget gives `INVALID_POLICY`.
+> - `ParsedNode.policy` owns its data: `retry` is copied and `defaultOutput` is the validated copy.
+> - `policy: {}` means no override, so policy-less nodes accept it.
+>
+> **Edges.**
+>
+> - `DUPLICATE_EDGE` is reported for a repeated `(source, sourceHandle, target)`.
+> - Handles are checked whenever the source config parsed, even if its policy failed.
+> - An edge from `end` says the node cannot start a connection.
+>
+> Suite: 468. The plan's Task 13/14 validator code and tests still pass on top of this.
+>
+> **Carried into Task 16:** `_fallback_output` returns `plan.policy.defaultOutput` itself, so every run of a cached compiled workflow would share one dict. Return a copy per use, and apply the output size and text checks on the fallback path too.
+>
+> **Carried into Plan 2/3 (roadmap):**
+>
+> - Pydantic's English messages appear inside Korean issue text; localize them by error `type`.
+> - `Policy`/`RetrySpec` coerce loosely (`timeoutSec: true` → 1). Consider strict mode at the DSL boundary.
 
 ---
 
@@ -3901,6 +4088,38 @@ git add services/engine/engine/validator/graph.py services/engine/tests/test_val
 git commit -m "feat(engine): add graph validation phase (loops, parallel regions)"
 ```
 
+> **Post-review note (Task 13, as implemented):** commits `9daaab9` and `68759e5`.
+>
+> **Back-edges are declared, not discovered.** The plan's DFS back-edges depended on edge declaration order. Deleting and redrawing one edge could flip a valid workflow to `ILLEGAL_CYCLE`, and change `incoming`, the Task 14 "runs before" sets and loop counters. Now (spec 4.8 rule 4 updated):
+>
+> - `back_edges` are the edges that carry `maxIterations`, and the forward edges must be acyclic.
+> - A forward cycle containing a condition or classifier edge gives `BACK_EDGE_NO_LIMIT` on those edges. A forward cycle with neither gives one `ILLEGAL_CYCLE` per cycle.
+> - A declared back-edge must close a cycle through forward edges (else `MAX_ITERATIONS_ON_FORWARD_EDGE`) and start at a condition or classifier (else `ILLEGAL_CYCLE`). Handle-conflict checks apply only to loop sources.
+> - `order` is Kahn's algorithm, with ties broken by node declaration order.
+>
+> **Parallel regions.**
+>
+> - `PARALLEL_IN_LOOP` is also reported when the region's merge is a back-edge target or lies on a cycle. Before this, a back-edge into a merge passed and re-ran only the nodes after the merge.
+> - A fan-out handle counts only forward edges.
+> - Branches that meet at a non-merge node are reported once, on the fan-out handle, telling the user to add a merge.
+>
+> **Less noise.**
+>
+> - Issues are de-duplicated and capped at `MAX_ISSUES`.
+> - A merge a broken region heads for is not also reported as `MERGE_WITHOUT_FAN_OUT`.
+> - Unreachable nodes get no `HANDLE_NOT_CONNECTED`.
+> - `CANNOT_REACH_END` is reported only on the dead end itself, not on the nodes upstream of it.
+>
+> **Guaranteed by the rules** (Task 11 carry-over): a reachable merge in a valid graph has at least 2 distinct forward predecessors, all of them branch-chain ends, and never sits inside a branch chain. The 40-layer merge-of-merges schema regression test is in `test_nodes_flow.py`.
+>
+> Suite: 503. The plan's Task 14 refs tests pass on top.
+>
+> **Carried into Plan 3 (editor):**
+>
+> - When the user draws an edge that closes a cycle from a condition or classifier, ask for `maxIterations`. That edge becomes the back-edge.
+> - A condition self-loop (`false → itself`) is accepted but re-evaluates the same inputs; show a warning.
+> - A merge output holds every branch output and can exceed the 1 MB node output cap; say so in the merge node's help text.
+
 ---
 
 ## Task 14: Validator phase 3 — references and types, `validate()` facade
@@ -4253,6 +4472,36 @@ Expected: all PASS
 git add services/engine/engine/validator services/engine/tests/test_validator_refs.py
 git commit -m "feat(engine): add reference/type validation phase and validate facade"
 ```
+
+> **Post-review note (Task 14, as implemented):** commits `f2bca1f`, `5c0faa3`, `7d2bc53` and `e158ccb`; the Task 13 follow-up is `e55dca5`.
+>
+> **Facade (`analyze`).**
+> - DSL text with NUL or lone surrogates, or values nested too deeply to serialize, is `DSL_INVALID` ("워크플로 형식 오류").
+> - A DSL over 512 KB (UTF-8 JSON, measured without filled-in defaults) is `LIMIT_EXCEEDED`.
+> - One `StepBudget` is shared by every phase.
+> - `issues.bounded()` de-duplicates issues, puts errors before warnings and caps the list at 100, in every phase. Warnings can no longer crowd out an error and let an invalid workflow compile.
+> - `graph` is set once phases 1–2 pass; callers must still check `has_errors`.
+>
+> **Guaranteed-before sets** are a greatest fixpoint over every reachable predecessor, including back-edges (∩, and ∪ for merge). The plan's forward-only rule wrongly rejected `{{ start.x }}` inside a loop that starts at its condition (start → condition → body → condition). `graph.order` is a forward topological order, not first-execution order.
+>
+> **Types.**
+> - `true`/`false` JSON subschemas no longer crash `kinds_of`/`resolve_path`: `true` means unknown, `false` means the field does not exist.
+> - `| default(x)` keeps `null` (Jinja only replaces a missing value) unless it is written `default(x, true)`, and the kind of `x` is added. `Ref` records `default_kind` and `default_replaces_null`. Spec 4.5 is updated.
+> - Number literals must be finite.
+>
+> **Templates.**
+> - Field or index access on a filter result (`(x | default({})).y`) is forbidden, because it skipped the reference checks.
+> - A `format: "json"` template without `{{`/`{%` is parsed at validation. A quoted substitution warns. `render.QUOTED_SUBSTITUTION` is now public.
+>
+> **Messages.** Type names are in Korean. Quoted names, references and literals are clipped. A self-reference explains that the first run has no previous result.
+>
+> Suite: 560.
+>
+> **Known and accepted:**
+> - `피드백: {{ start.s | default('') }}` on a nullable string warns, although `null` and `''` render the same.
+> - A slice of a filter result (`(x | trim)[0:3]`) is forbidden along with other field access on filters.
+>
+> **Carried into Plan 2 (roadmap):** template parsing within the 512 KB limit can take about 3–4 s per validation. Run `validate()` off the event loop and rate-limit saves (already listed). Consider charging parsed template nodes to the step budget.
 
 ---
 
@@ -4636,6 +4885,31 @@ Expected: all PASS
 git add services/engine/engine/compiler services/engine/engine/runtime services/engine/tests/test_compiler_routing.py services/engine/tests/test_runtime_ports.py
 git commit -m "feat(engine): add run state, routing and runtime ports"
 ```
+
+> **Post-review note (Task 15, as implemented):** commits `4da65b4`, `f53d266` and `8c4d800`.
+>
+> **Resume detection.** `Recorder.find_waiting` returns the latest attempt of the execution that ever recorded `node_waiting`, even after that attempt finished. The plan's version returned `None` once the row closed, so a replay after a crash (resume succeeded, checkpoint not yet saved) opened attempt 2 and emitted a bogus `node_waiting`. The plan test now expects `1`. A replay therefore reuses the waited attempt and closes it again, which duplicates `node_finished`. Spec 5.3 describes a new row per replay; Task 16 decides.
+>
+> **Lost lease.**
+> - `errors.LeaseLost` subclasses `RunCancelled`, and `FlagGuard.lose_lease()` raises it before `cancelled` is checked.
+> - `DuplicateAttempt`, raised when an attempt already exists (the Postgres unique key), is a `LeaseLost`, so the wrapper's `except RunCancelled: raise` stops instead of treating it as a node error.
+>
+> **Strict test double.** `InMemoryRecorder` rejects duplicate attempts and stores inputs, outputs, errors, meta and event payloads as strict JSON copies (`allow_nan=False`). A rejected write changes nothing. Events stay flat (spec 7.1 nests `payload`; the Plan 2 recorder nests them). A recorder is bound to one run, and `RunDeps` is never shared between runs.
+>
+> Suite: 577. The plan's Task 16–18 code and tests pass on top, except `test_output_too_large` (see below).
+>
+> **Carried into Task 16:**
+> - `test_output_too_large` fails because the template renderer caps output first. Build the oversized output another way.
+> - `_check_size` uses `json.dumps(default=str)`, so a non-JSON output passes it and the recorder then raises outside the wrapper's `try`. Use strict `json.dumps(..., allow_nan=False)` so it becomes a node error.
+> - Pass `resuming` for the whole node call. Otherwise a retry after a resumed interrupt records `node_waiting` again.
+> - Decide whether a replay of a closed waited attempt opens a new row (spec 5.3) or reuses it.
+>
+> **Carried into Task 17:** the runner maps `LeaseLost` to "stop and write nothing", not to `cancelled`.
+>
+> **Carried into Plan 2 (roadmap):**
+> - Closing an attempt must work on a row that is already closed (replays).
+> - Run-level cancel closes `running` rows as `cancelled` (spec 5.9).
+> - Token usage of failed attempts (already listed).
 
 ---
 
@@ -5034,6 +5308,34 @@ git add services/engine/engine/compiler/wrapper.py services/engine/tests/test_co
 git commit -m "feat(engine): add generic node wrapper with retry, timeout, onError and routing"
 ```
 
+> **Post-review note (Task 16, as implemented):** commits `8f48078`, `17f565b` and `043ed02`.
+>
+> **Stored values.**
+> - Rendered values with NUL or lone surrogates are `TEMPLATE_ERROR`.
+> - `_check_output` replaces `_check_size`: strict JSON (`allow_nan=False`) plus `check_text` (`NODE_FAILED`), and a 1 MB cap (`OUTPUT_TOO_LARGE`).
+> - `defaultOutput` is deep-copied per use and checked the same way before routing.
+>
+> **Resume and replay.**
+> - `resumed` (the execution already recorded `node_waiting`) holds for the whole node call, and a replay reuses the waited attempt. Spec 5.3's "new row per replay" is amended in practice: Plan 2 must accept closing an already-closed attempt and tolerate a duplicate `node_finished`.
+> - Retries take `attempts_so_far() + 1`.
+> - A node that waits must not retry, because a second `interrupt()` in one call waits again without a record. `human_approval` accepts no policy.
+>
+> **Infrastructure faults are not node errors.**
+> - Recorder reads and writes go through `_recorded()`: `RunCancelled` (including `LeaseLost` and `DuplicateAttempt`) passes through, and anything else becomes the new `errors.EngineFault`, which escapes the run.
+> - `node_started` sits outside the attempt `try`.
+> - `on_token` is best effort, and a failure is logged once per attempt.
+> - The re-raise set is `(GraphBubbleUp, RunCancelled, EngineFault)`.
+> - Routing bugs are `NODE_FAILED`, not `TYPE_MISMATCH`, and exception text is clipped.
+>
+> **Tests.** `test_output_too_large` merges two 600 KB branch outputs, because the renderer caps a single field first.
+>
+> Suite: 602.
+>
+> **Carried into Plan 2 (roadmap):**
+> - The worker must release a run whose task raised `EngineFault` or any unexpected exception: stop the heartbeat, or do a fenced requeue with `recovery_count + 1`. Otherwise the lease never expires.
+> - Close orphaned `running` attempt rows at run level, e.g. a cancelled parallel sibling or a crash mid-write.
+> - Token events carry no attempt, so the UI clears streamed text on each `node_started`.
+
 ---
 
 ## Task 17: Compile DSL to LangGraph and run it
@@ -5278,6 +5580,38 @@ Expected: all PASS
 git add services/engine/engine/compiler/build.py services/engine/engine/runtime/runner.py services/engine/tests/test_compiler_build.py
 git commit -m "feat(engine): compile validated DSL to LangGraph and execute runs"
 ```
+
+> **Post-review note (Task 17, as implemented):** commits `c9eb70f` and `842ad66`.
+>
+> **Resume.**
+> - `execute_run(resume=…)` requires the approval's target, `nodeId` (str) and `execIndex` (int), in the answer.
+> - When that approval is the pending interrupt, the answer is checked with `human_approval.resume_output` before `Command(resume=…)`. A bad answer raises the new `ResumeRejected` and nothing reaches the graph. LangGraph keeps the first resume value of an interrupt, so a bad answer would otherwise fail the run forever.
+> - When the named approval is no longer waiting, the answer was already used before a crash, so the run just continues from its checkpoint. A replayed answer never answers a later approval, e.g. the next pass of an approval inside a loop.
+> - A resume for a run with no checkpoint is `ResumeRejected`.
+>
+> **Escaping exceptions** (documented in the docstring):
+> - `LeaseLost` is re-raised; plain `RunCancelled` still returns `cancelled`.
+> - `ResumeRejected`, `EngineFault` and unexpected engine bugs also escape, and the worker handles them.
+> - `inputs` are ignored for a run that already has a checkpoint.
+>
+> **Caching.** `CompiledWorkflow` is bound to one checkpointer and one registry, so a cache keyed only by `dsl_hash` needs a single registry and checkpointer per process.
+>
+> **Confirmed by probes.**
+> - Nested loops at maxIterations 20 run 127 node executions under a `recursion_limit` of 256.
+> - A classifier self-loop exits through `default`.
+> - A loop exit that fans out merges once.
+> - A crash before the merge recovers without extra LLM calls.
+>
+> **Known.** An exhausted loop keeps the branch node's chosen output (e.g. `category: "again"`); `loopExhausted` appears only in the event. Document this for editor users (Plan 3).
+>
+> Suite: 611.
+>
+> **Carried into Task 18:** HITL golden resumes pass the target; add loop-exit fan-out and self-loop flows.
+>
+> **Carried into Plan 2 (roadmap):**
+> - Store `nodeId`/`execIndex` in `resume_payload`, and clear it whenever the resumed invocation returns, whatever the outcome. A leftover payload on a failed run would act like a retry.
+> - On `ResumeRejected`, keep the run `waiting`.
+> - The API still returns `409 RESUME_TARGET_MISMATCH` itself, because the engine silently continues on a mismatched target.
 
 ---
 
@@ -5649,6 +5983,18 @@ git add services/engine/tests/golden services/engine/tests/test_golden_patterns.
 git commit -m "test(engine): golden pattern flows and recovery scenarios"
 ```
 
+> **Post-review note (Task 18, as implemented):** commit `d9dc140`.
+>
+> **Deviations.**
+> - The HITL golden resume sends `{"nodeId": "human_approval_1", "execIndex": 1, **answer}`, because Task 17 made `execute_run` require the approval's target.
+> - Added `test_a_loop_exit_can_fan_out_and_merges_once` (exit on `true` and exit when exhausted) and `test_a_condition_self_loop_stops_at_its_limit`.
+>
+> **Mutation check.** The tests catch a router firing two branches, loop counters that reset, a retry that ignores the checkpoint, and a replayed approval that records a second attempt.
+>
+> **Not covered.** No flow reaches `MergeNode`'s missing-predecessor guard, because both merge predecessors always finish in the same superstep. Add a direct unit test if routing into merges changes.
+>
+> Suite: 631.
+
 ---
 
 ## Task 19: Full verification
@@ -5671,6 +6017,26 @@ git commit -m "chore(engine): lint fixes"
 ```
 
 (Skip the commit if there is nothing to commit.)
+
+> **Verification (Task 19):** at `d9dc140`, `uv run pytest -q` reports 631 passed, with no warnings (also clean under `-W error::RuntimeWarning`), and `uv run ruff check .` reports `All checks passed!`. No lint fixes were needed. The coverage table below still holds.
+
+> **Final branch review:** commits `7a2dae0` and `2179ddd`.
+>
+> **Run state depth.** LangGraph's checkpoint serializer fails at about 250 nesting levels with a raw `TypeError`, below what the engine's checks allowed. The fix:
+> - `engine.jsondata.MAX_JSON_DEPTH` (100) and `check_storable` apply to rendered fields (`TEMPLATE_ERROR`), node outputs (`NODE_FAILED`), `defaultOutput` (`INVALID_POLICY`) and fresh run inputs (a failed outcome at `start`).
+> - `resume_output` checks the whole approval output, so an answer it accepts always fits the node output.
+>
+> **Unsafe text in messages.** The duplicate-key message quoted raw keys, putting NUL and lone surrogates into `NodeError` and `Issue` messages. `safe_text` now cleans that message. `NodeError` and `Issue` replace unsafe characters as a backstop, and `InMemoryRecorder` rejects them as jsonb would.
+>
+> **Also.** `ruff` is bounded `<1`. The roadmap interface table now names the real modules.
+>
+> **Carried into Plan 2 (roadmap):** quadratic checkpoint growth, one shared node registry, `dsl_hash` of `policy: {}`, run input depth at the API.
+>
+> **Known follow-ups.**
+> - A JSON template with no `{{ }}` nested deeper than 99 passes `validate()` but always fails at runtime; `_check_json_template` could run `check_storable` on the parsed value.
+> - `_is_number` is duplicated in `jsondata`, `templates/env` and `nodes/condition`.
+>
+> Suite: 643.
 
 ---
 

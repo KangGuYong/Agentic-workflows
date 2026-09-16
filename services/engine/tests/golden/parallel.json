@@ -1,0 +1,23 @@
+{
+  "version": "1",
+  "nodes": [
+    {"id": "start", "type": "start", "label": "시작",
+     "config": {"inputs": {"type": "object", "properties": {"topic": {"type": "string"}}, "required": ["topic"]}}},
+    {"id": "llm_pros", "type": "llm", "label": "장점", "config": {"model": "qwen2.5:14b", "prompt": "{{start.topic}}의 장점"}},
+    {"id": "llm_cons", "type": "llm", "label": "단점", "config": {"model": "qwen2.5:14b", "prompt": "{{start.topic}}의 단점"}},
+    {"id": "merge_1", "type": "merge", "label": "합치기", "config": {"mode": "object"}},
+    {"id": "llm_sum", "type": "llm", "label": "종합",
+     "config": {"model": "qwen2.5:14b",
+                "prompt": "종합해줘\n장점: {{merge_1.branches.llm_pros.text}}\n단점: {{merge_1.branches.llm_cons.text}}"}},
+    {"id": "end", "type": "end", "label": "끝",
+     "config": {"outputs": {"summary": "{{llm_sum.text}}", "branchOrder": "{{merge_1.branches | tojson}}"}}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start", "target": "llm_pros"},
+    {"id": "e2", "source": "start", "target": "llm_cons"},
+    {"id": "e3", "source": "llm_cons", "target": "merge_1"},
+    {"id": "e4", "source": "llm_pros", "target": "merge_1"},
+    {"id": "e5", "source": "merge_1", "target": "llm_sum"},
+    {"id": "e6", "source": "llm_sum", "target": "end"}
+  ]
+}
