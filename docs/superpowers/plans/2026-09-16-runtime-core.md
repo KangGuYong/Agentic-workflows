@@ -3343,6 +3343,19 @@ git add services/engine/engine/worker services/engine/engine/compiler/wrapper.py
 git commit -m "feat(engine): render templates in a process pool and add the worker entrypoint"
 ```
 
+> **Post-review note (Task 10, as implemented):** commits `5de119e`, `03ad053` and `051df80`.
+>
+> - The plan's `main.py` uses `sys.platform` without importing `sys`, and its test file imports `Target` and never uses it (ruff F401).
+> - `close()` killed pebble's manager threads without resolving the futures they would have completed, so every `await pool(...)` outstanding at that moment hung forever. Only `main.py`'s ordering hid it — `worker.stop()` gathers the run tasks first. Outstanding futures are cancelled before the pool stops now.
+> - A dead pool was worse than a slow one. Once pebble's context is `ERROR`/`STOPPED` it never recovers, and `schedule` then raises a bare `RuntimeError` that `_rendered` turned into a non-retryable `NODE_FAILED`: a worker with a broken render pool would claim runs and permanently fail them as fast as it could claim, silently. It raises `EngineFault` now, which the worker treats as infrastructure and hands back to recovery — and `node_fn` had no `except CONTROL_FLOW: raise` around its `_rendered` call, so the fault was being swallowed one frame later (`051df80`).
+> - `close()` also blocked the event loop: `join(timeout=…)` honours its timeout only on the `CLOSED` path, and `stop()` puts the pool on the unbounded one, where each worker stuck in C-level Jinja costs pebble's 3 s terminate timeout. With `RENDER_POOL_SIZE` defaulting to the CPU count that is tens of seconds inside a SIGTERM grace, so `main.py` closes it with `asyncio.to_thread`.
+> - `main.py` had no `try/finally`: a failing `worker.start()` left the database pool, Redis, httpx and the render pool open and every in-flight lease held for its full duration. Signals are registered before the migration now, too.
+> - On Linux pebble forks its workers lazily, on the first render — after the database pool, the LISTEN connection, Redis and httpx are all open with their threads. The child inherits the parent's virtual-size accounting, so an `RLIMIT_AS` of 1 GB could fail every render with a silent `MemoryError`, and forking a multithreaded asyncio process also duplicates its sockets. The pool asks for a `forkserver` context where the platform has one and limits `RLIMIT_DATA` instead, and says in a log line whether the limit was applied. Windows development gets no memory limit, which the module docstring now states.
+> - Four of seven mutations survived: `close()` as a no-op, `size` forced to 1, and the memory limit removed. `test_two_renders_overlap_in_a_pool_of_two` was vacuous — pebble's pool is lazy, so both halves of the comparison paid a ~1.3 s worker spawn that hid the serialisation. It warms each pool first and asserts two distinct child pids, which is also the first test that proves rendering leaves the parent process at all. `main.py` had no test; `run()` now takes an injectable stop event and two tests cover a clean shutdown and a failing start.
+> - **Deferred (Plan 2b or later):** every render ships the whole `outputs` dict across the process boundary, so a 100-node workflow at the per-node output cap moves ~100 MB per render, and pebble writes it from the single scheduler thread with no admission control. Sending only the node ids a field actually references needs the compiler to record them.
+>
+> Suite: 750.
+
 ---
 
 ## Task 11: API skeleton — app, auth, strict bodies, errors, node types
