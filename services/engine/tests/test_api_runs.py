@@ -1,13 +1,16 @@
 """Creating and reading runs (MVP design 8.1, 8.3, 8.4)."""
 import asyncio
 import logging
+import threading
 import uuid
 
 import pytest
 from psycopg.types.json import Jsonb
 
+import engine.api.routers.runs as runs_router
 import engine.db.runs as run_db
 from engine.llm.scripted import ScriptedLLM
+from engine.validator import analyze as real_analyze
 from tests.conftest import until
 from tests.test_api_workflows import CHAIN, _create
 
@@ -280,3 +283,245 @@ async def test_a_run_records_store_run_data_false_from_its_workflow(api, pool):
         row = await (await conn.execute("SELECT store_run_data FROM runs WHERE id=%s",
                                         (created["runId"],))).fetchone()
     assert row["store_run_data"] is False
+
+
+# ---------------------------------------------------------------- B1: listing orders newest-first, not LIMIT 1
+
+
+async def test_listing_runs_returns_both_newest_first(api):
+    workflow_id = await _saved(api)
+
+    first = (await api.post(f"/workflows/{workflow_id}/runs",
+                            json={"inputs": {"topic": "A"}, "revision": 2})).json()
+    second = (await api.post(f"/workflows/{workflow_id}/runs",
+                             json={"inputs": {"topic": "B"}, "revision": 2})).json()
+
+    listed = (await api.get(f"/workflows/{workflow_id}/runs")).json()["runs"]
+
+    assert [item["id"] for item in listed] == [second["runId"], first["runId"]]
+
+
+# ---------------------------------------------------------------- B2: node trace order survives insertion order
+
+
+async def test_node_runs_are_ordered_by_started_at_not_insertion_order(api, pool):
+    """A retry or a loop can insert node_run rows in an order that does not match
+    (started_at, exec_index, attempt) -- e.g. node "a" is recorded after node "c" here, exactly as a retried
+    node would be recorded after a node that started later but failed faster. Passes today only because a
+    three-row table happens to come back in heap (insertion) order without an ORDER BY; this pins the actual
+    contract instead of that accident."""
+    from datetime import datetime, timedelta, timezone
+
+    from tests.factories import make_run
+
+    run_id = await make_run(pool, status="succeeded")
+    base = datetime.now(timezone.utc)
+    # inserted as c, a, b -- started as a, b, c
+    rows = [("c", base + timedelta(seconds=3)), ("a", base + timedelta(seconds=1)),
+            ("b", base + timedelta(seconds=2))]
+    async with pool.connection() as conn, conn.transaction():
+        for node_id, started_at in rows:
+            await conn.execute(
+                "INSERT INTO node_runs (id, run_id, node_id, exec_index, attempt, status, started_at)"
+                " VALUES (gen_random_uuid(), %s, %s, 0, 1, 'succeeded', %s)",
+                (run_id, node_id, started_at))
+
+    response = await api.get(f"/runs/{run_id}/nodes")
+
+    assert [node["nodeId"] for node in response.json()["nodeRuns"]] == ["a", "b", "c"]
+
+
+# ---------------------------------------------------------------- B3: the idempotency fast path must actually run
+
+
+async def test_the_idempotency_fast_path_answers_without_reaching_insert_queued(api, monkeypatch):
+    """Deleting the pre-lock idempotency lookup is invisible against the happy path (insert_queued would
+    just succeed twice under two different requests and the UniqueViolation recovery would paper over it),
+    so pin the actual short-circuit directly: once the first request has created a run for this key, a
+    second request with the same key must return that run's id *without* ever calling insert_queued again."""
+    workflow_id = await _saved(api)
+    headers = {"Idempotency-Key": "fast-path-1"}
+
+    first = await api.post(f"/workflows/{workflow_id}/runs", json={"inputs": {"topic": "A"}, "revision": 2},
+                           headers=headers)
+    assert first.status_code == 202
+
+    async def broken_insert_queued(conn, **kwargs):
+        raise AssertionError("insert_queued must not run: the idempotency lookup should have answered first")
+
+    monkeypatch.setattr(run_db, "insert_queued", broken_insert_queued)
+
+    second = await api.post(f"/workflows/{workflow_id}/runs", json={"inputs": {"topic": "B"}, "revision": 2},
+                            headers=headers)
+
+    assert second.status_code == 202
+    assert second.json()["runId"] == first.json()["runId"]
+
+
+# ---------------------------------------------------------------- B4: GET /runs/{id} on a well-formed unknown id
+
+
+async def test_get_run_on_a_well_formed_unknown_id_is_404(api):
+    response = await api.get(f"/runs/{uuid.uuid4()}")
+
+    assert response.status_code == 404 and response.json()["error"]["code"] == "NOT_FOUND"
+
+
+# ---------------------------------------------------------------- B5: the run_queued event carries versionNo
+
+
+async def test_the_run_queued_event_carries_version_no(api, pool):
+    workflow_id = await _saved(api)
+
+    created = (await api.post(f"/workflows/{workflow_id}/runs",
+                              json={"inputs": {"topic": "AI"}, "revision": 2})).json()
+
+    async with pool.connection() as conn:
+        event = await (await conn.execute(
+            "SELECT payload FROM run_events WHERE run_id=%s AND type='run_queued'",
+            (created["runId"],))).fetchone()
+        version = await (await conn.execute(
+            "SELECT version_no FROM workflow_versions WHERE id=%s", (created["versionId"],))).fetchone()
+
+    assert event["payload"] == {"versionNo": version["version_no"]}
+
+
+# ---------------------------------------------------------------- B6: A1 (blank key), A2 (overlong key),
+# A3 (nodes limit/hasMore) and A4 (runs cursor/limit) each covered directly
+
+
+async def test_a_blank_idempotency_key_header_does_not_pin_runs_together(api):
+    """A1: `Idempotency-Key: ` (present but blank) used to be falsy for the lookup but truthy enough to be
+    stored as `""` -- not NULL -- so it silently joined runs_idempotency_idx and pinned every later create
+    from a client that always sends the header blank to the first run forever."""
+    workflow_id = await _saved(api)
+    headers = {"Idempotency-Key": ""}
+
+    responses = [await api.post(f"/workflows/{workflow_id}/runs",
+                                json={"inputs": {"topic": topic}, "revision": 2}, headers=headers)
+                for topic in ("A", "B", "C")]
+
+    assert [response.status_code for response in responses] == [202, 202, 202]
+    assert len({response.json()["runId"] for response in responses}) == 3
+
+
+async def test_an_overlong_idempotency_key_is_rejected_with_422_not_500(api, pool):
+    """A2: an unbounded key is half of runs_idempotency_idx's btree key; a 3KB one used to raise psycopg's
+    ProgramLimitExceeded, which `except UniqueViolation` does not catch, surfacing as a bare 500."""
+    workflow_id = await _saved(api)
+    headers = {"Idempotency-Key": "k" * 3000}
+
+    response = await api.post(f"/workflows/{workflow_id}/runs", json={"inputs": {"topic": "A"}, "revision": 2},
+                              headers=headers)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "REQUEST_ERROR"
+    async with pool.connection() as conn:
+        count = await (await conn.execute(
+            "SELECT count(*) AS n FROM runs WHERE workflow_id=%s", (workflow_id,))).fetchone()
+    assert count["n"] == 0
+
+
+async def test_get_node_runs_honors_limit_and_reports_has_more(api, pool):
+    from tests.factories import make_run
+
+    run_id = await make_run(pool, status="succeeded")
+    async with pool.connection() as conn, conn.transaction():
+        for i in range(5):
+            await conn.execute(
+                "INSERT INTO node_runs (id, run_id, node_id, exec_index, attempt, status)"
+                " VALUES (gen_random_uuid(), %s, %s, 0, 1, 'succeeded')", (run_id, f"n{i}"))
+
+    limited = await api.get(f"/runs/{run_id}/nodes", params={"limit": 2})
+    full = await api.get(f"/runs/{run_id}/nodes", params={"limit": 10})
+
+    assert limited.status_code == 200
+    assert len(limited.json()["nodeRuns"]) == 2 and limited.json()["hasMore"] is True
+    assert len(full.json()["nodeRuns"]) == 5 and full.json()["hasMore"] is False
+
+
+async def test_an_out_of_range_node_runs_limit_is_rejected(api):
+    too_big = await api.get(f"/runs/{uuid.uuid4()}/nodes", params={"limit": 500})
+    zero = await api.get(f"/runs/{uuid.uuid4()}/nodes", params={"limit": 0})
+    not_a_number = await api.get(f"/runs/{uuid.uuid4()}/nodes", params={"limit": "abc"})
+
+    for response in (too_big, zero, not_a_number):
+        assert response.status_code == 422 and response.json()["error"]["code"] == "REQUEST_ERROR"
+
+
+async def test_paging_workflow_runs_with_a_cursor_returns_every_run_exactly_once(api):
+    workflow_id = await _saved(api)
+    created_ids = []
+    for i in range(5):
+        response = await api.post(f"/workflows/{workflow_id}/runs",
+                                  json={"inputs": {"topic": f"t{i}"}, "revision": 2})
+        created_ids.append(response.json()["runId"])
+
+    seen: list[str] = []
+    cursor = None
+    for _ in range(10):  # guard against an infinite-loop regression
+        params = {"limit": 2, **({"cursor": cursor} if cursor else {})}
+        response = await api.get(f"/workflows/{workflow_id}/runs", params=params)
+        assert response.status_code == 200
+        body = response.json()
+        seen.extend(item["id"] for item in body["runs"])
+        cursor = body["nextCursor"]
+        if cursor is None:
+            break
+    else:
+        pytest.fail("paging never terminated")
+
+    assert seen == list(reversed(created_ids))  # newest first, no duplicate or skipped run
+
+
+async def test_a_malformed_runs_cursor_is_rejected_with_422_not_500(api):
+    workflow_id = await _saved(api)
+
+    response = await api.get(f"/workflows/{workflow_id}/runs", params={"cursor": "not-a-valid-cursor!!"})
+
+    assert response.status_code == 422 and response.json()["error"]["code"] == "REQUEST_ERROR"
+
+
+# ---------------------------------------------------------------- B7: A5 -- analysis must not hold the lock
+
+
+async def test_analysis_does_not_hold_the_workflow_lock(api, monkeypatch):
+    """A concurrent autosave PUT must be able to complete while a create_run is parked inside analyze().
+    analyze() is pushed to a worker thread (asyncio.to_thread), so it is paused here with a real
+    threading.Event -- an asyncio.Event could not be waited on from that thread. Once the PUT has bumped
+    the revision, releasing analyze must make create_run notice the draft it analysed is now stale and
+    answer 409, not silently pin a version for a draft nobody can see anymore.
+
+    If analyze() still ran inside the same transaction as the workflow's FOR UPDATE lock (the pre-fix
+    behaviour), the PUT's own UPDATE against that row would block behind it and this test would time out
+    instead of completing -- bounded by asyncio.timeout so that shows up as a failure, not a hang."""
+    workflow_id = await _saved(api)  # revision 2 after create + save
+    started = threading.Event()
+    release = threading.Event()
+
+    def patched_analyze(dsl, registry):
+        started.set()
+        if not release.wait(timeout=15):
+            raise TimeoutError("release was never set")
+        return real_analyze(dsl, registry)
+
+    monkeypatch.setattr(runs_router, "analyze", patched_analyze)
+
+    async with asyncio.timeout(20):
+        create_task = asyncio.create_task(
+            api.post(f"/workflows/{workflow_id}/runs", json={"inputs": {"topic": "AI"}, "revision": 2}))
+        try:
+            assert await asyncio.to_thread(started.wait, 10), "analyze() never started"
+
+            put_response = await api.put(f"/workflows/{workflow_id}",
+                                         json={"draftDsl": TYPED, "revision": 2, "name": "다른 이름"})
+
+            assert put_response.status_code == 200 and put_response.json()["revision"] == 3
+        finally:
+            release.set()
+
+        create_response = await create_task
+
+    assert create_response.status_code == 409
+    error = create_response.json()["error"]
+    assert error["code"] == "REVISION_CONFLICT" and error["details"]["currentRevision"] == 3

@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import uuid
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -24,6 +27,9 @@ log = logging.getLogger(__name__)
 
 router = APIRouter()
 
+DEFAULT_LIMIT = 50  # design 8.1's `?cursor&limit`, shared by both listing endpoints
+MAX_LIMIT = 200
+
 
 def _workflow_id(raw: str) -> str:
     """A path segment that isn't a UUID at all cannot match any row. Reject it before it ever reaches a
@@ -42,6 +48,39 @@ def _run_id(raw: str) -> str:
         return str(uuid.UUID(raw))
     except ValueError:
         raise ApiError(404, "NOT_FOUND", "실행을 찾을 수 없습니다") from None
+
+
+def _parse_limit(request: Request) -> int:
+    """`?limit=`, defaulting to DEFAULT_LIMIT and rejected outright past MAX_LIMIT rather than silently
+    clamped -- a client asking for 100,000 rows almost certainly misunderstands the API, and clamping
+    would hide that (Task 13 review A3/A4)."""
+    raw = request.query_params.get("limit")
+    if raw is None:
+        return DEFAULT_LIMIT
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ApiError(422, "REQUEST_ERROR", "limit의 형식이 올바르지 않습니다") from None
+    if not (1 <= value <= MAX_LIMIT):
+        raise ApiError(422, "REQUEST_ERROR", f"limit은 1~{MAX_LIMIT} 사이여야 합니다")
+    return value
+
+
+def _encode_cursor(created_at: datetime, run_id: str) -> str:
+    """Opaque keyset cursor: the `(created_at, id)` of the last row on a page (Task 13 review A4)."""
+    raw = f"{created_at.isoformat()}|{run_id}".encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _decode_cursor(raw: str) -> tuple[datetime, str]:
+    """The inverse of `_encode_cursor`. Anything that doesn't round-trip -- bad base64, a reordered or
+    hand-edited payload, an id that isn't a UUID -- is a malformed cursor: a 422, never a 500 from a
+    DataError deep in the query (same reasoning as `_workflow_id`/`_run_id`)."""
+    try:
+        created_at_raw, run_id_raw = base64.urlsafe_b64decode(raw.encode("ascii")).decode("utf-8").split("|", 1)
+        return datetime.fromisoformat(created_at_raw), str(uuid.UUID(run_id_raw))
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        raise ApiError(422, "REQUEST_ERROR", "cursor의 형식이 올바르지 않습니다") from None
 
 
 def _sanitize(value: Any) -> Any:
@@ -104,30 +143,67 @@ async def create_run(workflow_id: str, request: Request) -> dict[str, Any]:
     body = require_object(await read_json(request))
     inputs = field(body, "inputs", dict, required=False, default={}) or {}
     revision = field(body, "revision", int)
-    key = request.headers.get("idempotency-key")
+    # A present-but-blank header ("" or whitespace) is not a key. h11 hands it to us as an empty string,
+    # which is falsy -- `if key:` below correctly skips the idempotency lookup for it -- but it is not
+    # NULL, so unless it is normalised away here it still gets written by insert_queued and *does*
+    # participate in runs_idempotency_idx (a partial unique index with `WHERE idempotency_key IS NOT
+    # NULL`): every later create from a client that always sends the header blank then collides with the
+    # first one forever and the UniqueViolation recovery below answers with that first run's id (Task 13
+    # review A1). Normalising to None keeps a blank header out of the index exactly like an absent one.
+    key = (request.headers.get("idempotency-key") or "").strip() or None
+    if key is not None and len(key.encode("utf-8")) > run_db.MAX_IDEMPOTENCY_KEY_BYTES:
+        # Half of runs_idempotency_idx's btree key. h11 allows header values up to ~16KB, so a client can
+        # reach Postgres's own hard limit here: `ProgramLimitExceeded: index row size ... exceeds btree
+        # version 4 maximum`, which is not a UniqueViolation and so was falling through the except clause
+        # below as a bare 500 (Task 13 review A2). Reject it before it ever reaches the index.
+        raise ApiError(422, "REQUEST_ERROR",
+                       f"Idempotency-Key가 너무 깁니다 (최대 {run_db.MAX_IDEMPOTENCY_KEY_BYTES}B)")
     if len(json.dumps(inputs, ensure_ascii=False).encode("utf-8")) > run_db.MAX_INPUT_BYTES:
         raise ApiError(413, "PAYLOAD_TOO_LARGE",
                        f"실행 입력이 너무 큽니다 (최대 {run_db.MAX_INPUT_BYTES // 1024}KB)")
 
     pool = request.app.state.pool
+
+    # Read the draft (and check the idempotency fast path) *before* opening a transaction, and analyse off
+    # the lock entirely (Task 13 review A5). analyze() used to run inside the same transaction as
+    # workflow_db.lock's FOR UPDATE -- a CPU-bound asyncio.to_thread hop while holding both a pooled
+    # connection and the workflow's row lock -- so a concurrent autosave PUT (which needs that same lock)
+    # queued up behind it, and every other request sharing the pool (including /healthz) queued up behind
+    # the borrowed connection. `revision` bumps on every successful save (workflow_db.save_draft), so
+    # re-checking it after taking the lock below is exactly as strong as holding the lock across the
+    # analysis: an unchanged revision means an unchanged draft (nothing to re-analyse), and a changed one
+    # is caught as the same 409 before anything is pinned or inserted.
+    async with pool.connection() as conn:
+        if key:
+            existing = await run_db.find_by_idempotency_key(conn, workflow_id, key)
+            if existing is not None:  # a double click or a retried request (design 8.4)
+                return {"runId": str(existing["id"]), "versionId": str(existing["workflow_version_id"])}
+        workflow = await workflow_db.get(conn, workflow_id)
+        if workflow is None:
+            raise ApiError(404, "NOT_FOUND", "워크플로를 찾을 수 없습니다")
+        if workflow["revision"] != revision:
+            raise ApiError(409, "REVISION_CONFLICT", "다른 곳에서 먼저 저장했습니다",
+                           {"currentRevision": workflow["revision"]})
+        draft = workflow["draft_dsl"]
+
+    analysis = await asyncio.to_thread(analyze, draft, request.app.state.registry)
+    if has_errors(analysis.issues) or analysis.dsl is None:
+        raise ApiError(422, "VALIDATION_FAILED", "워크플로에 오류가 있습니다",
+                       {"issues": [issue.to_dict() for issue in analysis.issues]})
+
     try:
         async with pool.connection() as conn, conn.transaction():
-            if key:
-                existing = await run_db.find_by_idempotency_key(conn, workflow_id, key)
-                if existing is not None:  # a double click or a retried request (design 8.4)
-                    return {"runId": str(existing["id"]),
-                            "versionId": str(existing["workflow_version_id"])}
             workflow = await workflow_db.lock(conn, workflow_id)
             if workflow is None:
                 raise ApiError(404, "NOT_FOUND", "워크플로를 찾을 수 없습니다")
             if workflow["revision"] != revision:
+                # Something saved between the pre-lock read above and here: the draft this run would pin
+                # is already stale, so re-analysing it would be wasted work either way. Task 12's delete
+                # race stays closed regardless of where the lock starts -- the INSERT into runs below still
+                # takes FOR KEY SHARE on this row through its workflow_id FK, which is what actually
+                # serialises against a concurrent delete_workflow's FOR UPDATE, not the analysis step.
                 raise ApiError(409, "REVISION_CONFLICT", "다른 곳에서 먼저 저장했습니다",
                                {"currentRevision": workflow["revision"]})
-            draft = workflow["draft_dsl"]
-            analysis = await asyncio.to_thread(analyze, draft, request.app.state.registry)
-            if has_errors(analysis.issues) or analysis.dsl is None:
-                raise ApiError(422, "VALIDATION_FAILED", "워크플로에 오류가 있습니다",
-                               {"issues": [issue.to_dict() for issue in analysis.issues]})
             version = await workflow_db.pin_version(conn, workflow_id=workflow_id, dsl=draft,
                                                     dsl_hash=dsl_hash(analysis.dsl))
             run = await run_db.insert_queued(
@@ -152,13 +228,20 @@ async def create_run(workflow_id: str, request: Request) -> dict[str, Any]:
 @router.get("/workflows/{workflow_id}/runs")
 async def list_runs(workflow_id: str, request: Request) -> dict[str, Any]:
     workflow_id = _workflow_id(workflow_id)
+    limit = _parse_limit(request)
+    raw_cursor = request.query_params.get("cursor")
+    cursor = _decode_cursor(raw_cursor) if raw_cursor else None
     async with request.app.state.pool.connection() as conn:
-        rows = await run_db.list_for_workflow(conn, workflow_id)
+        # Fetch one extra row: its presence, not a second COUNT query, is how we know there is a next page.
+        rows = await run_db.list_for_workflow(conn, workflow_id, limit=limit + 1, cursor=cursor)
+    page, has_more = rows[:limit], len(rows) > limit
+    next_cursor = _encode_cursor(page[-1]["created_at"], str(page[-1]["id"])) if has_more else None
     return {"runs": [{"id": str(row["id"]), "status": row["status"],
                       "versionId": str(row["workflow_version_id"]),
                       "createdAt": row["created_at"].isoformat(),
                       "finishedAt": row["finished_at"].isoformat() if row["finished_at"] else None,
-                      "retryCount": row["retry_count"]} for row in rows]}
+                      "retryCount": row["retry_count"]} for row in page],
+            "nextCursor": next_cursor}
 
 
 @router.get("/runs/{run_id}")
@@ -176,10 +259,13 @@ async def get_run(run_id: str, request: Request) -> dict[str, Any]:
 @router.get("/runs/{run_id}/nodes")
 async def get_node_runs(run_id: str, request: Request) -> dict[str, Any]:
     run_id = _run_id(run_id)
+    limit = _parse_limit(request)
     async with request.app.state.pool.connection() as conn:
         await _run_or_404(conn, run_id)
-        rows = await run_db.list_node_runs(conn, run_id)
-    return {"nodeRuns": [_node_run_view(row) for row in rows]}
+        # Fetch one extra row: its presence, not a second COUNT query, is how we know there is more.
+        rows = await run_db.list_node_runs(conn, run_id, limit=limit + 1)
+    page, has_more = rows[:limit], len(rows) > limit
+    return {"nodeRuns": [_node_run_view(row) for row in page], "hasMore": has_more}
 
 
 async def _publish(request: Request, run_id: str, event: dict[str, Any]) -> None:

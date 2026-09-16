@@ -124,6 +124,7 @@ async def get_version_dsl(conn: AsyncConnection, version_id: str) -> dict[str, A
 # ---------------------------------------------------------------- API: create and read (Task 13)
 
 MAX_INPUT_BYTES = 256_000  # design 8.4; well under MAX_BODY_BYTES so the message names the right limit
+MAX_IDEMPOTENCY_KEY_BYTES = 200  # half of runs_idempotency_idx's btree key; see create_run (Task 13 review A2)
 
 
 async def insert_queued(conn: AsyncConnection, *, workflow_id: str, version_id: str, workspace_id: str,
@@ -147,18 +148,38 @@ async def lock_run(conn: AsyncConnection, run_id: str) -> dict[str, Any] | None:
     return await (await conn.execute("SELECT * FROM runs WHERE id=%s FOR UPDATE", (run_id,))).fetchone()
 
 
-async def list_for_workflow(conn: AsyncConnection, workflow_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+async def list_for_workflow(conn: AsyncConnection, workflow_id: str, *, limit: int = 50,
+                            cursor: tuple[Any, str] | None = None) -> list[dict[str, Any]]:
+    """Newest first, keyset-paged (design 8.1: `?cursor&limit`). `cursor` is the `(created_at, id)` of the
+    last row the caller has already seen; the id tiebreaker keeps paging stable when two runs share a
+    `created_at`, which two runs queued in the same transaction-commit instant can. The caller decides
+    page size and, by passing `limit + 1`, whether there is a next page (see `runs.py`'s router)."""
+    if cursor is None:
+        return await (await conn.execute(
+            "SELECT id, status, created_at, started_at, finished_at, retry_count, workflow_version_id"
+            " FROM runs WHERE workflow_id=%s ORDER BY created_at DESC, id DESC LIMIT %s",
+            (workflow_id, limit),
+        )).fetchall()
     return await (await conn.execute(
         "SELECT id, status, created_at, started_at, finished_at, retry_count, workflow_version_id"
-        " FROM runs WHERE workflow_id=%s ORDER BY created_at DESC LIMIT %s", (workflow_id, limit)
+        " FROM runs WHERE workflow_id=%s AND (created_at, id) < (%s, %s)"
+        " ORDER BY created_at DESC, id DESC LIMIT %s",
+        (workflow_id, cursor[0], cursor[1], limit),
     )).fetchall()
 
 
-async def list_node_runs(conn: AsyncConnection, run_id: str) -> list[dict[str, Any]]:
+async def list_node_runs(conn: AsyncConnection, run_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    """`input`/`output` can each carry up to 256KB (design 7.2), so an unbounded read of a large trace is
+    both a huge response and real `_sanitize` CPU on the event loop while a pooled connection sits pinned.
+    The caller bounds this with `limit` (validated to at most 200 by the router) and, by passing
+    `limit + 1`, learns whether more rows exist without a second query. Worst case remains large even
+    paged: the engine's recursion limit allows roughly 20,000 node executions per run, each retried some
+    number of times, so a full trace can still take on the order of a hundred 200-row pages -- bounded per
+    request, not bounded in total."""
     return await (await conn.execute(
         "SELECT node_id, exec_index, attempt, status, input, output, error, meta, tokens_in, tokens_out,"
         " truncated, started_at, finished_at FROM node_runs WHERE run_id=%s"
-        " ORDER BY started_at, exec_index, attempt", (run_id,)
+        " ORDER BY started_at, exec_index, attempt LIMIT %s", (run_id, limit)
     )).fetchall()
 
 
