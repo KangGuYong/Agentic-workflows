@@ -5,7 +5,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
-from engine.compiler.state import RunState, initial_state
+from engine.compiler.state import build_state_type, initial_state, outputs_of
 from engine.compiler.wrapper import NodePlan, _fallback_output, backoff_delay, make_node_fn
 from engine.dsl.models import Edge, Node, Policy, RetrySpec
 from engine.errors import EngineFault, ErrorCode, NodeError, NodeFailedError, RunCancelled
@@ -50,13 +50,16 @@ def _deps(llm=None, guard=None) -> tuple[RunDeps, InMemoryRecorder, list[float]]
 
 
 async def _run(plan: NodePlan, deps: RunDeps, *, start=None, loop_counters=None, outputs=None) -> dict:
-    graph = StateGraph(RunState, context_schema=RunDeps)
+    node_ids = {"start", "n", "a", "b", plan.node.id}
+    graph = StateGraph(build_state_type(node_ids), context_schema=RunDeps)
     graph.add_node(plan.node.id, make_node_fn(plan))
     graph.add_edge(START, plan.node.id)
     graph.add_edge(plan.node.id, END)
     app = graph.compile(checkpointer=InMemorySaver())
     state = initial_state({})
-    state["outputs"] = {"start": start or {"topic": "AI"}, **(outputs or {})}
+    state["out_start"] = start or {"topic": "AI"}
+    for node_id, value in (outputs or {}).items():
+        state[f"out_{node_id}"] = value
     state["loop_counters"] = loop_counters or {}
     return await app.ainvoke(state, {"configurable": {"thread_id": "t"}}, context=deps)
 
@@ -71,7 +74,7 @@ def test_backoff_delay():
 async def test_success_writes_state_and_records_rendered_input():
     deps, recorder, _ = _deps(ScriptedLLM(["답"]))
     result = await _run(_plan(LLMNode(), LLM_CONFIG, policy=LLMNode.default_policy), deps)
-    assert result["outputs"]["n"] == {"text": "답"}
+    assert outputs_of(result)["n"] == {"text": "답"}
     assert result["exec_counts"] == {"n": 1}
     assert recorder.records[0].status == "succeeded"
     assert recorder.records[0].input == {"prompt": "AI"}
@@ -84,7 +87,7 @@ async def test_retryable_error_is_retried_with_backoff():
 
     result = await _run(_plan(LLMNode(), LLM_CONFIG, policy=policy), deps)
 
-    assert result["outputs"]["n"] == {"text": "답"}
+    assert outputs_of(result)["n"] == {"text": "답"}
     assert [(r.attempt, r.status) for r in recorder.records] == [(1, "failed"), (2, "succeeded")]
     assert sleeps == [1.5]
     assert [e["willRetry"] for e in recorder.events if e["type"] == "node_failed"] == [True]
@@ -116,7 +119,7 @@ async def test_on_error_default_uses_default_output():
 
     result = await _run(_plan(LLMNode(), LLM_CONFIG, policy=policy), deps)
 
-    assert result["outputs"]["n"] == {"text": "기본"}
+    assert outputs_of(result)["n"] == {"text": "기본"}
     assert recorder.records[-1].status == "defaulted"
 
 
@@ -245,7 +248,7 @@ async def test_replay_of_a_waited_execution_retries_with_a_fresh_attempt_number(
 
     result = await _run(_plan(LLMNode(), LLM_CONFIG, policy=LLMNode.default_policy), deps)
 
-    assert result["outputs"]["n"] == {"text": "답"}
+    assert outputs_of(result)["n"] == {"text": "답"}
     assert [(r.attempt, r.status) for r in recorder.records] == [(1, "failed"), (2, "running"), (3, "succeeded")]
     assert [e["type"] for e in recorder.events].count("node_waiting") == 1
 
@@ -294,7 +297,7 @@ async def test_a_failed_token_publish_does_not_fail_the_node(caplog):
     deps, _, _ = _deps()
     deps.recorder = _FlakyRecorder("node_token")
     result = await _run(_plan(_Streamer({"text": "가나다라"}), {}), deps)
-    assert result["outputs"]["n"] == {"text": "가나다라"}
+    assert outputs_of(result)["n"] == {"text": "가나다라"}
     assert len([r for r in caplog.records if "node_token failed" in r.getMessage()]) == 1
 
 
@@ -311,7 +314,7 @@ async def test_a_timeout_is_retried_and_can_succeed():
     deps, recorder, _ = _deps(ScriptedLLM([TimeoutError(), "답"]))
     policy = Policy(timeoutSec=5, retry=RetrySpec(maxAttempts=2, initialDelaySec=0.5))
     result = await _run(_plan(LLMNode(), LLM_CONFIG, policy=policy), deps)
-    assert result["outputs"]["n"] == {"text": "답"}
+    assert outputs_of(result)["n"] == {"text": "답"}
     assert [(r.attempt, r.status, (r.error or {}).get("code")) for r in recorder.records] == [
         (1, "failed", "NODE_TIMEOUT"), (2, "succeeded", None)]
 

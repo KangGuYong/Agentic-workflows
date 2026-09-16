@@ -15,7 +15,7 @@ from langgraph.types import interrupt
 from pydantic import BaseModel
 
 from engine.compiler.routing import RouteDecision, resolve_route
-from engine.compiler.state import RunState
+from engine.compiler.state import OUT_PREFIX, outputs_of
 from engine.dsl.models import Edge, Node, Policy, RetrySpec
 from engine.errors import EngineFault, ErrorCode, NodeError, NodeFailedError, RunCancelled
 from engine.jsondata import check_storable, clip
@@ -110,7 +110,13 @@ async def _recorded(call: Awaitable[T]) -> T:
 
 
 def _context(
-    plan: NodePlan, deps: RunDeps, state: RunState, exec_index: int, attempt: int, resumed: bool
+    plan: NodePlan,
+    deps: RunDeps,
+    state: dict[str, Any],
+    outputs: dict[str, Any],
+    exec_index: int,
+    attempt: int,
+    resumed: bool,
 ) -> NodeContext:
     node_id = plan.node.id
     lost_tokens = 0
@@ -138,7 +144,7 @@ def _context(
         exec_index=exec_index,
         attempt=attempt,
         inputs=state.get("inputs", {}),
-        outputs=state.get("outputs", {}),
+        outputs=outputs,
         pred_ids=list(plan.pred_ids),
         llm=deps.llm,
         on_token=on_token,
@@ -157,7 +163,7 @@ async def _succeed(
     defaulted: bool,
 ) -> dict[str, Any]:
     node_id = plan.node.id
-    write: dict[str, Any] = {"outputs": {node_id: result.output}, "exec_counts": {node_id: exec_index}}
+    write: dict[str, Any] = {OUT_PREFIX + node_id: result.output, "exec_counts": {node_id: exec_index}}
     meta: dict[str, Any] = {}
     if decision is not None:
         write["routes"] = {node_id: decision.targets}
@@ -176,12 +182,15 @@ def make_node_fn(plan: NodePlan):
     max_attempts = plan.policy.retry.maxAttempts if plan.policy else 1
     timeout = plan.policy.timeoutSec if plan.policy else None
 
-    async def node_fn(state: RunState, runtime: Runtime[RunDeps]) -> dict[str, Any]:
+    async def node_fn(state: dict[str, Any], runtime: Runtime[RunDeps]) -> dict[str, Any]:
+        # `state` is annotated as a plain dict, not the per-workflow TypedDict: LangGraph infers a
+        # node's input_schema from its first parameter's type hint when it names a TypedDict, and would
+        # then pass only that TypedDict's own fields, hiding every node's out_<id> channel from node_fn.
         deps = runtime.context
         recorder = deps.recorder
         deps.guard.check()
         exec_index = state.get("exec_counts", {}).get(node_id, 0) + 1
-        outputs = state.get("outputs", {})
+        outputs = outputs_of(state)
         loop_counters = state.get("loop_counters", {})
         waited = await _recorded(recorder.find_waiting(node_id, exec_index))
         # An execution that already waited is being resumed (or replayed after a crash) for this whole call:
@@ -203,7 +212,7 @@ def make_node_fn(plan: NodePlan):
                 started = True
             if error is None:
                 try:
-                    ctx = _context(plan, deps, state, exec_index, attempt, resumed)
+                    ctx = _context(plan, deps, state, outputs, exec_index, attempt, resumed)
                     async with asyncio.timeout(timeout):
                         result = await plan.spec.execute(ctx, plan.config, rendered)
                     _check_output(result.output)

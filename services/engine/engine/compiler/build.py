@@ -7,7 +7,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from engine.compiler.state import RunState
+from engine.compiler.state import build_state_type
 from engine.compiler.wrapper import NodePlan, make_node_fn
 from engine.dsl.models import WorkflowDSL, dsl_hash
 from engine.nodes.registry import NodeRegistry
@@ -35,7 +35,7 @@ class CompiledWorkflow:
 
 
 def _router(node_id: str):
-    def route(state: RunState) -> list[str]:
+    def route(state: dict[str, Any]) -> list[str]:
         return state["routes"][node_id]
 
     return route
@@ -53,7 +53,7 @@ def compile_workflow(
     graph = analysis.graph
     back_edge_ids = frozenset(graph.back_edges)
 
-    builder = StateGraph(RunState, context_schema=RunDeps)
+    builder = StateGraph(build_state_type(graph.nodes), context_schema=RunDeps)
     for node_id, pn in graph.nodes.items():
         plan = NodePlan(
             node=pn.node,

@@ -12,7 +12,7 @@ LOOP_EDGES = {"true": [EXIT], "false": [BACK]}
 def test_merge_dicts_and_initial_state():
     assert merge_dicts({"a": 1}, {"b": 2}) == {"a": 1, "b": 2}
     assert merge_dicts(None, {"b": 2}) == {"b": 2}
-    assert initial_state({"x": 1}) == {"inputs": {"x": 1}, "outputs": {}, "routes": {}, "loop_counters": {}, "exec_counts": {}}
+    assert initial_state({"x": 1}) == {"inputs": {"x": 1}, "routes": {}, "loop_counters": {}, "exec_counts": {}}
 
 
 def test_forward_handle_returns_all_targets_in_declaration_order():
