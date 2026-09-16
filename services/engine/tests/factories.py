@@ -6,7 +6,7 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
-WORKSPACE = "00000000-0000-0000-0000-000000000001"
+from engine.db.workflows import WORKSPACE
 
 
 async def make_run(pool, *, dsl: dict[str, Any] | None = None, status: str = "running",
