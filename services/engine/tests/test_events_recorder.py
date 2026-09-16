@@ -62,25 +62,21 @@ async def test_waiting_is_remembered_after_the_attempt_finishes(pool):
     assert await recorder.attempts_so_far("human_approval_1", 1) == 1
 
 
-async def test_closing_an_already_closed_attempt_is_now_an_inconsistency(pool):
-    """Before A4 of the whole-branch review, `_close` matched purely on
-    `(run_id, node_id, exec_index, attempt)`, so a second close of the same attempt was a silent, idempotent
-    no-op -- which is exactly what also let a stale worker resurrect a row the reaper had already closed
-    (see `test_a_stale_close_loses_to_a_row_the_reaper_already_closed` below). The guard added there
-    (`status IN ('running','waiting')`) closes that hole for every second close, not just a reaper-driven
-    one: the one legitimate case the old leniency served -- a resumed `human_approval` attempt replayed
-    after a crash landed between its own commit and the graph's checkpoint commit -- now surfaces as
-    `RecorderInconsistent` (-> `EngineFault` via the wrapper) and a bounded recovery retry instead of a
-    silent duplicate `node_finished`, which is the safer trade-off given what the old leniency also allowed."""
+async def test_closing_an_attempt_again_with_the_same_status_is_idempotent(pool):
+    """A resumed `human_approval` attempt is replayed when a crash lands between the recorder's commit and
+    the graph's checkpoint commit, and replays the close it already wrote. That replay is deterministic, so
+    refusing it would fail the same way on every recovery until `MAX_RECOVERIES` gave up -- a survivable
+    crash would become a permanently failed run. A close that writes the status the row already holds is
+    therefore still allowed; only a conflicting one is refused (see the next test)."""
     run_id = await make_run(pool)
     recorder = PostgresRecorder(pool, run_id)
     await recorder.node_started("llm_1", 1, 1, None)
     await recorder.node_succeeded("llm_1", 1, 1, {"text": "답"}, Usage(), defaulted=False, meta={})
 
-    with pytest.raises(RecorderInconsistent):
-        await recorder.node_succeeded("llm_1", 1, 1, {"text": "답"}, Usage(), defaulted=False, meta={})
+    await recorder.node_succeeded("llm_1", 1, 1, {"text": "답"}, Usage(), defaulted=False, meta={})
 
-    assert len(await _records(pool, run_id)) == 1
+    [record] = await _records(pool, run_id)
+    assert record["status"] == "succeeded"
 
 
 async def test_a_stale_close_loses_to_a_row_the_reaper_already_closed(pool):

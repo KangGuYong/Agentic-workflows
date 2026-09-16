@@ -141,22 +141,23 @@ class PostgresRecorder:
         `_recorded` (compiler/wrapper.py) turns into an `EngineFault`, exactly the "give up, let recovery
         retry" outcome a losing write should get.
 
-        Trade-off recorded here: this also ends the leniency `test_a_replayed_answer_after_a_crash...`
-        (Task 15/16 notes) relied on for a `human_approval` attempt replayed after a crash landed between
-        its own commit and the graph's checkpoint commit -- that narrow race now surfaces as an
-        `EngineFault` and a bounded recovery retry (`MAX_RECOVERIES`) instead of a silent duplicate
-        `node_finished`. Given the alternative is the resurrection bug above, a safe, bounded retry is the
-        better failure mode.
+        A close that writes the status the row already holds is still allowed, so the one case the old
+        leniency existed for -- a resumed `human_approval` attempt replayed after a crash landed between
+        its own commit and the graph's checkpoint commit -- stays idempotent. That replay is deterministic:
+        rejecting it would fail the same way on every recovery until `MAX_RECOVERIES` gave up, turning a
+        survivable crash into a permanently failed run. Only a *conflicting* close is refused, which is
+        precisely the resurrection above (the reaper wrote `failed`, the stale worker writes `succeeded`).
         """
         usage = usage or Usage()
         await cursor.execute(
             "UPDATE node_runs SET status=%s, output=%s, error=%s, meta=%s, tokens_in=%s, tokens_out=%s,"
             " truncated=node_runs.truncated OR %s, finished_at=now()"
-            " WHERE run_id=%s AND node_id=%s AND exec_index=%s AND attempt=%s AND status IN ('running','waiting')",
+            " WHERE run_id=%s AND node_id=%s AND exec_index=%s AND attempt=%s"
+            "   AND (status IN ('running','waiting') OR status=%s)",
             (status, Jsonb(output) if output is not None else None,
              Jsonb(redact(error)) if error is not None else None,
              Jsonb(meta) if meta else None, usage.tokens_in, usage.tokens_out, truncated,
-             self._run_id, node_id, exec_index, attempt),
+             self._run_id, node_id, exec_index, attempt, status),
         )
         if cursor.rowcount == 0:
             raise RecorderInconsistent((node_id, exec_index, attempt))
