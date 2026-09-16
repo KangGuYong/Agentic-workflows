@@ -1629,6 +1629,19 @@ git add services/engine/engine/events services/engine/tests/test_events_recorder
 git commit -m "feat(engine): record node runs and events in Postgres"
 ```
 
+> **Post-review note (Task 4, as implemented):** commits `648071a` and `3bb8a49`.
+>
+> The review found that only `node_succeeded` put its body through redaction and the size cap. `node_failed` and `node_waiting` passed the caller's dict straight into `run_events.payload`, so a secret inside an error (Plan 2b's `http_request` will put response headers there) would have been stored unredacted and streamed over SSE, and a 1 MB approval payload would have been written whole. Fixed in `PostgresRecorder`:
+>
+> - One `_safe(value, limit=None)` helper: redact, `check_text`, then clip. Every stored value and every event body goes through it, so a value jsonb refuses raises `ValueError` here as it does in `InMemoryRecorder` instead of surfacing as an opaque psycopg error. `clip_json` also measures with `allow_nan=False`.
+> - `node_failed`'s event keeps the error (it is the failure reason, and metadata even when run data is not stored) but redacted and clipped to the preview size.
+> - `node_waiting` stores its payload in `node_runs.meta` regardless of `storeRunData` — without it the approval cannot be answered or displayed — while the event body follows the normal preview rule and is omitted when run data is not kept. That makes Task 15's Step 4 unnecessary.
+> - A truncated input now sets `node_runs.truncated`, and closing an attempt never clears the flag.
+>
+> Conformance was checked by running the same call sequences and three real engine runs (success, retry, approval + resume) through both recorders and diffing every row and event: identical apart from the intended differences (redaction, `node_token` not persisted, event payload shape).
+>
+> Suite: 676.
+
 ---
 
 ## Task 5: Redis publishing and the per-model semaphore
@@ -4813,24 +4826,12 @@ async def cancel_run(run_id: str, request: Request) -> dict[str, Any]:
 Add the imports: `from datetime import UTC, datetime`, `from engine.errors import NodeError`,
 `from engine.nodes.human_approval import resume_output`.
 
-- [ ]  **Step 4: Keep the waiting payload even when run data is not stored**
+- [ ]  **Step 4: (already done in Task 4)**
 
-The approval payload is the only way to answer a waiting run, so `PostgresRecorder.node_waiting` must store
-it regardless of `store_run_data` (the review value is the reviewer's own data, shown back to them). In
-`engine/events/recorder.py` change `node_waiting` to use `clip_json(redact(payload), MAX_STORED_BYTES)`
-directly instead of `self._value(payload)`, and add to `tests/test_events_recorder.py`:
-
-```python
-async def test_the_waiting_payload_is_stored_even_without_run_data(pool):
-    run_id = await make_run(pool, store_run_data=False)
-    recorder = PostgresRecorder(pool, run_id, store_run_data=False)
-    await recorder.node_started("human_approval_1", 1, 1, None)
-
-    await recorder.node_waiting("human_approval_1", 1, 1, {"message": "검토", "review": "원고"})
-
-    [record] = await _records(pool, run_id)
-    assert record["meta"]["waiting"]["review"] == "원고"  # required to resume the run
-```
+The approval payload is the only way to answer a waiting run, so `PostgresRecorder.node_waiting` stores it
+regardless of `storeRunData` — see the Task 4 post-review note. Nothing to do here beyond checking that
+`tests/test_events_recorder.py::test_an_approval_payload_survives_without_run_data_but_is_not_evented`
+still passes.
 
 - [ ]  **Step 5: Run the tests and commit**
 
