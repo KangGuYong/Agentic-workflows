@@ -45,8 +45,7 @@ class Reaper:
     async def stop(self) -> None:
         if self._task is not None:
             self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
+            await asyncio.gather(self._task, return_exceptions=True)
 
     async def _loop(self) -> None:
         while True:
@@ -69,11 +68,22 @@ class Reaper:
                 yield acquired
             finally:
                 if acquired:
-                    await conn.execute("SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
+                    try:
+                        await conn.execute("SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
+                    except Exception:
+                        # The unlock never landed, so the session-level lock is still held by this
+                        # connection. Left in the pool it would go back out IDLE, still holding LOCK_KEY
+                        # with no owner watching it: every reaper in every process would then silently take
+                        # the `if not acquired: return` branch until the pool eventually recycles this
+                        # connection. Closing it here ends the session, and the lock with it.
+                        log.warning("releasing the reaper advisory lock failed; closing the connection",
+                                   exc_info=True)
+                        await conn.close()
 
     async def sweep(self) -> None:
         async with self.exclusive() as acquired:
             if not acquired:
+                log.debug("reaper advisory lock held by another reaper; skipping this sweep")
                 return
             await self._recover_expired()
             await self._expire_waiting()
@@ -86,7 +96,13 @@ class Reaper:
                 (BATCH,),
             )).fetchall()
         for row in rows:
-            await self._recover_one(str(row["id"]), row)
+            run_id = str(row["id"])
+            try:
+                await self._recover_one(run_id, row)
+            except Exception:
+                # One bad row must not abort the sweep: since the batch is ORDER BY lease_expires_at, an
+                # uncaught failure here would also make this same row the first one retried on every tick.
+                log.exception("reaper: recovering run %s failed; will retry next sweep", run_id)
 
     async def _recover_one(self, run_id: str, row: dict[str, Any]) -> None:
         # store_run_data governs the two terminal paths below (cancelled, recovery-exhausted) the same way
@@ -126,8 +142,7 @@ class Reaper:
             if event_type == "run_recovered":
                 await run_db.notify_queued(conn, run_id)
             event = await append_event(cursor, run_id, event_type, payload=payload)
-        with contextlib.suppress(Exception):
-            await self._publisher.publish(run_id, event)
+        await self._publish(run_id, event)
 
     async def _take(self, cursor, run_id: str, status: str, *, finished: bool, clear_inputs: bool = False,
                     error: dict[str, Any] | None = None) -> bool:
@@ -136,6 +151,7 @@ class Reaper:
             "   recovery_count = recovery_count + CASE WHEN %(status)s='queued' THEN 1 ELSE 0 END,"
             "   error = COALESCE(%(error)s, error),"
             "   inputs = CASE WHEN %(clear)s THEN NULL ELSE inputs END,"
+            "   resume_payload = CASE WHEN %(finished)s THEN NULL ELSE resume_payload END,"
             "   finished_at = CASE WHEN %(finished)s THEN now() ELSE finished_at END, updated_at=now()"
             " WHERE id=%(id)s AND status='running' AND lease_expires_at < now() RETURNING id",
             {"id": run_id, "status": status, "finished": finished, "clear": clear_inputs,
@@ -146,24 +162,47 @@ class Reaper:
     async def _expire_waiting(self) -> None:
         async with self._pool.connection() as conn:
             rows = await (await conn.execute(
-                "SELECT id FROM runs WHERE status='waiting'"
+                "SELECT id, store_run_data FROM runs WHERE status='waiting'"
                 " AND updated_at < now() - make_interval(days => %s) LIMIT %s",
                 (WAITING_MAX_DAYS, BATCH),
             )).fetchall()
         for row in rows:
             run_id = str(row["id"])
-            async with self._pool.connection() as conn, conn.transaction():
-                cursor = conn.cursor()
-                await cursor.execute(
-                    "UPDATE runs SET status='cancelled', finished_at=now(), updated_at=now()"
-                    " WHERE id=%s AND status='waiting' RETURNING id", (run_id,))
-                if await cursor.fetchone() is None:
-                    continue
-                # A waiting run has no node_runs row left "running" (the paused node's own row is recorded
-                # as "waiting", not "running" — runtime/recorder.py), so this normally closes nothing; kept
-                # for the same reason as every other terminal path: no attempt may be left open silently.
-                await run_db.close_open_node_runs(conn, run_id, "cancelled")
-                event = await append_event(cursor, run_id, "run_cancelled",
-                                           payload={"reason": "waiting_expired"})
-            with contextlib.suppress(Exception):
-                await self._publisher.publish(run_id, event)
+            try:
+                await self._expire_one(run_id, row)
+            except Exception:
+                # Same isolation as _recover_expired: one bad row must not stop every other stale approval
+                # in this batch from being expired.
+                log.exception("reaper: expiring waiting run %s failed; will retry next sweep", run_id)
+
+    async def _expire_one(self, run_id: str, row: dict[str, Any]) -> None:
+        # A terminal transition, same as the two paths in _recover_one: store_run_data governs whether the
+        # 30-day-stale inputs are dropped.
+        clear_inputs = not row["store_run_data"]
+        async with self._pool.connection() as conn, conn.transaction():
+            cursor = conn.cursor()
+            await cursor.execute(
+                "UPDATE runs SET status='cancelled', finished_at=now(), updated_at=now(),"
+                "   inputs = CASE WHEN %(clear)s THEN NULL ELSE inputs END"
+                " WHERE id=%(id)s AND status='waiting' RETURNING id",
+                {"id": run_id, "clear": clear_inputs},
+            )
+            if await cursor.fetchone() is None:
+                return
+            # A parked approval's own row is recorded "waiting", not "running" (runtime/recorder.py), so
+            # this usually closes nothing — but a parallel branch left "running" when the run parks would
+            # still hit it, and now gets a matching node_failed event, the same as every other terminal path.
+            closed = await run_db.close_open_node_runs(conn, run_id, "cancelled")
+            for closed_row in closed:
+                await append_event(cursor, run_id, "node_failed", node_id=closed_row["node_id"],
+                                   exec_index=closed_row["exec_index"], attempt=closed_row["attempt"],
+                                   payload={"error": _CANCELLED_NODE_ERROR, "willRetry": False})
+            event = await append_event(cursor, run_id, "run_cancelled",
+                                       payload={"reason": "waiting_expired"})
+        await self._publish(run_id, event)
+
+    async def _publish(self, run_id: str, event: dict[str, Any]) -> None:
+        try:  # the event is already committed; losing the live copy only delays the editor (SSE gap fill)
+            await self._publisher.publish(run_id, event)
+        except Exception:
+            log.warning("publishing event failed for run %s", run_id, exc_info=True)
