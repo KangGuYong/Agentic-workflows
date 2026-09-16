@@ -95,13 +95,19 @@ async def clear_resume_payload(conn: AsyncConnection, *, run_id: str, owner: str
     return row is not None
 
 
-async def close_open_node_runs(conn: AsyncConnection, run_id: str, status: str) -> int:
-    """Close attempts left `running` by a crash, a cancel or a timeout, so the trace has no open rows."""
+async def close_open_node_runs(conn: AsyncConnection, run_id: str, status: str) -> list[dict[str, Any]]:
+    """Close attempts left `running` by a crash, a cancel or a timeout, so the trace has no open rows.
+
+    Returns the rows it closed (node_id, exec_index, attempt): the caller records a matching `node_failed`
+    event for each one, since closing the status column alone would leave a `run_events` replay showing
+    that node running forever.
+    """
     cursor = await conn.execute(
-        "UPDATE node_runs SET status=%s, finished_at=now() WHERE run_id=%s AND status='running'",
+        "UPDATE node_runs SET status=%s, finished_at=now() WHERE run_id=%s AND status='running'"
+        " RETURNING node_id, exec_index, attempt",
         (status, run_id),
     )
-    return cursor.rowcount
+    return await cursor.fetchall()
 
 
 async def get_run(conn: AsyncConnection, run_id: str) -> dict[str, Any] | None:

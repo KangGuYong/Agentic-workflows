@@ -97,7 +97,8 @@ async def test_open_node_runs_are_closed_when_a_run_stops(pool):
 
         rows = await (await conn.execute("SELECT status, finished_at FROM node_runs WHERE run_id=%s",
                                          (run_id,))).fetchall()
-    assert closed == 1 and rows[0]["status"] == "cancelled" and rows[0]["finished_at"] is not None
+    assert [(row["node_id"], row["exec_index"], row["attempt"]) for row in closed] == [("llm_1", 1, 1)]
+    assert rows[0]["status"] == "cancelled" and rows[0]["finished_at"] is not None
 
 
 async def test_notify_wakes_a_listener(pool, listen_conn):
@@ -150,7 +151,7 @@ async def test_closing_open_attempts_leaves_finished_ones_alone(pool):
 
         rows = await (await conn.execute(
             "SELECT node_id, status FROM node_runs WHERE run_id=%s ORDER BY node_id", (run_id,))).fetchall()
-    assert closed == 1
+    assert [(row["node_id"], row["exec_index"], row["attempt"]) for row in closed] == [("llm_2", 1, 1)]
     assert [(row["node_id"], row["status"]) for row in rows] == [("llm_1", "succeeded"), ("llm_2", "cancelled")]
 
 
