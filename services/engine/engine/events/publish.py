@@ -78,7 +78,18 @@ async def run_events(redis: Any, run_id: str, *,
             if message_type != "message":
                 continue
             parsed = _decode(message["data"])
-            if parsed is not None:
-                yield parsed
+            if parsed is None:
+                continue
+            # Anyone can PUBLISH on this channel (spec 7.3's own gap-fill design leans on that for
+            # cross-process delivery), so a message that parses as a dict but not as one of *our* events
+            # must still be dropped rather than trusted: `event_stream` does `event["type"] in TERMINAL`
+            # (KeyError on a missing/non-str type) and `seq <= last` (TypeError when seq is not an int) --
+            # both would otherwise kill every stream on this run (Task 14 review A3).
+            if not isinstance(parsed.get("type"), str):
+                continue
+            seq = parsed.get("seq")
+            if seq is not None and not isinstance(seq, int):
+                continue
+            yield parsed
     finally:
         await pubsub.aclose()

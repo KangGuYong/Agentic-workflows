@@ -32,19 +32,38 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
 from psycopg_pool import AsyncConnectionPool
 
 from engine.events.publish import run_events
+from engine.jsondata import safe_text
+
+log = logging.getLogger(__name__)
 
 TERMINAL = {"run_succeeded", "run_failed", "run_cancelled"}
 PING = ": ping\n\n"
 QUEUE_MAXSIZE = 1000  # bound a stalled client's backlog; see the module docstring for why dropping is safe
 
 
+def _sanitize(value: Any) -> Any:
+    """Scrub NUL/lone-surrogate text before it reaches `json.dumps(..., ensure_ascii=False)` (mirrors
+    `routers.runs._sanitize`). Every other event body passes through `check_text` on its way into
+    `run_events` (the recorder's `_safe`), but `node_token` is published straight from the LLM's raw
+    streamed text -- fed from `ollama._content`'s `json.loads` -- with no such check in between."""
+    if isinstance(value, str):
+        return safe_text(value)
+    if isinstance(value, list):
+        return [_sanitize(item) for item in value]
+    if isinstance(value, dict):
+        return {safe_text(key): _sanitize(item) for key, item in value.items()}
+    return value
+
+
 def format_event(event: dict[str, Any]) -> str:
+    event = _sanitize(event)
     lines = []
     if event.get("seq") is not None:  # transient events (e.g. node_token) get no id (design 7.3)
         lines.append(f"id: {event['seq']}")
@@ -111,6 +130,13 @@ async def event_stream(pool: AsyncConnectionPool, redis: Any, run_id: str, *, af
             try:
                 event = await asyncio.wait_for(queue.get(), ping_sec)
             except TimeoutError:
+                if subscriber.done():
+                    return  # the subscription is gone; end the stream so the client reconnects
+                for missed in await _stored(pool, run_id, last):
+                    yield format_event(missed)
+                    last = missed["seq"]
+                    if missed["type"] in TERMINAL:
+                        return
                 yield PING
                 continue
             seq = event.get("seq")
@@ -131,5 +157,12 @@ async def event_stream(pool: AsyncConnectionPool, redis: Any, run_id: str, *, af
         if not subscriber.done():
             subscriber.cancel()
         if not consumed_subscriber_result:
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await subscriber
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                # The pump failed (e.g. the Redis connection died mid-stream). The loop above already
+                # ended the response for the client; re-raising here would only turn a clean close into
+                # an unhandled ASGI exception out of `aclose()` -- log it instead (Task 14 review A2).
+                log.warning("event pump failed for run %s", run_id, exc_info=True)
