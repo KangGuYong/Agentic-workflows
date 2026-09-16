@@ -1930,6 +1930,13 @@ git add services/engine/engine/events/publish.py services/engine/engine/llm/sema
 git commit -m "feat(engine): publish run events and limit LLM calls per model"
 ```
 
+> **Post-review note (Task 5, as implemented):** commits `a70953f` and `82d13ea`.
+>
+> - The consumers accepted any JSON, so a stray `"42"` or `["cancel"]` published on `runs:control` or `run:{id}` was handed to the caller and would have crashed the worker's cancel routing and the SSE handler on the first `.get()`. `_decode` now drops anything that is not an object, and a test publishes junk on the channel before the real message.
+> - Verified against a real Redis: the Lua acquire is atomic (20 acquirers, limit 3, never more than 3 in flight), the limit holds across two independent `ModelSemaphore` instances, and the slot comes back when the call raises, when the awaiting task is cancelled, and — for a worker that dies without releasing — when the TTL expires. The score refresher keeps a call longer than the TTL alive, and leaves no task behind.
+>
+> Suite: 684.
+
 ---
 
 ## Task 6: Run queries — claim, lease and transitions
