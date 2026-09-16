@@ -4610,6 +4610,18 @@ git add services/engine/engine/events/stream.py services/engine/engine/api/route
 git commit -m "feat(engine): stream run events over SSE with gap filling"
 ```
 
+> **Post-review note (Task 14, as implemented):** commits `7a73494` and `a324ede`.
+>
+> - The plan's "subscribe first" step was `await asyncio.sleep(0)`, which proves nothing: redis-py's `execute_command` sends `SUBSCRIBE` and deliberately does not read the reply, so the subscription may not exist yet and an event published in that window is lost — the one thing this design exists to prevent. `run_events` takes a `ready` event now, set when the `subscribe` confirmation actually comes back over the wire.
+> - The stream had only two exits, both of which trust Redis: a terminal event in the single initial Postgres read, or one arriving live. Every publisher treats publishing as best-effort, so a 50 ms Redis blip left the stream pinging convincingly forever while the run finished without it — and the reconnect case is the *normal* one, because a browser EventSource reconnects the moment the server closes the stream. A pump that died after subscribing was never noticed either, and its exception surfaced only at teardown, re-raised out of `aclose()` and turned a clean client disconnect into an unhandled ASGI error. Each idle tick now re-reads Postgres and ends the stream if the subscription is gone.
+> - `_decode` guards the "anyone can publish on this channel" case for non-dicts but stopped there, so `PUBLISH run:<id> '{"seq":5}'` killed every stream for that run with a `KeyError` mid-body, which uvicorn can only answer by dropping the connection.
+> - `format_event` had no lone-surrogate guard, and `node_token` is the one payload with no `check_text`, redaction or clipping — it comes from raw `json.loads` in the Ollama client. Nothing reached the encoder only because redis-py raises first.
+> - Five of the commit's load-bearing behaviours had no test that could fail: the readiness wait (the test written for it passed 8/8 against `sleep(0)`, because its publisher did a Postgres write first), the gap-fill range (every collector stops at the first terminal event, so the duplicate was never read), live duplicate suppression (the reconnect test filters in SQL), and the queue bound (asserting every event arrives is equally true when nothing was dropped). The plan's own `test_a_dropped_publish_is_filled_in_from_postgres` tests no gap filling at all — all four events commit before the stream opens.
+> - The plan's two gaplessness assertions would have raised `KeyError: 'id'`: a real run emits a `node_token`, which by design carries no id. They filter to id-bearing events now, and assert the filtered list is not empty.
+> - Verified and left alone: `seq` is allocated under the `runs` row lock inside the writer's transaction, so commit order matches `seq` order and the initial read can never see a hole; dropping the oldest queue entry cannot reorder or repeat; an idle stream holds no Postgres connection; the auth middleware forwards the stream unbuffered.
+>
+> Suite: 853.
+
 ---
 
 ## Task 15: Resume, retry and cancel
