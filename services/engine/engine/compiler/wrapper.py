@@ -48,9 +48,22 @@ def backoff_delay(retry: RetrySpec, failed_tries: int) -> float:
 
 
 def _render(fields: list[TemplateField], outputs: dict[str, Any]) -> dict[str, Any]:
-    rendered = {f.path: render_template(f.source, outputs, f.target) for f in fields}
+    """Pure rendering: runs inline or, through RunDeps.render, in the worker's render pool."""
+    return {f.path: render_template(f.source, outputs, f.target) for f in fields}
+
+
+async def _rendered(deps: RunDeps, fields: list[TemplateField], outputs: dict[str, Any]) -> dict[str, Any]:
+    if deps.render is None:
+        rendered = _render(fields, outputs)
+    else:
+        try:
+            rendered = await deps.render(fields, outputs)
+        except TimeoutError as exc:
+            raise NodeError(
+                ErrorCode.TEMPLATE_ERROR, "템플릿 렌더링이 제한 시간을 초과했습니다", retryable=False
+            ) from exc
     try:
-        check_storable(rendered)  # recorded as the attempt's input (jsonb) and passed on to outputs and payloads
+        check_storable(rendered)  # recorded as the attempt's input (jsonb) and passed on to outputs
     except ValueError as exc:
         raise NodeError(ErrorCode.TEMPLATE_ERROR, f"템플릿 결과를 사용할 수 없습니다: {exc}", retryable=False) from exc
     return rendered
@@ -204,7 +217,7 @@ def make_node_fn(plan: NodePlan):
         for tries in range(1, max_attempts + 1):
             error = None
             try:
-                rendered = _render(fields, outputs)
+                rendered = await _rendered(deps, fields, outputs)
             except Exception as exc:  # noqa: BLE001 - a template failure is this attempt's node error
                 rendered, error = None, _as_node_error(exc, timeout)
             if not started:

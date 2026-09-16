@@ -332,3 +332,34 @@ async def test_classifier_on_error_default_routes_through_its_default_handle():
 
     assert result["routes"] == {"n": ["end"]}
     assert (recorder.records[-1].status, recorder.records[-1].meta["handle"]) == ("defaulted", "default")
+
+
+async def test_rendering_goes_through_the_deps_hook_when_one_is_set():
+    seen: list[dict] = []
+
+    async def render(fields, outputs):
+        seen.append({field.path: field.source for field in fields})
+        return {field.path: "치환됨" for field in fields}
+
+    deps, _, _ = _deps(ScriptedLLM(["답"]))
+    deps.render = render
+
+    result = await _run(_plan(LLMNode(), LLM_CONFIG, policy=LLMNode.default_policy), deps)
+
+    assert seen and outputs_of(result)["n"] == {"text": "답"}
+    assert deps.llm.calls[0]["messages"][-1].content == "치환됨"
+
+
+async def test_a_render_deadline_fails_the_node_without_retrying():
+    async def render(fields, outputs):
+        raise TimeoutError("render deadline")
+
+    deps, recorder, _ = _deps(ScriptedLLM(["답"]))
+    deps.render = render
+    plan = _plan(LLMNode(), LLM_CONFIG, policy=LLMNode.default_policy)
+
+    with pytest.raises(NodeFailedError) as exc:
+        await _run(plan, deps)
+
+    assert exc.value.error.code == ErrorCode.TEMPLATE_ERROR
+    assert len(recorder.records) == 1  # a deadline is not retryable: it would just happen again
