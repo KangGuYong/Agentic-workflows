@@ -218,6 +218,8 @@ def make_node_fn(plan: NodePlan):
             error = None
             try:
                 rendered = await _rendered(deps, fields, outputs)
+            except CONTROL_FLOW:  # a dead render pool is the worker's problem, not this attempt's
+                raise
             except Exception as exc:  # noqa: BLE001 - a template failure is this attempt's node error
                 rendered, error = None, _as_node_error(exc, timeout)
             if not started:

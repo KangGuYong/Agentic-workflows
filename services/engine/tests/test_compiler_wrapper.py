@@ -379,3 +379,17 @@ async def test_a_render_hook_exception_becomes_a_non_retryable_node_error():
     assert exc.value.error.code == ErrorCode.NODE_FAILED
     assert "RuntimeError" in exc.value.error.message
     assert len(recorder.records) == 1  # arbitrary exceptions are not retryable
+
+
+async def test_a_render_abort_escapes_the_run_instead_of_failing_the_node():
+    async def render(fields, outputs):
+        raise EngineFault("render pool is not active")
+
+    deps, recorder, _ = _deps(ScriptedLLM(["답"]))
+    deps.render = render
+    plan = _plan(LLMNode(), LLM_CONFIG, policy=LLMNode.default_policy)
+
+    with pytest.raises(EngineFault):
+        await _run(plan, deps)
+
+    assert recorder.records == []  # infrastructure failures belong to crash recovery, not to the run
