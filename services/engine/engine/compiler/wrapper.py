@@ -47,14 +47,14 @@ def backoff_delay(retry: RetrySpec, failed_tries: int) -> float:
     return min(retry.initialDelaySec * 2 ** (failed_tries - 1), 60.0)
 
 
-def _render(fields: list[TemplateField], outputs: dict[str, Any]) -> dict[str, Any]:
-    """Pure rendering: runs inline or, through RunDeps.render, in the worker's render pool."""
+def render_fields(fields: list[TemplateField], outputs: dict[str, Any]) -> dict[str, Any]:
+    """Pure rendering: runs inline or, through RunDeps.render, in the worker's render pool (engine/worker/render.py)."""
     return {f.path: render_template(f.source, outputs, f.target) for f in fields}
 
 
 async def _rendered(deps: RunDeps, fields: list[TemplateField], outputs: dict[str, Any]) -> dict[str, Any]:
     if deps.render is None:
-        rendered = _render(fields, outputs)
+        rendered = render_fields(fields, outputs)
     else:
         try:
             rendered = await deps.render(fields, outputs)
