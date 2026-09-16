@@ -5261,6 +5261,23 @@ git add services/engine/README.md services/engine/engine/api/main.py docs/superp
 git commit -m "docs(engine): document running the service and record Plan 2a verification"
 ```
 
+> **Post-review note (Task 17, as implemented):** commits `8d1f287`, `5f925ba`, `83d6ab0` and `eb37871`.
+>
+> - The README's claim that the API and the worker can start in either order was not safe: racing `prepare_database` on a fresh database kills every caller but one, with a `UniqueViolation` on `pg_type_typname_nsp_index` (or `checkpoint_migrations_pkey`, or `KeyError: 'config'` from Alembic's non-thread-safe globals in-process). `prepare_database` takes an advisory lock now. It has to *poll* with `pg_try_advisory_lock`: a blocking `pg_advisory_lock` deadlocks, because LangGraph's `setup()` runs `CREATE INDEX CONCURRENTLY`, which waits out every other session's open snapshot — including one blocked on the lock. The loop is bounded and logs, so a stalled holder cannot silently mute every process at startup. It costs ~34 ms per call on an already-migrated database.
+> - The API entrypoint's `prepare_database` and `pool.open` sat outside its `try`, so a failed startup left Redis and the pool open and never ran the shutdown block — the discipline its own comment claimed to mirror. It had no tests at all; it has them now, alongside the worker's.
+> - `@app.on_event` is deprecated on the pinned FastAPI, so the app installs a lifespan directly. On Windows, `uvicorn engine.api.main:app` dies on the Proactor loop; `--loop none`, `--reload` and `python -m engine.api.main` all work, which the README now says precisely.
+>
+> **Whole-branch review.** Three findings that no per-task review could see, all in the `runs` row's shared ownership:
+>
+> - `runs.inputs` and `runs.outputs` bypassed redaction entirely, so `GET /runs/{id}` returned a literal secret that `GET /runs/{id}/nodes` correctly showed as `[REDACTED]`. Design 10.1 is self-contradictory here — `runs.inputs` is the run's initial state and cannot be redacted at write — so `outputs` is redacted at write and both are redacted on the read path, which is the transmission design 10.3 governs.
+> - `cancel_now` was the one run-ending writer that ignored `storeRunData`, so the cancel button defeated the branch's only privacy control on exactly the "I submitted the wrong thing" path.
+> - SSE replay read every `run_events` row for a run in one unbounded query — the same bug Task 13 fixed on the sibling node route, and a run may hold ~10⁵ events. It pages now, on the replay and the gap-fill paths.
+> - Also: `PostgresRecorder._close` matched on `(run_id, node_id, exec_index, attempt)` alone, so a worker whose heartbeat stalled through a Postgres blip could flip a row the reaper had already closed back to `succeeded` while a newer attempt ran. It is fenced to an open row *or* a close writing the status the row already holds — refusing the idempotent replay would fail deterministically on every recovery and turn a survivable crash into a permanently failed run. The live and stored copies of one event also carried different `ts` values, and `clear_resume_payload` was dead code.
+>
+> **Left for Plan 2b, with reasons:** SSE is unavailable while Redis is down and logs an unhandled error per reconnect, where it could fall back to the Postgres polling it already does on every ping tick; the worker's pool is sized per run (`worker_max_runs + 4`) but demand scales per concurrently-executing node — 10 runs × a 10-way fan-out measured 13 of 14 connections with 7 tasks waiting, and psycopg's 30 s acquisition timeout equals `WORKER_LEASE_SEC`, so a starved heartbeat can lose a healthy run's lease; SSE ends at the first terminal event, so a retried run needs a client that reconnects; and rendering sits outside the node timeout with an unbounded queue, making `RENDER_POOL_SIZE` the worker's real concurrency limit.
+>
+> Suite: 907. `-m "not integration"`: 700 passed with Docker unreachable. Ruff clean.
+
 ---
 
 ## Design coverage (Plan 2a)
