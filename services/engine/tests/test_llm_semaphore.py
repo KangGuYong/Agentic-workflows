@@ -56,3 +56,14 @@ async def test_the_wrapper_passes_the_call_through(redis):
     )
 
     assert result.text == "m:안녕"
+
+
+async def test_holding_a_slot_leaves_no_background_task_behind(redis):
+    semaphore = ModelSemaphore(redis, limit=1, ttl_sec=60)
+    before = len(asyncio.all_tasks())
+
+    async with semaphore.slot("m"):
+        assert len(asyncio.all_tasks()) == before + 1  # the score refresher
+
+    await asyncio.sleep(0)
+    assert len(asyncio.all_tasks()) == before  # and it is gone again
