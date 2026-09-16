@@ -1083,7 +1083,45 @@ async def prepare_database(url: str) -> None:
         await saver.setup()
 ```
 
-- [ ]  **Step 6: Run the tests**
+- [ ]  **Step 6: The checkpointer factory**
+
+`setup()` only creates tables; the serializer is chosen wherever the saver is constructed. Design 5.3 wants
+encryption from the first checkpoint a deployment writes, so the factory lives here and every caller (the
+worker in Task 7) uses it. Create `services/engine/engine/db/checkpointer.py`:
+
+```python
+"""The run checkpointer (design 5.3).
+
+Checkpoints hold every node output, so they are encrypted at rest with `LANGGRAPH_AES_KEY`. The serializer
+has to be in place from the first checkpoint a deployment writes: turning it on later leaves the existing
+rows unreadable, which is why `load_config` refuses to start without a key unless ENGINE_DEV_INSECURE is set.
+"""
+from __future__ import annotations
+
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.serde.encrypted import EncryptedSerializer
+from psycopg_pool import AsyncConnectionPool
+
+from engine.config import EngineConfig
+
+
+def make_checkpointer(pool: AsyncConnectionPool, config: EngineConfig) -> AsyncPostgresSaver:
+    """A saver over `pool`, encrypted unless the process was started in development-insecure mode.
+
+    The pool must hand out autocommit connections (see `engine.db.pool.make_pool`).
+    """
+    if not config.encrypt_checkpoints:
+        return AsyncPostgresSaver(pool)
+    return AsyncPostgresSaver(pool, serde=EncryptedSerializer.from_pycryptodome_aes())
+```
+
+Add `services/engine/tests/test_db_checkpointer.py` with three tests, each running a tiny workflow through
+`compile_workflow(..., checkpointer=make_checkpointer(pool, config))` and `execute_run`: a node output must
+not appear in `checkpoint_blobs.blob` when a key is set; a second `execute_run` with an empty `ScriptedLLM`
+must resume from those encrypted checkpoints; and with `encrypt_checkpoints=False` the output *is* readable
+in the blob (which is what the key requirement protects against).
+
+- [ ]  **Step 7: Run the tests**
 
 Run: `uv run pytest tests/test_db_schema.py -q`
 Expected: PASS (the first run pulls the Postgres image, which can take a minute).
@@ -1091,12 +1129,22 @@ Expected: PASS (the first run pulls the Postgres image, which can take a minute)
 Run: `uv run pytest -q -m "not integration"` → the Docker-free suite still passes.
 Run: `uv run ruff check .` → clean.
 
-- [ ]  **Step 7: Commit**
+- [ ]  **Step 8: Commit**
 
 ```bash
-git add services/engine/engine/db services/engine/tests/test_db_schema.py
+git add services/engine/engine/db services/engine/tests/test_db_schema.py services/engine/tests/test_db_checkpointer.py
 git commit -m "feat(engine): add the Postgres schema, migrations and checkpoint setup"
 ```
+
+> **Post-review note (Task 3, as implemented):** commits `5b2ae54`, `3b7583c` and `0fe4c1a`.
+>
+> - psycopg's async connections refuse Windows' default ProactorEventLoop, so `tests/conftest.py` selects the selector loop there (`pytest_asyncio_loop_factories`), and the entrypoints do the same for development. Without it every container test fails with `InterfaceError`.
+> - `alembic.ini` needs `path_separator = os` or Alembic warns on every run.
+> - The review found that nothing wired `EncryptedSerializer`: `setup()` only creates tables, and the worker built a plain saver, so a real `LANGGRAPH_AES_KEY` would have had no effect. `engine/db/checkpointer.py` now owns that choice and Task 7 uses it.
+> - Verified against a real database: `prepare_database` is idempotent, deleting a workflow cascades to versions, runs, node_runs and events, a version referenced by a run cannot be deleted, the status check rejects unknown values, and the partial unique index dedupes idempotency keys while allowing many rows without one.
+> - Known: `node_runs.meta`, `runs.updated_at` and `runs_waiting_idx` are used by later tasks but are not listed in the design's table; add them there when the design is next touched.
+>
+> Suite: 661.
 
 ---
 
@@ -2298,13 +2346,13 @@ import logging
 import uuid
 from typing import Any
 
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from engine.compiler.build import CompiledWorkflow, WorkflowInvalid, compile_workflow
 from engine.config import EngineConfig
 from engine.db import runs as run_db
+from engine.db.checkpointer import make_checkpointer
 from engine.errors import EngineFault, ErrorCode, LeaseLost
 from engine.events.publish import RedisPublisher
 from engine.events.recorder import PostgresRecorder
@@ -2333,7 +2381,7 @@ class Worker:
         self._registry = registry or default_registry()
         self._render = render
         self._publisher = RedisPublisher(redis)
-        self._checkpointer = AsyncPostgresSaver(pool)
+        self._checkpointer = make_checkpointer(pool, config)  # encrypted unless dev-insecure (design 5.3)
         self._compiled: dict[str, CompiledWorkflow] = {}
         self._guards: dict[str, FlagGuard] = {}
         self._tasks: set[asyncio.Task] = set()
@@ -3218,7 +3266,7 @@ if __name__ == "__main__":
     asyncio.run(run())
 ```
 
-The checkpointer is `AsyncPostgresSaver(pool)` inside `Worker`; it must see an autocommit pool, which
+The checkpointer comes from `make_checkpointer(pool, config)` inside `Worker`; it must see an autocommit
 `make_pool` provides.
 
 - [ ]  **Step 5: Run the tests and commit**
