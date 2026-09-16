@@ -112,6 +112,46 @@ async def test_an_oversized_request_body_is_rejected_by_read_json_first(api):
     assert "실행 입력" not in error["message"]  # read_json's generic request-too-large message, not ours
 
 
+SECRET_OUTPUT = {
+    "version": "1",
+    "nodes": [
+        {"id": "start", "type": "start", "config": {"inputs": INPUT_SCHEMA}},
+        {"id": "llm_1", "type": "llm", "config": {"model": "m", "prompt": "{{ start.topic }}"}},
+        {"id": "end", "type": "end", "config": {"outputs": {"apiKey": "{{ llm_1.text }}"}}},
+    ],
+    "edges": [{"id": "e1", "source": "start", "target": "llm_1"},
+              {"id": "e2", "source": "llm_1", "target": "end"}],
+}
+
+
+async def test_run_inputs_and_outputs_are_redacted_on_get_run(api, pool, worker_factory):
+    """design 10.1/10.3, A1 of the whole-branch review: `GET /runs/{id}` used to hand a secret-looking
+    `inputs`/`outputs` value straight back, even though the sibling `GET /runs/{id}/nodes` route already
+    redacted the same kind of data through the recorder's own `_safe`. `outputs` is redacted before it is
+    even stored (`db.runs.finish`, checked here straight from Postgres); `inputs` cannot be (the worker
+    feeds it to `execute_run` as the run's initial state), so it is redacted only on this read path -- and
+    both are redacted again here regardless, since this is the transmission path design 10.3 governs."""
+    workflow_id = await _saved(api, dsl=SECRET_OUTPUT)
+    await worker_factory(ScriptedLLM(["sk-live-secret"]))
+
+    created = (await api.post(f"/workflows/{workflow_id}/runs",
+                              json={"inputs": {"topic": "AI", "password": "hunter2-SECRET"},
+                                    "revision": 2})).json()
+
+    async def done():
+        run = (await api.get(f"/runs/{created['runId']}")).json()
+        return run if run["status"] == "succeeded" else None
+
+    run = await until(done)
+    assert run["inputs"] == {"topic": "AI", "password": "[REDACTED]"}
+    assert run["outputs"] == {"apiKey": "[REDACTED]"}
+
+    async with pool.connection() as conn:
+        row = await (await conn.execute(
+            "SELECT outputs FROM runs WHERE id=%s", (created["runId"],))).fetchone()
+    assert row["outputs"] == {"apiKey": "[REDACTED]"}  # redacted before it ever reached storage
+
+
 async def test_a_run_is_picked_up_and_its_nodes_readable(api, pool, worker_factory):
     workflow_id = await _saved(api)
     await worker_factory(ScriptedLLM(["요약본"]))

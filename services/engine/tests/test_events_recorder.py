@@ -2,7 +2,8 @@ import asyncio
 
 import pytest
 
-from engine.events.recorder import PostgresRecorder
+from engine.db import runs as run_db
+from engine.events.recorder import PostgresRecorder, RecorderInconsistent
 from engine.nodes.base import Usage
 from engine.runtime.recorder import DuplicateAttempt
 from tests.factories import make_run  # added in this task
@@ -61,15 +62,49 @@ async def test_waiting_is_remembered_after_the_attempt_finishes(pool):
     assert await recorder.attempts_so_far("human_approval_1", 1) == 1
 
 
-async def test_closing_an_already_closed_attempt_is_allowed(pool):
+async def test_closing_an_already_closed_attempt_is_now_an_inconsistency(pool):
+    """Before A4 of the whole-branch review, `_close` matched purely on
+    `(run_id, node_id, exec_index, attempt)`, so a second close of the same attempt was a silent, idempotent
+    no-op -- which is exactly what also let a stale worker resurrect a row the reaper had already closed
+    (see `test_a_stale_close_loses_to_a_row_the_reaper_already_closed` below). The guard added there
+    (`status IN ('running','waiting')`) closes that hole for every second close, not just a reaper-driven
+    one: the one legitimate case the old leniency served -- a resumed `human_approval` attempt replayed
+    after a crash landed between its own commit and the graph's checkpoint commit -- now surfaces as
+    `RecorderInconsistent` (-> `EngineFault` via the wrapper) and a bounded recovery retry instead of a
+    silent duplicate `node_finished`, which is the safer trade-off given what the old leniency also allowed."""
     run_id = await make_run(pool)
     recorder = PostgresRecorder(pool, run_id)
     await recorder.node_started("llm_1", 1, 1, None)
     await recorder.node_succeeded("llm_1", 1, 1, {"text": "답"}, Usage(), defaulted=False, meta={})
 
-    await recorder.node_succeeded("llm_1", 1, 1, {"text": "답"}, Usage(), defaulted=False, meta={})
+    with pytest.raises(RecorderInconsistent):
+        await recorder.node_succeeded("llm_1", 1, 1, {"text": "답"}, Usage(), defaulted=False, meta={})
 
     assert len(await _records(pool, run_id)) == 1
+
+
+async def test_a_stale_close_loses_to_a_row_the_reaper_already_closed(pool):
+    """A4 of the whole-branch review. Scenario: a Postgres blip longer than `lease_sec` stalls a worker's
+    heartbeat (it cannot learn anything while the database is unreachable), the reaper requeues the run
+    and closes this exact attempt `failed` via `close_open_node_runs` (the same bulk close the reaper and
+    `Worker._terminal` both use), a second worker starts a new attempt -- and only then does the first
+    worker's stalled call to `node_succeeded` finally return. Matching by
+    `(run_id, node_id, exec_index, attempt)` alone (pre-fix) would flip the row back to `succeeded`,
+    resurrecting a closed attempt while a newer one may already be running. The guarded `_close` instead
+    raises `RecorderInconsistent` and leaves the reaper's `failed` row untouched."""
+    run_id = await make_run(pool)
+    recorder = PostgresRecorder(pool, run_id)
+    await recorder.node_started("llm_1", 1, 1, None)
+
+    async with pool.connection() as conn, conn.transaction():
+        closed = await run_db.close_open_node_runs(conn, run_id, "failed")
+    assert closed  # the row really was closed, the same way the reaper would leave it
+
+    with pytest.raises(RecorderInconsistent):
+        await recorder.node_succeeded("llm_1", 1, 1, {"text": "stale"}, Usage(), defaulted=False, meta={})
+
+    [record] = await _records(pool, run_id)
+    assert record["status"] == "failed"  # untouched by the stale write -- not resurrected to "succeeded"
 
 
 async def test_event_numbers_are_gapless_when_two_recorders_write_at_once(pool):
@@ -155,8 +190,6 @@ async def test_text_postgres_cannot_store_is_refused_like_the_in_memory_recorder
 
 
 async def test_closing_an_attempt_that_was_never_opened_is_an_engine_fault(pool):
-    from engine.events.recorder import RecorderInconsistent
-
     run_id = await make_run(pool)
 
     with pytest.raises(RecorderInconsistent):

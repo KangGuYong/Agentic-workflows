@@ -225,6 +225,27 @@ async def test_cancelling_a_waiting_run_is_immediate_and_final(api, worker_facto
     assert late.status_code == 409
 
 
+@pytest.mark.parametrize("status", ["queued", "waiting"])
+async def test_cancelling_drops_inputs_when_run_data_is_not_stored(api, pool, status):
+    """A2 of the whole-branch review: `cancel_now` was the only run-ending writer that ignored
+    `store_run_data` -- `finish`, and the reaper's `_take`/`_expire_one`, all carry the same `inputs =
+    CASE WHEN store_run_data ... ELSE NULL END` clause. Cancelling a `queued` or `waiting` run with
+    `storeRunData=false` (the API path for "I submitted the wrong thing") used to leave `inputs` in place
+    while every other way to end the same run cleared it."""
+    from tests.factories import make_run
+
+    run_id = await make_run(pool, status=status, store_run_data=False, inputs={"topic": "비밀"})
+
+    response = await api.post(f"/runs/{run_id}/cancel")
+
+    assert response.json()["status"] == "cancelled"
+    async with pool.connection() as conn:
+        row = await (await conn.execute(
+            "SELECT inputs, lease_owner, lease_expires_at FROM runs WHERE id=%s", (run_id,))).fetchone()
+    assert row["inputs"] is None
+    assert row["lease_owner"] is None and row["lease_expires_at"] is None
+
+
 async def test_cancelling_a_running_run_only_requests_it(api, pool, worker_factory):
     class _Slow:
         def __init__(self):

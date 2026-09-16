@@ -495,6 +495,75 @@ async def test_the_live_queue_stays_bounded(pool, redis, monkeypatch):
     await agen.aclose()
 
 
+async def test_replay_and_gap_fill_both_page_through_more_events_than_one_page(pool, redis):
+    """A3 of the whole-branch review: `_stored` used to be one unbounded `SELECT ... ORDER BY seq` with no
+    `LIMIT`, `fetchall()`'d into memory -- the same bug Task 13's review fixed on the sibling
+    `GET /runs/{id}/nodes` route. `page_size=3` stands in for the production `STORED_PAGE_SIZE` so this
+    does not need to generate hundreds of events to prove the caller actually loops: the initial replay
+    (7 events) and the live gap-fill path (9 more, never published, found only when a later published
+    event opens a gap past them) must each still deliver every event, in order, with none skipped or
+    duplicated, even though neither fits in one page."""
+    run_id = await make_run(pool, status="running")
+    agen = event_stream(pool, redis, run_id, after=0, ping_sec=5, queue_maxsize=20, page_size=3).__aiter__()
+
+    async with pool.connection() as conn, conn.transaction():
+        first_batch = [await append_event(conn.cursor(), run_id, "node_started", node_id=f"n{i}",
+                                          exec_index=1, attempt=1) for i in range(1, 8)]  # seq 1-7
+
+    seqs: list[int] = []
+    while len(seqs) < len(first_batch):
+        chunk = await asyncio.wait_for(agen.__anext__(), 5)
+        if chunk == PING:
+            continue
+        _, seq = _type_and_seq(chunk)
+        seqs.append(seq)
+    assert seqs == list(range(1, 8))  # the initial replay paged through more than two pages, in order
+
+    # Nine more stored events, never published live, then one live terminal event far ahead of them: the
+    # gap it opens (seq 8-16) must be filled by paging, not by a single unbounded read.
+    async with pool.connection() as conn, conn.transaction():
+        for i in range(1, 10):
+            await append_event(conn.cursor(), run_id, "node_started", node_id=f"g{i}", exec_index=1, attempt=1)
+        terminal = await append_event(conn.cursor(), run_id, "run_succeeded")  # seq 17
+
+    await RedisPublisher(redis).publish(run_id, terminal)
+
+    while True:
+        chunk = await asyncio.wait_for(agen.__anext__(), 5)
+        if chunk == PING:
+            continue
+        event_type, seq = _type_and_seq(chunk)
+        seqs.append(seq)
+        if event_type == "run_succeeded":
+            break
+
+    assert seqs == list(range(1, 18))  # gap-filled 8-16 and the terminal event, gapless and in order
+    await agen.aclose()
+
+
+async def test_the_live_and_replayed_copies_of_one_event_share_the_same_ts(pool):
+    """A5 of the whole-branch review: `append_event`'s returned dict (published live over Redis) used to
+    stamp `ts` with `datetime.now(UTC)` taken in this process before its transaction committed, while
+    `_stored`'s replay (an SSE reconnect) reads the row's actual `created_at`. A client that saw `seq=1`
+    live and then again after a reconnect would see two different timestamps for the *same* event, off by
+    the commit latency plus any clock skew. `append_event` now returns the column Postgres itself
+    assigned via `RETURNING created_at`, so both copies agree exactly."""
+    run_id = await make_run(pool, status="running")
+
+    async with pool.connection() as conn, conn.transaction():
+        published = await append_event(conn.cursor(), run_id, "run_queued")
+
+    stored = (await _stored_events(pool, run_id))[0]
+    assert published["ts"] == stored["ts"]
+
+
+async def _stored_events(pool, run_id: str) -> list[dict]:
+    async with pool.connection() as conn:
+        rows = await (await conn.execute(
+            "SELECT seq, created_at FROM run_events WHERE run_id=%s ORDER BY seq", (run_id,))).fetchall()
+    return [{"seq": row["seq"], "ts": row["created_at"].isoformat()} for row in rows]
+
+
 async def test_a_terminal_event_only_in_postgres_ends_the_stream(pool, redis):
     """A publish that never reached Redis (the worker's publish is best-effort everywhere) must not leave
     the stream open forever: the next idle tick re-reads Postgres, finds the terminal event sitting there,

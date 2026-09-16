@@ -125,12 +125,34 @@ class PostgresRecorder:
     async def _close(self, cursor, node_id: str, exec_index: int, attempt: int, status: str, *,
                      output: Any = None, truncated: bool = False, usage: Usage | None = None,
                      meta: dict[str, Any] | None = None, error: dict[str, Any] | None = None) -> None:
-        """Close one attempt. A replayed node closes a row that is already closed; that is not an error."""
+        """Close one attempt.
+
+        Fenced to `status IN ('running','waiting')` (A4 of the whole-branch review): matching purely on
+        `(run_id, node_id, exec_index, attempt)`, as this used to, let a worker whose heartbeat stalled
+        through a Postgres blip resurrect a row the reaper had already closed. Scenario: the blip outlives
+        `lease_sec` (the heartbeat cannot learn the lease is gone while the database is unreachable), the
+        reaper requeues the run and closes this attempt `failed` via `close_open_node_runs`, a second
+        worker starts a new attempt on the same node -- and then the first worker's call finally returns
+        and this same `_close` runs, flipping the row back to `succeeded` *after* a newer attempt is
+        already running. 'running' is the ordinary case; 'waiting' is a resumed `human_approval` attempt
+        being closed for the first time (its row was left `waiting` by `node_waiting` and has not reached
+        `_close` before). A row already closed -- by the reaper/a cancel, or by this same attempt's own
+        earlier close -- now makes this UPDATE match no row: `RecorderInconsistent` below, which
+        `_recorded` (compiler/wrapper.py) turns into an `EngineFault`, exactly the "give up, let recovery
+        retry" outcome a losing write should get.
+
+        Trade-off recorded here: this also ends the leniency `test_a_replayed_answer_after_a_crash...`
+        (Task 15/16 notes) relied on for a `human_approval` attempt replayed after a crash landed between
+        its own commit and the graph's checkpoint commit -- that narrow race now surfaces as an
+        `EngineFault` and a bounded recovery retry (`MAX_RECOVERIES`) instead of a silent duplicate
+        `node_finished`. Given the alternative is the resurrection bug above, a safe, bounded retry is the
+        better failure mode.
+        """
         usage = usage or Usage()
         await cursor.execute(
             "UPDATE node_runs SET status=%s, output=%s, error=%s, meta=%s, tokens_in=%s, tokens_out=%s,"
             " truncated=node_runs.truncated OR %s, finished_at=now()"
-            " WHERE run_id=%s AND node_id=%s AND exec_index=%s AND attempt=%s",
+            " WHERE run_id=%s AND node_id=%s AND exec_index=%s AND attempt=%s AND status IN ('running','waiting')",
             (status, Jsonb(output) if output is not None else None,
              Jsonb(redact(error)) if error is not None else None,
              Jsonb(meta) if meta else None, usage.tokens_in, usage.tokens_out, truncated,

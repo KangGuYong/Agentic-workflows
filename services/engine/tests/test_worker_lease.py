@@ -202,6 +202,13 @@ async def test_timed_out_and_cancelled_sets_are_empty_after_every_run(pool, work
         return row if row["expired"] else None
 
     await until(infra_expired)
+    # The DB write above and `_execute`'s own `finally` cleanup (which pops `_guards` and clears
+    # `_timed_out`/`_cancelled` together, with no `await` between them) are two different things:
+    # `expire_lease`'s commit is visible to this polling task before the worker's task has necessarily
+    # resumed past its own `await` and reached that `finally` block. Waiting for the DB row alone (A6: this
+    # used to flake here) races that gap; `_guard_gone` waits for the observable state the assertions
+    # actually depend on instead of assuming it settles within one `until()` interval.
+    await until(lambda: _guard_gone(worker_a, run_a))
     assert worker_a._timed_out == set()
     assert worker_a._cancelled == set()
     monkeypatch.undo()  # restore the real execute_run for the timeout scenario below
@@ -212,6 +219,7 @@ async def test_timed_out_and_cancelled_sets_are_empty_after_every_run(pool, work
     await asyncio.wait_for(llm_b.started.wait(), 10)
 
     row_b = await until(lambda: _finished(pool, run_b))
+    await until(lambda: _guard_gone(worker_b, run_b))  # same race, same fix: wait for the cleanup itself
     assert (row_b["status"], row_b["error"]["code"]) == ("failed", "RUN_TIMEOUT")
     assert worker_b._timed_out == set()
     assert worker_b._cancelled == set()

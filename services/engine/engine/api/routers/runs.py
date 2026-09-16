@@ -21,6 +21,7 @@ from engine.db import workflows as workflow_db
 from engine.dsl.models import dsl_hash
 from engine.errors import ErrorCode, NodeError
 from engine.events.publish import RedisPublisher
+from engine.events.redact import redact
 from engine.events.stream import event_stream
 from engine.events.writer import append_event
 from engine.jsondata import safe_text
@@ -125,12 +126,21 @@ def _sanitize(value: Any) -> Any:
 
 
 def _run_view(row: dict[str, Any], waiting: dict[str, Any] | None = None) -> dict[str, Any]:
+    # A1 of the whole-branch review, and the design conflict it records: `runs.inputs` is stored
+    # unredacted (see `db.runs.insert_queued`'s docstring) because the worker feeds that exact column to
+    # `execute_run` as the run's initial state -- redacting it at write would corrupt every run whose
+    # input happens to have a secret-looking key. `runs.outputs` *is* redacted at write
+    # (`db.runs.finish`), since nothing reads it back into execution. Both are redacted again here
+    # regardless: this response is the transmission path design 10.3 actually governs, it is the one
+    # place `inputs` can ever be redacted at all, and it also catches a row written before this fix
+    # existed. Before this, `GET /runs/{id}` handed a secret straight back even though the sibling
+    # `GET /runs/{id}/nodes` route (via the recorder's own `_safe`) already redacted the same data.
     view = {
         "id": str(row["id"]),
         "status": row["status"],
         "versionId": str(row["workflow_version_id"]),
-        "inputs": _sanitize(row["inputs"]),
-        "outputs": _sanitize(row["outputs"]),
+        "inputs": _sanitize(redact(row["inputs"])),
+        "outputs": _sanitize(redact(row["outputs"])),
         "error": _sanitize(row["error"]),
         "cancelRequested": row["cancel_requested_at"] is not None,
         "retryCount": row["retry_count"],

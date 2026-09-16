@@ -10,6 +10,8 @@ from typing import Any, Literal
 from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
+from engine.events.redact import redact
+
 QUEUE_CHANNEL = "runs_queued"
 
 
@@ -48,7 +50,15 @@ async def finish(conn: AsyncConnection, *, run_id: str, owner: str,
                  status: Literal["succeeded", "failed", "cancelled"],
                  outputs: dict[str, Any] | None = None, error: dict[str, Any] | None = None,
                  clear_inputs: bool = False) -> bool:
-    """Terminal transition. False means this worker no longer owns the run and wrote nothing."""
+    """Terminal transition. False means this worker no longer owns the run and wrote nothing.
+
+    `outputs` is redacted before it is stored (design 10.1/10.3, A1 of the whole-branch review). This is
+    safe -- unlike `inputs` (see `insert_queued`'s docstring for the write-time redaction this column
+    *can't* have) -- because nothing reads `runs.outputs` back into execution: a retry replays from the
+    checkpoint, never from this column, and it is otherwise only ever read back out for display
+    (`routers.runs._run_view`, which redacts again on its own -- belt and suspenders, and the only thing
+    that can catch a row written before this fix existed).
+    """
     row = await (await conn.execute(
         "UPDATE runs SET status=%(status)s, outputs=%(outputs)s, error=%(error)s,"
         "   inputs = CASE WHEN %(clear)s THEN NULL ELSE inputs END,"
@@ -56,7 +66,7 @@ async def finish(conn: AsyncConnection, *, run_id: str, owner: str,
         "   finished_at=now(), updated_at=now()"
         " WHERE id=%(id)s AND lease_owner=%(owner)s AND status='running' RETURNING id",
         {"id": run_id, "owner": owner, "status": status, "clear": clear_inputs,
-         "outputs": Jsonb(outputs) if outputs is not None else None,
+         "outputs": Jsonb(redact(outputs)) if outputs is not None else None,
          "error": Jsonb(error) if error is not None else None},
     )).fetchone()
     return row is not None
@@ -79,18 +89,6 @@ async def expire_lease(conn: AsyncConnection, *, run_id: str, owner: str) -> boo
     row = await (await conn.execute(
         "UPDATE runs SET lease_expires_at=now(), updated_at=now()"
         " WHERE id=%s AND lease_owner=%s RETURNING id", (run_id, owner),
-    )).fetchone()
-    return row is not None
-
-
-async def clear_resume_payload(conn: AsyncConnection, *, run_id: str, owner: str) -> bool:
-    """A stored answer must not survive the invocation that used it, whatever its outcome.
-
-    Fenced like every other worker write: a worker that lost the run must not clear an answer the new
-    owner is about to use, or the reviewer would be asked to approve the same step twice.
-    """
-    row = await (await conn.execute(
-        "UPDATE runs SET resume_payload=NULL WHERE id=%s AND lease_owner=%s RETURNING id", (run_id, owner),
     )).fetchone()
     return row is not None
 
@@ -130,6 +128,14 @@ MAX_IDEMPOTENCY_KEY_BYTES = 200  # half of runs_idempotency_idx's btree key; see
 async def insert_queued(conn: AsyncConnection, *, workflow_id: str, version_id: str, workspace_id: str,
                         inputs: dict[str, Any], idempotency_key: str | None,
                         store_run_data: bool) -> dict[str, Any]:
+    """`inputs` is stored **unredacted**, unlike every other observation column (design 10.1 lists it
+    among the redacted-at-rest columns; A1 of the whole-branch review records the conflict this runs
+    into). The worker feeds this exact column to `execute_run` as the run's initial state
+    (`worker.py::_run`: `inputs=row["inputs"] or {}`) -- redacting a value here would hand the workflow
+    `"[REDACTED]"` instead of whatever a field that happens to look like a secret key actually held,
+    silently corrupting the run. Redaction is applied on the read path instead
+    (`routers.runs._run_view`), which is the transmission path design 10.3 actually governs, and which
+    `outputs` (see `finish`) goes through the same way in addition to being redacted at write."""
     return await (await conn.execute(
         "INSERT INTO runs (id, workspace_id, workflow_id, workflow_version_id, status, inputs,"
         " idempotency_key, store_run_data) VALUES (gen_random_uuid(), %s, %s, %s, 'queued', %s, %s, %s)"
@@ -266,10 +272,21 @@ async def queue_retry(conn: AsyncConnection, run_id: str) -> bool:
 
 
 async def cancel_now(conn: AsyncConnection, run_id: str) -> bool:
-    """Queued and waiting runs have no worker holding them, so the API ends them itself (design 5.9)."""
+    """Queued and waiting runs have no worker holding them, so the API ends them itself (design 5.9).
+
+    `inputs` is cleared under the same `store_run_data` rule as every other terminal writer (`finish`,
+    and the reaper's `_take`/`_expire_one`) -- A2 of the whole-branch review found this was the one
+    terminal path that forgot it, so cancelling a `queued` or `waiting` run kept `inputs` even with
+    `storeRunData=false`. The CASE reads `store_run_data` straight off the row being updated instead of
+    taking a separate SELECT first, since the row is already locked and written here. `lease_owner`/
+    `lease_expires_at` are cleared too for consistency with those same siblings, though both are already
+    NULL on every path that reaches `queued`/`waiting` in the first place.
+    """
     row = await (await conn.execute(
         "UPDATE runs SET status='cancelled', cancel_requested_at=coalesce(cancel_requested_at, now()),"
-        "   finished_at=now(), resume_payload=NULL, updated_at=now()"
+        "   finished_at=now(), resume_payload=NULL,"
+        "   inputs = CASE WHEN store_run_data THEN inputs ELSE NULL END,"
+        "   lease_owner=NULL, lease_expires_at=NULL, updated_at=now()"
         " WHERE id=%s AND status IN ('queued','waiting') RETURNING id", (run_id,),
     )).fetchone()
     return row is not None

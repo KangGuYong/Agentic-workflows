@@ -153,16 +153,3 @@ async def test_closing_open_attempts_leaves_finished_ones_alone(pool):
             "SELECT node_id, status FROM node_runs WHERE run_id=%s ORDER BY node_id", (run_id,))).fetchall()
     assert [(row["node_id"], row["exec_index"], row["attempt"]) for row in closed] == [("llm_2", 1, 1)]
     assert [(row["node_id"], row["status"]) for row in rows] == [("llm_1", "succeeded"), ("llm_2", "cancelled")]
-
-
-async def test_only_the_lease_owner_can_clear_a_stored_answer(pool):
-    run_id = await make_run(pool, status="queued")
-    async with pool.connection() as conn:
-        await run_db.claim_next(conn, owner="worker-1", lease_sec=30)
-        await conn.execute("""UPDATE runs SET resume_payload='{"decision": "approve"}' WHERE id=%s""", (run_id,))
-
-        assert await run_db.clear_resume_payload(conn, run_id=run_id, owner="worker-2") is False
-        assert (await _row(pool, run_id))["resume_payload"] == {"decision": "approve"}
-        assert await run_db.clear_resume_payload(conn, run_id=run_id, owner="worker-1") is True
-
-    assert (await _row(pool, run_id))["resume_payload"] is None

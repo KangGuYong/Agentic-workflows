@@ -46,6 +46,7 @@ log = logging.getLogger(__name__)
 TERMINAL = {"run_succeeded", "run_failed", "run_cancelled"}
 PING = ": ping\n\n"
 QUEUE_MAXSIZE = 1000  # bound a stalled client's backlog; see the module docstring for why dropping is safe
+STORED_PAGE_SIZE = 500  # bound each `_stored` round trip; see `_stored_all` for why this must be paged
 
 
 def _sanitize(value: Any) -> Any:
@@ -72,19 +73,47 @@ def format_event(event: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n\n"
 
 
-async def _stored(pool: AsyncConnectionPool, run_id: str, after: int,
-                  before: int | None = None) -> list[dict[str, Any]]:
+async def _stored(pool: AsyncConnectionPool, run_id: str, after: int, before: int | None = None,
+                  *, limit: int = STORED_PAGE_SIZE) -> list[dict[str, Any]]:
+    """One page of stored events, oldest first. Bounded by `limit`: see `_stored_all`, which is what every
+    caller in this module actually uses -- this is not called directly outside this module."""
     query = ("SELECT seq, type, node_id, exec_index, attempt, payload, created_at FROM run_events"
              " WHERE run_id=%s AND seq > %s")
     args: list[Any] = [run_id, after]
     if before is not None:
         query += " AND seq < %s"
         args.append(before)
+    query += " ORDER BY seq LIMIT %s"
+    args.append(limit)
     async with pool.connection() as conn:
-        rows = await (await conn.execute(query + " ORDER BY seq", args)).fetchall()
+        rows = await (await conn.execute(query, args)).fetchall()
     return [{"seq": row["seq"], "runId": run_id, "type": row["type"], "nodeId": row["node_id"],
              "execIndex": row["exec_index"], "attempt": row["attempt"],
              "ts": row["created_at"].isoformat(), "payload": row["payload"] or {}} for row in rows]
+
+
+async def _stored_all(pool: AsyncConnectionPool, run_id: str, after: int, before: int | None = None,
+                      *, page_size: int = STORED_PAGE_SIZE) -> AsyncIterator[dict[str, Any]]:
+    """Every stored event after `after` (and, if given, before `before`), oldest first, paged.
+
+    A single unbounded `SELECT ... WHERE run_id=%s AND seq > %s` (the pre-fix `_stored`) read every
+    matching row into memory in one `fetchall()` before the caller could yield a single byte -- the same
+    class of bug Task 13's review fixed on the sibling `GET /runs/{id}/nodes` route. The engine's
+    recursion limit permits on the order of 20,000 node executions per run, each writing at least two
+    events with previews up to `MAX_EVENT_PREVIEW_BYTES`, so a full replay (`GET /runs/{id}/events` with no
+    `Last-Event-ID`) or a large gap-fill (the `before=` path below) could pull roughly 10**5 rows and
+    hundreds of MB before ever yielding. Looping a bounded `_stored` here keeps each round trip and each
+    batch of rows bounded, while still handing every caller a single ordered stream (A3 of the whole-branch
+    review).
+    """
+    last = after
+    while True:
+        page = await _stored(pool, run_id, last, before, limit=page_size)
+        for event in page:
+            yield event
+            last = event["seq"]
+        if len(page) < page_size:  # a short (or empty) page means there is nothing more to fetch
+            return
 
 
 def _put_dropping_oldest(queue: asyncio.Queue[dict[str, Any]], event: dict[str, Any]) -> None:
@@ -98,7 +127,8 @@ def _put_dropping_oldest(queue: asyncio.Queue[dict[str, Any]], event: dict[str, 
 
 
 async def event_stream(pool: AsyncConnectionPool, redis: Any, run_id: str, *, after: int = 0,
-                       ping_sec: float = 15.0, queue_maxsize: int = QUEUE_MAXSIZE) -> AsyncIterator[str]:
+                       ping_sec: float = 15.0, queue_maxsize: int = QUEUE_MAXSIZE,
+                       page_size: int = STORED_PAGE_SIZE) -> AsyncIterator[str]:
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=queue_maxsize)
     ready = asyncio.Event()
 
@@ -121,7 +151,7 @@ async def event_stream(pool: AsyncConnectionPool, redis: Any, run_id: str, *, af
             await subscriber  # the pump ended before subscribing; surface why instead of streaming blind
 
         last = after
-        for event in await _stored(pool, run_id, after):
+        async for event in _stored_all(pool, run_id, after, page_size=page_size):
             yield format_event(event)
             last = event["seq"]
             if event["type"] in TERMINAL:
@@ -132,7 +162,7 @@ async def event_stream(pool: AsyncConnectionPool, redis: Any, run_id: str, *, af
             except TimeoutError:
                 if subscriber.done():
                     return  # the subscription is gone; end the stream so the client reconnects
-                for missed in await _stored(pool, run_id, last):
+                async for missed in _stored_all(pool, run_id, last, page_size=page_size):
                     yield format_event(missed)
                     last = missed["seq"]
                     if missed["type"] in TERMINAL:
@@ -146,7 +176,7 @@ async def event_stream(pool: AsyncConnectionPool, redis: Any, run_id: str, *, af
             if seq <= last:
                 continue  # already sent -- a duplicate delivery, or a reconnect replaying old ground
             if seq > last + 1:  # a publish never arrived or the queue dropped it: read the missing range
-                for missed in await _stored(pool, run_id, last, before=seq):
+                async for missed in _stored_all(pool, run_id, last, seq, page_size=page_size):
                     yield format_event(missed)
                     last = missed["seq"]
             yield format_event(event)

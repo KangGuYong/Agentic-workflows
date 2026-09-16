@@ -5,7 +5,6 @@ written, so the API and the worker can both write events without colliding, and 
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 
 from psycopg import AsyncCursor
@@ -26,7 +25,15 @@ async def append_event(
     attempt: int | None = None,
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Insert one event and return it in wire form (spec 7.1) for publishing after the commit."""
+    """Insert one event and return it in wire form (spec 7.1) for publishing after the commit.
+
+    `ts` is Postgres's own `created_at` for the row (via `RETURNING`), not `datetime.now(UTC)` taken in
+    this process (A5 of the whole-branch review): the published (live) copy and `events.stream._stored`'s
+    replayed copy of the *same* event must carry the same timestamp. Stamping it here from the caller's
+    clock instead disagreed with `created_at` by however long the transaction took to commit plus any
+    clock skew, so a client that saw an event live and then again after an SSE reconnect saw two different
+    `ts` values for one event.
+    """
     await cursor.execute("UPDATE runs SET event_seq = event_seq + 1 WHERE id = %s RETURNING event_seq", (run_id,))
     row = await cursor.fetchone()
     if row is None:
@@ -34,9 +41,10 @@ async def append_event(
     seq = row["event_seq"]
     await cursor.execute(
         "INSERT INTO run_events (run_id, seq, type, node_id, exec_index, attempt, payload)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        " VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING created_at",
         (run_id, seq, event_type, node_id, exec_index, attempt, Jsonb(payload) if payload is not None else None),
     )
+    inserted = await cursor.fetchone()
     return {
         "seq": seq,
         "runId": run_id,
@@ -44,6 +52,6 @@ async def append_event(
         "nodeId": node_id,
         "execIndex": exec_index,
         "attempt": attempt,
-        "ts": datetime.now(UTC).isoformat(),
+        "ts": inserted["created_at"].isoformat(),
         "payload": payload or {},
     }
