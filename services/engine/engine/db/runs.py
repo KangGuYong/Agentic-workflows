@@ -198,3 +198,56 @@ async def has_checkpoint(conn: AsyncConnection, run_id: str) -> bool:
         "SELECT 1 FROM checkpoints WHERE thread_id=%s LIMIT 1", (str(run_id),)
     )).fetchone()
     return row is not None
+
+
+# ---------------------------------------------------------------- API: resume, retry, cancel (Task 15)
+
+
+async def queue_resume(conn: AsyncConnection, *, run_id: str, answer: dict[str, Any]) -> bool:
+    """Hand a checked approval answer to the worker. `resume_run` takes this row `FOR UPDATE` before
+    calling this, so of two concurrent resumes only one ever sees `status='waiting'` here -- the other's
+    own lock wait ends after this commits, by which point status is already 'queued' and it is refused."""
+    row = await (await conn.execute(
+        "UPDATE runs SET status='queued', resume_payload=%s, updated_at=now()"
+        " WHERE id=%s AND status='waiting' RETURNING id", (Jsonb(answer), run_id),
+    )).fetchone()
+    return row is not None
+
+
+async def queue_retry(conn: AsyncConnection, run_id: str) -> bool:
+    """Requeue a failed run from its last checkpoint.
+
+    `recovery_count` is reset to 0: it caps how many times the reaper will auto-recover a crashed lease
+    before giving up as ENGINE_RECOVERY_EXHAUSTED (worker/reaper.py), and a manual retry is a deliberate
+    new attempt, not a continuation of the attempt that exhausted it -- leaving the old count in place
+    would let one unrelated crash right after the retry fail it again with no recovery budget left.
+    `resume_payload`/`lease_owner`/`lease_expires_at` are already NULL on every path that reaches
+    'failed' (`finish` and the reaper's `_take` both clear them on their terminal write), but this clears
+    them again too rather than leaning on that invariant holding forever.
+    """
+    row = await (await conn.execute(
+        "UPDATE runs SET status='queued', retry_count=retry_count + 1, recovery_count=0, error=NULL,"
+        "   resume_payload=NULL, lease_owner=NULL, lease_expires_at=NULL, finished_at=NULL, updated_at=now()"
+        " WHERE id=%s AND status='failed' RETURNING id", (run_id,),
+    )).fetchone()
+    return row is not None
+
+
+async def cancel_now(conn: AsyncConnection, run_id: str) -> bool:
+    """Queued and waiting runs have no worker holding them, so the API ends them itself (design 5.9)."""
+    row = await (await conn.execute(
+        "UPDATE runs SET status='cancelled', cancel_requested_at=coalesce(cancel_requested_at, now()),"
+        "   finished_at=now(), resume_payload=NULL, updated_at=now()"
+        " WHERE id=%s AND status IN ('queued','waiting') RETURNING id", (run_id,),
+    )).fetchone()
+    return row is not None
+
+
+async def request_cancel(conn: AsyncConnection, run_id: str) -> bool:
+    """A running run has a worker: ask it to stop instead of ending the row here. The worker's own
+    `finish` (lease-fenced) decides the eventual terminal status, same as any other stop reason."""
+    row = await (await conn.execute(
+        "UPDATE runs SET cancel_requested_at=coalesce(cancel_requested_at, now()), updated_at=now()"
+        " WHERE id=%s AND status='running' RETURNING id", (run_id,),
+    )).fetchone()
+    return row is not None

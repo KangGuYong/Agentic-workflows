@@ -4,10 +4,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -19,10 +20,12 @@ from engine.api.errors import ApiError
 from engine.db import runs as run_db
 from engine.db import workflows as workflow_db
 from engine.dsl.models import dsl_hash
+from engine.errors import ErrorCode, NodeError
 from engine.events.publish import RedisPublisher
 from engine.events.stream import event_stream
 from engine.events.writer import append_event
 from engine.jsondata import safe_text
+from engine.nodes.human_approval import resume_output
 from engine.validator import analyze, has_errors
 
 log = logging.getLogger(__name__)
@@ -311,6 +314,112 @@ async def stream_events(run_id: str, request: Request) -> StreamingResponse:
     stream = event_stream(request.app.state.pool, request.app.state.redis, run_id, after=after)
     return StreamingResponse(stream, media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@router.post("/runs/{run_id}/resume", status_code=202)
+async def resume_run(run_id: str, request: Request) -> dict[str, Any]:
+    """Answer a parked approval and requeue the run (design 5.9). The body is untrusted end to end: it
+    already passed `read_json`'s whole-body `check_storable` (Task 11), `reviewedAt` is always overwritten
+    with the server's own clock before anything else looks at it, and `resume_output` below is the single
+    allowlist for what an answer may contain -- an unknown key, an out-of-range value or a type mismatch
+    against the waiting approval is rejected here, before it is ever stored as `resume_payload` or handed
+    back to the node on resume."""
+    body = require_object(await read_json(request))
+    pool = request.app.state.pool
+    async with pool.connection() as conn, conn.transaction():
+        run = await run_db.lock_run(conn, run_id)
+        if run is None:
+            raise ApiError(404, "NOT_FOUND", "실행을 찾을 수 없습니다")
+        if run["status"] != "waiting":
+            raise ApiError(409, "INVALID_STATE_TRANSITION", "승인을 기다리는 실행이 아닙니다")
+        if (body.get("nodeId") != run["waiting_node_id"]
+                or body.get("execIndex") != run["waiting_exec_index"]):
+            raise ApiError(409, "RESUME_TARGET_MISMATCH", "대기 중인 승인과 대상이 다릅니다",
+                           {"nodeId": run["waiting_node_id"], "execIndex": run["waiting_exec_index"]})
+        waiting = await run_db.waiting_payload(conn, run_id, run["waiting_node_id"],
+                                               run["waiting_exec_index"])
+        if waiting is None:
+            raise ApiError(409, "RUN_DATA_EXPIRED", "승인 정보를 찾을 수 없습니다")
+        # reviewedAt is always the server's clock: a client-supplied value is discarded before validation
+        # ever sees it, not merely overridden after (resume_output would otherwise accept any string the
+        # caller sends, since a node has no way to tell a forged timestamp from a real one).
+        answer = {**body, "reviewedAt": datetime.now(UTC).isoformat()}
+        try:
+            resume_output(answer, waiting)  # reject a bad answer here, not after the run resumes
+        except NodeError as exc:
+            raise ApiError(422, "VALIDATION_FAILED", exc.message) from None
+        await run_db.queue_resume(conn, run_id=run_id, answer=answer)
+        event = await append_event(conn.cursor(), run_id, "run_resumed",
+                                   node_id=run["waiting_node_id"], exec_index=run["waiting_exec_index"])
+        await run_db.notify_queued(conn, run_id)
+    await _publish(request, run_id, event)
+    return {"status": "queued"}
+
+
+@router.post("/runs/{run_id}/retry", status_code=202)
+async def retry_run(run_id: str, request: Request) -> dict[str, Any]:
+    """Requeue a failed run from its last checkpoint (design 5.9). The run resumes over SSE only on
+    reconnect: Task 14's stream ends the moment it reads the terminal `run_failed` event, so a client that
+    is still attached when this appends `run_queued` right after it will not see that event on the same
+    connection -- it has to open a new one, the same as any other post-terminal stream read. That is the
+    intended contract (see the Task 14 post-review note); nothing about the stream changes here."""
+    async with request.app.state.pool.connection() as conn, conn.transaction():
+        run = await run_db.lock_run(conn, run_id)
+        if run is None:
+            raise ApiError(404, "NOT_FOUND", "실행을 찾을 수 없습니다")
+        if run["status"] != "failed":
+            raise ApiError(409, "INVALID_STATE_TRANSITION", "실패한 실행만 재시도할 수 있습니다")
+        if not await run_db.has_checkpoint(conn, run_id):
+            raise ApiError(409, "RUN_DATA_EXPIRED", "보존 기간이 지나 재시도할 수 없습니다")
+        await run_db.queue_retry(conn, run_id)
+        event = await append_event(conn.cursor(), run_id, "run_queued", payload={"retry": True})
+        await run_db.notify_queued(conn, run_id)
+    await _publish(request, run_id, event)
+    return {"status": "queued"}
+
+
+@router.post("/runs/{run_id}/cancel", status_code=202)
+async def cancel_run(run_id: str, request: Request) -> dict[str, Any]:
+    """Cancel a run (design 5.9). Queued and waiting runs have no worker holding them, so the API ends
+    them here and now; a running run only gets a request, honoured by the worker's own heartbeat or the
+    Redis fast path below.
+
+    Race safety: this locks the row `FOR UPDATE` before deciding anything, and the worker's `claim_next`
+    locks the same row `FOR UPDATE SKIP LOCKED` when it claims a queued run. Whichever transaction gets
+    the lock first fully decides the outcome before the other can act -- SKIP LOCKED means a claim that
+    loses the race simply treats the row as unavailable and moves on rather than waiting for it, and a
+    cancel that loses the race sees the already-committed 'running' status and falls through to the
+    request-cancel branch instead of `cancel_now`. The run can therefore never end up both `cancelled` and
+    claimed by a worker.
+    """
+    async with request.app.state.pool.connection() as conn, conn.transaction():
+        run = await run_db.lock_run(conn, run_id)
+        if run is None:
+            raise ApiError(404, "NOT_FOUND", "실행을 찾을 수 없습니다")
+        if run["status"] in ("succeeded", "failed", "cancelled"):
+            raise ApiError(409, "INVALID_STATE_TRANSITION", "이미 끝난 실행입니다")
+        if await run_db.cancel_now(conn, run_id):
+            closed = await run_db.close_open_node_runs(conn, run_id, "cancelled")
+            # Same reasoning as Worker._terminal and the reaper: a row left "running" (e.g. a parallel
+            # branch still executing when the other branch parked on the approval this cancel is ending)
+            # gets its own node_failed event, or a run_events replay would show that node running forever.
+            for closed_row in closed:
+                await append_event(conn.cursor(), run_id, "node_failed", node_id=closed_row["node_id"],
+                                   exec_index=closed_row["exec_index"], attempt=closed_row["attempt"],
+                                   payload={"error": {"code": str(ErrorCode.NODE_FAILED),
+                                                       "message": "실행이 취소되었습니다"},
+                                            "willRetry": False})
+            event = await append_event(conn.cursor(), run_id, "run_cancelled")
+            status = "cancelled"
+        else:
+            await run_db.request_cancel(conn, run_id)
+            event = await append_event(conn.cursor(), run_id, "run_cancel_requested")
+            status = "running"  # the worker stops it; the UI shows "취소 중"
+    await _publish(request, run_id, event)
+    if status == "running":  # tell the worker now; the heartbeat poll is the fallback if this is lost
+        with contextlib.suppress(Exception):
+            await RedisPublisher(request.app.state.redis).request_cancel(run_id)
+    return {"status": status}
 
 
 async def _publish(request: Request, run_id: str, event: dict[str, Any]) -> None:
