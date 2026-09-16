@@ -363,3 +363,19 @@ async def test_a_render_deadline_fails_the_node_without_retrying():
 
     assert exc.value.error.code == ErrorCode.TEMPLATE_ERROR
     assert len(recorder.records) == 1  # a deadline is not retryable: it would just happen again
+
+
+async def test_a_render_hook_exception_becomes_a_non_retryable_node_error():
+    async def render(fields, outputs):
+        raise RuntimeError("pool is gone")
+
+    deps, recorder, _ = _deps(ScriptedLLM(["답"]))
+    deps.render = render
+    plan = _plan(LLMNode(), LLM_CONFIG, policy=LLMNode.default_policy)
+
+    with pytest.raises(NodeFailedError) as exc:
+        await _run(plan, deps)
+
+    assert exc.value.error.code == ErrorCode.NODE_FAILED
+    assert "RuntimeError" in exc.value.error.message
+    assert len(recorder.records) == 1  # arbitrary exceptions are not retryable
