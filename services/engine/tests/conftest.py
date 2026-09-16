@@ -81,3 +81,37 @@ async def listen_conn(db_url: str) -> AsyncIterator[AsyncConnection]:
     conn = await AsyncConnection.connect(db_url, autocommit=True, row_factory=dict_row)
     yield conn
     await conn.close()
+
+
+async def until(check, *, timeout: float = 15.0, interval: float = 0.05):
+    """Wait for `check()` (async) to return something truthy, then return it."""
+    import asyncio
+
+    async with asyncio.timeout(timeout):
+        while True:
+            value = await check()
+            if value:
+                return value
+            await asyncio.sleep(interval)
+
+
+@pytest_asyncio.fixture
+async def worker_factory(pool, redis, db_url):
+    """Builds workers sharing the test's pool and Redis; every worker is stopped at teardown."""
+    from engine.config import load_config
+    from engine.worker.worker import Worker
+
+    started: list = []
+
+    async def make(llm, *, owner: str = "worker-1", **overrides):
+        import dataclasses
+
+        config = dataclasses.replace(load_config(), claim_poll_sec=0.2, heartbeat_sec=0.2, **overrides)
+        worker = Worker(config, pool, redis, owner=owner, llm=llm)
+        await worker.start()
+        started.append(worker)
+        return worker
+
+    yield make
+    for worker in started:
+        await worker.stop()
