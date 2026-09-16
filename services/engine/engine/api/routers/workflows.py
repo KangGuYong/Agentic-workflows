@@ -13,6 +13,7 @@ from engine.api.errors import ApiError
 from engine.db import workflows as workflow_db
 from engine.jsondata import safe_text
 from engine.validator import MAX_DSL_BYTES, analyze
+from engine.validator.issues import Issue, error
 
 router = APIRouter()
 
@@ -60,9 +61,25 @@ async def _analysis(request: Request, dsl: dict[str, Any]):
     return await asyncio.to_thread(analyze, dsl, request.app.state.registry)
 
 
-def _check_size(dsl: dict[str, Any]) -> None:
+def _oversized_issue(dsl: dict[str, Any]) -> Issue | None:
+    """The same check `analyze()` eventually performs, run on the raw draft before paying for it (A1). A
+    hostile draft up to max_body_bytes (1,000,000B) clears read_json's own gate but is already more than
+    MAX_DSL_BYTES (524,288B) ever needs to be: analyze() only rejects it after WorkflowDSL.model_validate of
+    up to ~15k nodes, two model_dumps and a json.dumps -- on a 1MB body that's ~236ms of CPU inside
+    asyncio.to_thread's executor (min(32, cpu+4) threads, unbounded queue) versus ~9ms for this raw byte
+    count, and that executor can hold the GIL long enough meanwhile to stall /healthz and Task 14's SSE
+    streams. The message text depends only on the MAX_DSL_BYTES constant, not on this draft's actual size,
+    so it is byte-for-byte identical to the issue analyze() would have produced -- a client cannot tell
+    which path answered."""
     if len(json.dumps(dsl, ensure_ascii=False).encode("utf-8")) > MAX_DSL_BYTES:
-        raise ApiError(422, "LIMIT_EXCEEDED", f"워크플로가 너무 큽니다 (최대 {MAX_DSL_BYTES // 1024}KB)")
+        return error("LIMIT_EXCEEDED", f"워크플로가 너무 큽니다 (최대 {MAX_DSL_BYTES // 1024}KB)")
+    return None
+
+
+def _check_size(dsl: dict[str, Any]) -> None:
+    issue = _oversized_issue(dsl)
+    if issue is not None:
+        raise ApiError(422, issue.code, issue.message)
 
 
 async def _require(conn, workflow_id: str) -> dict[str, Any]:
@@ -106,7 +123,11 @@ async def save_workflow(workflow_id: str, request: Request) -> dict[str, Any]:
     _check_name(name)
     _check_size(draft)  # a draft may be invalid (the editor saves work in progress) but not oversized
     async with request.app.state.pool.connection() as conn, conn.transaction():
-        await _require(conn, workflow_id)
+        # No pre-CAS read (A3): it was dead weight. A missing workflow_id makes the CAS UPDATE below match
+        # zero rows exactly like a stale revision does, and the 404 that a pre-read would have produced here
+        # is already produced by the post-CAS re-read's own _require call a few lines down -- so dropping it
+        # changes nothing observable while saving one SELECT on every autosave (the editor calls this every
+        # ~1s).
         saved = await workflow_db.save_draft(conn, workflow_id=workflow_id, draft=draft,
                                              revision=revision, name=name)
         if saved is None:
@@ -146,14 +167,16 @@ async def validate_workflow(workflow_id: str, request: Request) -> dict[str, Any
     draft = field(body, "draftDsl", dict)
     async with request.app.state.pool.connection() as conn:
         await _require(conn, workflow_id)
-    # No _check_size pre-check here (unlike save_workflow): analyze() already measures and reports an
-    # oversized DSL as an ordinary LIMIT_EXCEEDED issue in the 200 response below, using its own normalized
-    # representation of the draft (post model_validate, defaults excluded) rather than the raw dict
-    # _check_size would measure. Calling _check_size here too would be a second, independent size check on
-    # a different representation of the same MAX_DSL_BYTES threshold: whenever the two happened to
-    # disagree, this endpoint's answer would depend on which check ran, contradicting /validate's contract
-    # to always report problems as issues in a 200, never a save. Letting analyze() be the only authority
-    # for /validate removes that possibility -- "too big" is reported the same way regardless of exactly
-    # where analyze() notices it.
+    # Cheap gate before the expensive path (A1): analyze() would reach the same LIMIT_EXCEEDED issue only
+    # after WorkflowDSL.model_validate of the whole draft, two model_dumps and a json.dumps -- a ~26x CPU
+    # amplifier on a hostile body measured at ~236ms versus ~9ms for this raw byte count, run inside
+    # asyncio.to_thread's executor which can hold the GIL long enough meanwhile to stall /healthz and Task
+    # 14's SSE streams. _oversized_issue reuses the identical MAX_DSL_BYTES threshold and produces the exact
+    # Issue analyze() would have (the message depends only on the constant, not the measurement), so
+    # /validate's contract -- always a 200 with issues, never a save -- and its answer for "too big" are both
+    # unchanged; only which code path notices it differs, and a client cannot tell which one did.
+    oversized = _oversized_issue(draft)
+    if oversized is not None:
+        return {"issues": [oversized.to_dict()]}
     analysis = await _analysis(request, draft)
     return {"issues": [issue.to_dict() for issue in analysis.issues]}

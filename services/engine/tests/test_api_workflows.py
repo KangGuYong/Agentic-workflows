@@ -6,9 +6,12 @@ from datetime import datetime, timezone
 
 import pytest
 from psycopg import errors as pg_errors
+from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
+import engine.api.routers.workflows as workflows_router
 import engine.db.workflows as workflow_db
+from engine.validator import analyze
 from tests.factories import WORKSPACE
 
 CHAIN = {
@@ -194,47 +197,41 @@ async def test_validate_reports_an_oversized_draft_as_an_issue_not_a_hard_error(
 
 
 async def test_a_concurrent_save_reports_the_revision_that_actually_won(api, monkeypatch):
-    """Two clients both read revision 1 and race to save; the loser's 409 must describe whichever save
-    actually committed (the current state), not whatever the loser itself saw before its own CAS was
-    attempted -- that read can be stale by the time the CAS fails (see save_workflow's comment).
+    """Two clients both attempt to save at revision 1; only one CAS can win. The loser's 409 must describe
+    whatever the winner actually committed -- built from a fresh post-CAS read (see the `current = await
+    _require(...)` line in save_workflow), never from a stale cached view.
 
-    Plain asyncio.gather on the two requests is not a reliable way to force this: on a fast local Postgres
-    one request can run start-to-finish (read, CAS, commit) before the other's own pre-CAS read even fires,
-    which never exercises the stale-read path at all. Instead this pins the exact interleaving that does:
-    both requests' pre-CAS reads complete (both see revision 1, nothing committed yet) before either is
-    allowed to attempt its CAS, and the second CAS is held back until the first has completed its own."""
+    save_workflow has no pre-CAS read any more (A3: it was dead weight -- the 404 case it existed for is
+    already produced by the post-CAS re-read when the CAS matches zero rows for a missing id, exactly as it
+    does for a stale revision). So the only coordination point left is workflow_db.save_draft itself: this
+    pins the first caller to reach it as the winner and holds the second back until the first has committed,
+    guaranteeing a genuine CAS race every run instead of hoping asyncio.gather schedules one.
+
+    Every wait is bounded by asyncio.timeout and fails the test with a timeout error rather than hanging --
+    there is no pytest-timeout in this project, so an unbounded wait here would be a stuck CI job forever."""
     created = await _create(api)
-    real_get, real_save_draft = workflow_db.get, workflow_db.save_draft
-    read_count = 0
-    both_read = asyncio.Event()
-    save_order: list[str] = []
-    winner_committed = asyncio.Event()
-
-    async def patched_get(conn, workflow_id):
-        nonlocal read_count
-        result = await real_get(conn, workflow_id)
-        read_count += 1
-        if read_count >= 2:
-            both_read.set()
-        return result
+    real_save_draft = workflow_db.save_draft
+    first_done = asyncio.Event()
+    order: list[str] = []
 
     async def patched_save_draft(conn, **kwargs):
-        await both_read.wait()
-        save_order.append(kwargs["draft"]["which"])
-        if len(save_order) == 1:
-            result = await real_save_draft(conn, **kwargs)
-            winner_committed.set()
-            return result
-        await winner_committed.wait()
-        return await real_save_draft(conn, **kwargs)
+        async with asyncio.timeout(5):
+            is_first = not order
+            order.append(kwargs["draft"]["which"])
+            if is_first:
+                result = await real_save_draft(conn, **kwargs)
+                first_done.set()
+                return result
+            await first_done.wait()
+            return await real_save_draft(conn, **kwargs)
 
-    monkeypatch.setattr(workflow_db, "get", patched_get)
     monkeypatch.setattr(workflow_db, "save_draft", patched_save_draft)
 
-    responses = await asyncio.gather(
-        api.put(f"/workflows/{created['id']}", json={"draftDsl": {"which": "A"}, "revision": 1}),
-        api.put(f"/workflows/{created['id']}", json={"draftDsl": {"which": "B"}, "revision": 1}),
-    )
+    async with asyncio.timeout(10):
+        responses = await asyncio.gather(
+            api.put(f"/workflows/{created['id']}", json={"draftDsl": {"which": "A"}, "revision": 1}),
+            api.put(f"/workflows/{created['id']}", json={"draftDsl": {"which": "B"}, "revision": 1}),
+        )
 
     winners = [r for r in responses if r.status_code == 200]
     losers = [r for r in responses if r.status_code == 409]
@@ -253,14 +250,25 @@ async def test_delete_workflow_locks_the_row_instead_of_a_plain_read(api, monkey
     gap). This pins the implementation choice directly, since a real end-to-end race between an HTTP DELETE
     and a raw INSERT is not reliably reproducible in-process (asyncio consistently schedules the DELETE's
     own resumption ahead of a competing task's first query in this harness, regardless of locking, so such
-    a race would pass even against the buggy plain-read version and prove nothing)."""
+    a race would pass even against the buggy plain-read version and prove nothing).
+
+    A second, more direct gap this pins: the pool is autocommit (engine/db/pool.py), so `FOR UPDATE` only
+    holds a lock for as long as it runs inside an explicit transaction. If delete_workflow's
+    `conn.transaction()` were ever removed, the SELECT ... FOR UPDATE would commit -- and release its lock
+    -- immediately after that one statement, before has_active_runs even runs, making the whole FOR UPDATE a
+    no-op while every one of these assertions (including the 204 below) still passes. Recording the
+    connection's transaction_status right after the lock call catches that: it must be INTRANS (inside an
+    still-open transaction), not IDLE (autocommitted already)."""
     created = await _create(api)
     real_lock, real_get = workflow_db.lock, workflow_db.get
     calls: list[str] = []
+    statuses: list[TransactionStatus] = []
 
     async def spy_lock(conn, workflow_id):
         calls.append("lock")
-        return await real_lock(conn, workflow_id)
+        row = await real_lock(conn, workflow_id)
+        statuses.append(conn.info.transaction_status)
+        return row
 
     async def spy_get(conn, workflow_id):
         calls.append("get")
@@ -272,6 +280,7 @@ async def test_delete_workflow_locks_the_row_instead_of_a_plain_read(api, monkey
     assert (await api.delete(f"/workflows/{created['id']}")).status_code == 204
 
     assert calls == ["lock"]
+    assert statuses == [TransactionStatus.INTRANS]
 
 
 async def test_a_run_insert_blocks_on_the_workflow_lock_and_fails_once_it_is_gone(api, pool):
@@ -348,3 +357,105 @@ async def test_a_bad_draft_written_by_an_older_path_does_not_break_the_409_body(
 
     assert response.status_code == 409
     assert "�" in response.json()["error"]["details"]["draftDsl"]["note"]
+
+
+# ---------------------------------------------------------------- adversarial-review follow-ups (B1-B6)
+
+
+async def test_validate_runs_analysis_off_the_event_loop(api, monkeypatch):
+    """Design 8.1: validation is CPU work on untrusted input and must stay off the event loop. Spy on
+    asyncio.to_thread itself (not on `analyze`, which would pass whether or not it actually ran in a
+    thread) so a regression that calls analyze() directly on the loop is caught."""
+    created = await _create(api)
+    real_to_thread = asyncio.to_thread
+    calls: list = []
+
+    async def spy_to_thread(func, *args, **kwargs):
+        calls.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", spy_to_thread)
+
+    response = await api.post(f"/workflows/{created['id']}/validate", json={"draftDsl": CHAIN})
+
+    assert response.status_code == 200
+    assert calls == [analyze]
+
+
+async def test_a_name_over_200_characters_is_rejected(api):
+    response = await api.post("/workflows", json={"name": "가" * 201})
+
+    assert response.status_code == 422 and response.json()["error"]["code"] == "REQUEST_ERROR"
+
+
+async def test_a_well_formed_but_unknown_id_is_404_on_every_route(api):
+    """Unlike the not-a-uuid-at-all case (which _workflow_id rejects before any query), a syntactically
+    valid UUID that matches no row must still reach _require's 404 on every route -- validate_workflow's own
+    _require included (it is untouched by A3, which only removed save_workflow's redundant pre-CAS read)."""
+    missing = str(uuid.uuid4())
+    empty_dsl = {"version": "1", "nodes": [], "edges": []}
+
+    get_response = await api.get(f"/workflows/{missing}")
+    put_response = await api.put(f"/workflows/{missing}", json={"draftDsl": empty_dsl, "revision": 1})
+    delete_response = await api.delete(f"/workflows/{missing}")
+    validate_response = await api.post(f"/workflows/{missing}/validate", json={"draftDsl": empty_dsl})
+
+    for response in (get_response, put_response, delete_response, validate_response):
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "NOT_FOUND"
+
+
+async def test_list_all_returns_every_workflow_for_the_workspace_most_recently_updated_first(api, pool):
+    """A single-workflow list test can't catch a wrong workspace filter, a `LIMIT 1`, or an ASC instead of
+    DESC ordering -- all three still pass it. This creates several, touches one after the rest so its
+    updated_at is unambiguously newest, and plants a row in a different workspace directly (workspace_id has
+    no FK, and the API only ever writes one workspace) to prove the WHERE clause is still there."""
+    first = await _create(api, name="a")
+    second = await _create(api, name="b")
+    third = await _create(api, name="c")
+    empty_dsl = {"version": "1", "nodes": [], "edges": []}
+    await api.put(f"/workflows/{first['id']}", json={"draftDsl": empty_dsl, "revision": 1})
+
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO workflows (id, workspace_id, name, draft_dsl) VALUES (%s, %s, %s, %s)",
+            (str(uuid.uuid4()), str(uuid.uuid4()), "other workspace", Jsonb(empty_dsl)))
+
+    listed = (await api.get("/workflows")).json()["workflows"]
+
+    assert [item["id"] for item in listed] == [first["id"], third["id"], second["id"]]
+
+
+async def test_a_draft_dsl_that_is_not_an_object_is_rejected(api):
+    created = await _create(api)
+
+    save_string = await api.put(f"/workflows/{created['id']}", json={"draftDsl": "not-an-object", "revision": 1})
+    save_list = await api.put(f"/workflows/{created['id']}", json={"draftDsl": [], "revision": 1})
+    validate_string = await api.post(f"/workflows/{created['id']}/validate", json={"draftDsl": "nope"})
+    validate_list = await api.post(f"/workflows/{created['id']}/validate", json={"draftDsl": []})
+
+    for response in (save_string, save_list, validate_string, validate_list):
+        assert response.status_code == 422 and response.json()["error"]["code"] == "REQUEST_ERROR"
+
+
+async def test_validate_rejects_an_oversized_draft_without_running_analyze(api, monkeypatch):
+    """Covers A1: a draft over MAX_DSL_BYTES still gets a 200 with a LIMIT_EXCEEDED issue, but by the cheap
+    pre-check, not by paying for a full analyze() call -- spying on the module's own `analyze` reference
+    (what _analysis actually calls) proves the slow path never ran."""
+    created = await _create(api)
+    huge = {"version": "1", "nodes": [{"id": "start", "type": "start", "label": "x" * 600_000}], "edges": []}
+    calls: list = []
+    real_analyze = workflows_router.analyze
+
+    def spy_analyze(*args, **kwargs):
+        calls.append(args)
+        return real_analyze(*args, **kwargs)
+
+    monkeypatch.setattr(workflows_router, "analyze", spy_analyze)
+
+    response = await api.post(f"/workflows/{created['id']}/validate", json={"draftDsl": huge})
+
+    assert response.status_code == 200
+    codes = {issue["code"] for issue in response.json()["issues"]}
+    assert "LIMIT_EXCEEDED" in codes
+    assert calls == []
