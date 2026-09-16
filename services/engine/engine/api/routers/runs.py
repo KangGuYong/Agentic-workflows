@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import contextlib
 import json
 import logging
 import uuid
@@ -324,6 +323,7 @@ async def resume_run(run_id: str, request: Request) -> dict[str, Any]:
     allowlist for what an answer may contain -- an unknown key, an out-of-range value or a type mismatch
     against the waiting approval is rejected here, before it is ever stored as `resume_payload` or handed
     back to the node on resume."""
+    run_id = _run_id(run_id)  # same guard as every other route: a non-UUID id must 404, not 500 (A1)
     body = require_object(await read_json(request))
     pool = request.app.state.pool
     async with pool.connection() as conn, conn.transaction():
@@ -363,6 +363,7 @@ async def retry_run(run_id: str, request: Request) -> dict[str, Any]:
     is still attached when this appends `run_queued` right after it will not see that event on the same
     connection -- it has to open a new one, the same as any other post-terminal stream read. That is the
     intended contract (see the Task 14 post-review note); nothing about the stream changes here."""
+    run_id = _run_id(run_id)  # same guard as every other route: a non-UUID id must 404, not 500 (A1)
     async with request.app.state.pool.connection() as conn, conn.transaction():
         run = await run_db.lock_run(conn, run_id)
         if run is None:
@@ -370,7 +371,15 @@ async def retry_run(run_id: str, request: Request) -> dict[str, Any]:
         if run["status"] != "failed":
             raise ApiError(409, "INVALID_STATE_TRANSITION", "실패한 실행만 재시도할 수 있습니다")
         if not await run_db.has_checkpoint(conn, run_id):
-            raise ApiError(409, "RUN_DATA_EXPIRED", "보존 기간이 지나 재시도할 수 없습니다")
+            # Both branches land on the same 409: a compile failure, a deleted stored version, or inputs
+            # rejected at `start` never write a checkpoint at all (execute_run never calls graph.ainvoke on
+            # any of those paths), so "retention period expired" is simply false for them -- the message
+            # must say which one actually happened (A4).
+            if await run_db.has_node_runs(conn, run_id):
+                message = "보존 기간이 지나 재시도할 수 없습니다"
+            else:
+                message = "재시도할 실행 데이터가 없습니다"
+            raise ApiError(409, "RUN_DATA_EXPIRED", message)
         await run_db.queue_retry(conn, run_id)
         event = await append_event(conn.cursor(), run_id, "run_queued", payload={"retry": True})
         await run_db.notify_queued(conn, run_id)
@@ -392,6 +401,7 @@ async def cancel_run(run_id: str, request: Request) -> dict[str, Any]:
     request-cancel branch instead of `cancel_now`. The run can therefore never end up both `cancelled` and
     claimed by a worker.
     """
+    run_id = _run_id(run_id)  # same guard as every other route: a non-UUID id must 404, not 500 (A1)
     async with request.app.state.pool.connection() as conn, conn.transaction():
         run = await run_db.lock_run(conn, run_id)
         if run is None:
@@ -417,8 +427,14 @@ async def cancel_run(run_id: str, request: Request) -> dict[str, Any]:
             status = "running"  # the worker stops it; the UI shows "취소 중"
     await _publish(request, run_id, event)
     if status == "running":  # tell the worker now; the heartbeat poll is the fallback if this is lost
-        with contextlib.suppress(Exception):
+        try:
             await RedisPublisher(request.app.state.redis).request_cancel(run_id)
+        except Exception:
+            # Same reasoning as `_publish`: the request is already committed to `runs.cancel_requested_at`,
+            # so losing this only delays the worker noticing until its next heartbeat tick (a full
+            # `heartbeat_sec` in production) instead of ending it here silently, the way a bare
+            # `contextlib.suppress(Exception)` used to.
+            log.warning("publishing cancel request failed for run %s", run_id, exc_info=True)
     return {"status": status}
 
 

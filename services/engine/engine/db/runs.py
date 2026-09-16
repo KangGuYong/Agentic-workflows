@@ -200,15 +200,33 @@ async def has_checkpoint(conn: AsyncConnection, run_id: str) -> bool:
     return row is not None
 
 
+async def has_node_runs(conn: AsyncConnection, run_id: str) -> bool:
+    """Whether this run ever got far enough to execute a node. `execute_run` never calls
+    `graph.ainvoke` -- so no checkpoint is ever written -- on three paths: a compile failure, a stored
+    version that no longer exists, and inputs rejected by `check_storable` at `start`. A caller deciding
+    why `has_checkpoint` came back False (retry_run's 409) uses this to tell "never had one" apart from
+    "had one, now gone" (see `retry_run`)."""
+    row = await (await conn.execute(
+        "SELECT 1 FROM node_runs WHERE run_id=%s LIMIT 1", (run_id,)
+    )).fetchone()
+    return row is not None
+
+
 # ---------------------------------------------------------------- API: resume, retry, cancel (Task 15)
 
 
 async def queue_resume(conn: AsyncConnection, *, run_id: str, answer: dict[str, Any]) -> bool:
     """Hand a checked approval answer to the worker. `resume_run` takes this row `FOR UPDATE` before
     calling this, so of two concurrent resumes only one ever sees `status='waiting'` here -- the other's
-    own lock wait ends after this commits, by which point status is already 'queued' and it is refused."""
+    own lock wait ends after this commits, by which point status is already 'queued' and it is refused.
+
+    `cancel_requested_at` is cleared: a run parks on an approval with the flag still set when a cancel's
+    Redis publish is lost and the node happens to park before the next heartbeat tick ever reads it (the
+    worker already released the lease via `set_waiting`, so nothing else clears it). Left in place, the
+    requeued run would come back reporting `cancelRequested: true` on an answer the reviewer just
+    submitted, and the *next* run this row's lease owner heartbeats would read it as its own cancel."""
     row = await (await conn.execute(
-        "UPDATE runs SET status='queued', resume_payload=%s, updated_at=now()"
+        "UPDATE runs SET status='queued', resume_payload=%s, cancel_requested_at=NULL, updated_at=now()"
         " WHERE id=%s AND status='waiting' RETURNING id", (Jsonb(answer), run_id),
     )).fetchone()
     return row is not None
@@ -221,13 +239,27 @@ async def queue_retry(conn: AsyncConnection, run_id: str) -> bool:
     before giving up as ENGINE_RECOVERY_EXHAUSTED (worker/reaper.py), and a manual retry is a deliberate
     new attempt, not a continuation of the attempt that exhausted it -- leaving the old count in place
     would let one unrelated crash right after the retry fail it again with no recovery budget left.
+
+    `active_ms` is reset to 0 for the same reason: it is cumulative across a run's whole lifetime
+    (`heartbeat` only ever adds to it) and `_heartbeat` fails the run once it exceeds `run_max_active_ms`,
+    so a run retried without resetting it would fail with RUN_TIMEOUT on its very first heartbeat tick --
+    forever, since nothing else ever lowers it. A deliberate human retry is exactly the "start the clock
+    over" case that column exists to distinguish from a crash recovery (which does not reset it).
+
+    `cancel_requested_at` is cleared for the same reason as `queue_resume`: a running node can fail for
+    its own reason inside the heartbeat window after a cancel was requested but before the worker acted on
+    it, leaving the flag set on the now-`failed` row. Left in place, the retried run would report
+    `cancelRequested: true` immediately after a retry nobody asked to cancel, and the next heartbeat tick
+    would read it as authoritative and cancel the attempt the caller just asked for.
+
     `resume_payload`/`lease_owner`/`lease_expires_at` are already NULL on every path that reaches
     'failed' (`finish` and the reaper's `_take` both clear them on their terminal write), but this clears
     them again too rather than leaning on that invariant holding forever.
     """
     row = await (await conn.execute(
-        "UPDATE runs SET status='queued', retry_count=retry_count + 1, recovery_count=0, error=NULL,"
-        "   resume_payload=NULL, lease_owner=NULL, lease_expires_at=NULL, finished_at=NULL, updated_at=now()"
+        "UPDATE runs SET status='queued', retry_count=retry_count + 1, recovery_count=0, active_ms=0,"
+        "   error=NULL, cancel_requested_at=NULL, resume_payload=NULL, lease_owner=NULL,"
+        "   lease_expires_at=NULL, finished_at=NULL, updated_at=now()"
         " WHERE id=%s AND status='failed' RETURNING id", (run_id,),
     )).fetchone()
     return row is not None
