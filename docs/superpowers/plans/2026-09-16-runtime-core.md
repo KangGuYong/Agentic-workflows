@@ -2191,6 +2191,15 @@ git add services/engine/engine/db/runs.py services/engine/tests/test_db_runs.py
 git commit -m "feat(engine): add run claiming, lease and transition queries"
 ```
 
+> **Post-review note (Task 6, as implemented):** commits `1f51dd5` and `d280909`.
+>
+> - The plan's first claim test compared psycopg's `uuid.UUID` to a `str` and could never pass; ids come back as UUID objects from `RETURNING *`, so every caller that sends one to a client must wrap it in `str()`.
+> - The review showed the suite did not actually test the claim: deleting `FOR UPDATE SKIP LOCKED` left all 693 tests green while 8 claimers took 20 runs 67 times, because two coroutines on one pool are serialised by asyncio. A contention test now runs 8 claimers on independent connections and asserts each run is claimed exactly once; it fails without the clause.
+> - `clear_resume_payload` was the one unfenced write to `runs`. A stalled worker could have cleared the answer a new owner was about to use, so the reviewer's approval would have been asked for twice. It now takes the owner and returns whether it applied, like its siblings. `expire_lease` reports the same way, and `finish` only accepts the three terminal statuses.
+> - Verified: `NOTIFY` inside a rolled-back transaction delivers nothing and the same connection's committed one arrives; a non-owner changes no column in any helper; `close_open_node_runs` leaves finished attempts alone.
+>
+> Suite: 696.
+
 ---
 
 ## Task 7: The worker — claim, execute, finish
@@ -2497,7 +2506,7 @@ class Worker:
         except ResumeRejected as exc:  # the API checks first, so this is a stale payload
             log.warning("resume rejected for run %s: %s", run_id, exc)
             async with self._pool.connection() as conn:
-                await run_db.clear_resume_payload(conn, run_id)
+                await run_db.clear_resume_payload(conn, run_id=run_id, owner=self.owner)
             return
         except (EngineFault, Exception) as exc:  # noqa: BLE001 - infrastructure problem: let recovery retry
             log.error("run %s aborted: %s", run_id, type(exc).__name__, exc_info=True)

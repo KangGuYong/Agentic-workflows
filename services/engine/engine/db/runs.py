@@ -5,7 +5,7 @@ Callers manage transactions; these helpers never commit on their own.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
@@ -44,7 +44,8 @@ async def heartbeat(conn: AsyncConnection, *, run_id: str, owner: str, lease_sec
     )).fetchone()
 
 
-async def finish(conn: AsyncConnection, *, run_id: str, owner: str, status: str,
+async def finish(conn: AsyncConnection, *, run_id: str, owner: str,
+                 status: Literal["succeeded", "failed", "cancelled"],
                  outputs: dict[str, Any] | None = None, error: dict[str, Any] | None = None,
                  clear_inputs: bool = False) -> bool:
     """Terminal transition. False means this worker no longer owns the run and wrote nothing."""
@@ -72,17 +73,26 @@ async def set_waiting(conn: AsyncConnection, *, run_id: str, owner: str, node_id
     return row is not None
 
 
-async def expire_lease(conn: AsyncConnection, *, run_id: str, owner: str) -> None:
-    """Hand the run back for recovery after an engine fault: the reaper picks it up on its next pass."""
-    await conn.execute(
-        "UPDATE runs SET lease_expires_at=now(), updated_at=now() WHERE id=%s AND lease_owner=%s",
-        (run_id, owner),
-    )
+async def expire_lease(conn: AsyncConnection, *, run_id: str, owner: str) -> bool:
+    """Hand the run back for recovery after an engine fault: the reaper picks it up on its next pass.
+    False means the lease was already gone, so there was nothing to hand back."""
+    row = await (await conn.execute(
+        "UPDATE runs SET lease_expires_at=now(), updated_at=now()"
+        " WHERE id=%s AND lease_owner=%s RETURNING id", (run_id, owner),
+    )).fetchone()
+    return row is not None
 
 
-async def clear_resume_payload(conn: AsyncConnection, run_id: str) -> None:
-    """A stored answer must not survive the invocation that used it, whatever its outcome."""
-    await conn.execute("UPDATE runs SET resume_payload=NULL WHERE id=%s", (run_id,))
+async def clear_resume_payload(conn: AsyncConnection, *, run_id: str, owner: str) -> bool:
+    """A stored answer must not survive the invocation that used it, whatever its outcome.
+
+    Fenced like every other worker write: a worker that lost the run must not clear an answer the new
+    owner is about to use, or the reviewer would be asked to approve the same step twice.
+    """
+    row = await (await conn.execute(
+        "UPDATE runs SET resume_payload=NULL WHERE id=%s AND lease_owner=%s RETURNING id", (run_id, owner),
+    )).fetchone()
+    return row is not None
 
 
 async def close_open_node_runs(conn: AsyncConnection, run_id: str, status: str) -> int:

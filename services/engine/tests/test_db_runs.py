@@ -109,3 +109,59 @@ async def test_notify_wakes_a_listener(pool, listen_conn):
     async with asyncio.timeout(5):
         async for _ in listen_conn.notifies(stop_after=1):
             pass
+
+
+async def test_many_workers_racing_claim_each_run_exactly_once(db_url, pool):
+    """Real contention on independent connections: this is what FOR UPDATE SKIP LOCKED is for."""
+    from psycopg import AsyncConnection
+    from psycopg.rows import dict_row
+
+    runs = {await make_run(pool, status="queued") for _ in range(20)}
+
+    async def claimer(owner: str) -> list[str]:
+        taken: list[str] = []
+        conn = await AsyncConnection.connect(db_url, autocommit=True, row_factory=dict_row)
+        try:
+            while True:
+                row = await run_db.claim_next(conn, owner=owner, lease_sec=30)
+                if row is None:
+                    return taken
+                taken.append(str(row["id"]))
+        finally:
+            await conn.close()
+
+    results = await asyncio.gather(*(claimer(f"worker-{index}") for index in range(8)))
+
+    claimed = [run_id for taken in results for run_id in taken]
+    assert sorted(claimed) == sorted(runs)  # every run once, none skipped, none twice
+
+
+async def test_closing_open_attempts_leaves_finished_ones_alone(pool):
+    run_id = await make_run(pool, status="running")
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO node_runs (id, run_id, node_id, exec_index, attempt, status, finished_at)"
+            " VALUES (gen_random_uuid(), %s, 'llm_1', 1, 1, 'succeeded', now())", (run_id,))
+        await conn.execute(
+            "INSERT INTO node_runs (id, run_id, node_id, exec_index, attempt, status)"
+            " VALUES (gen_random_uuid(), %s, 'llm_2', 1, 1, 'running')", (run_id,))
+
+        closed = await run_db.close_open_node_runs(conn, run_id, "cancelled")
+
+        rows = await (await conn.execute(
+            "SELECT node_id, status FROM node_runs WHERE run_id=%s ORDER BY node_id", (run_id,))).fetchall()
+    assert closed == 1
+    assert [(row["node_id"], row["status"]) for row in rows] == [("llm_1", "succeeded"), ("llm_2", "cancelled")]
+
+
+async def test_only_the_lease_owner_can_clear_a_stored_answer(pool):
+    run_id = await make_run(pool, status="queued")
+    async with pool.connection() as conn:
+        await run_db.claim_next(conn, owner="worker-1", lease_sec=30)
+        await conn.execute("""UPDATE runs SET resume_payload='{"decision": "approve"}' WHERE id=%s""", (run_id,))
+
+        assert await run_db.clear_resume_payload(conn, run_id=run_id, owner="worker-2") is False
+        assert (await _row(pool, run_id))["resume_payload"] == {"decision": "approve"}
+        assert await run_db.clear_resume_payload(conn, run_id=run_id, owner="worker-1") is True
+
+    assert (await _row(pool, run_id))["resume_payload"] is None
