@@ -2774,6 +2774,18 @@ git add services/engine/engine/worker/worker.py services/engine/engine/errors.py
 git commit -m "feat(engine): hold the run lease, honour cancels and bound active time"
 ```
 
+> **Post-review note (Task 8, as implemented):** commits `fd11f01` and `3b75d87`.
+>
+> - The plan's cancel branch sets only `guard.cancel()`, and its own prose says "`RunCancelled` raised by the guard reaches `execute_run`". That is only true at a node boundary — `guard.check()` runs at node entry and between retries, never during a node's own call — so the plan's test could not pass with the plan's code: `_SlowLLM` sleeps 30 s against a 15 s `until`. The heartbeat now cancels the run's task as well, for a cancel, a timeout **and** a lost lease.
+> - The lost lease was the dangerous one. `lose_lease()` alone let the old owner finish the in-flight node and write `node_runs` rows, events and checkpoint rows for the same `thread_id` the new owner was executing from — only `runs` is fenced, the recorder and the checkpointer are not. The overlap lasted as long as the node did.
+> - `_heartbeat` had no error boundary: one transient database error ended it silently, leaving a healthy run with an expiring lease for the reaper to steal. `finally: beat.cancel()` also ran *after* the except bodies, so a beat could re-extend the lease the infrastructure-failure path had just handed back (design 6.4 stops the heartbeat first) and could leave a stale `_timed_out` entry that made a later claim of the same run report `RUN_TIMEOUT` on shutdown.
+> - Classification now reads the authoritative fact. `guard.cancelled` is set by the Redis channel alone, so a stale control message turned any later shutdown into an irreversible `cancelled` write on a run whose `cancel_requested_at` was NULL; a `_cancelled` set filled only from the heartbeat's own `cancel_requested_at` replaces it.
+> - A mid-node cancel left its `node_runs` row closed but silent, so a consumer replaying `run_events` saw the node running forever. `close_open_node_runs` now returns the rows it closed and `_terminal` appends a matching `node_failed` for each, in the same transaction.
+> - Also: `active_ms` counts elapsed time rather than the nominal interval, the heartbeat starts at the top of `_run` so a slow compile is covered, `uncancel()` was a no-op and is gone, and `_control_loop` cannot busy-spin.
+> - Six of nine mutations survived the plan's three tests, including an unfenced heartbeat and never spawning `_control_loop`; `test_a_worker_that_lost_its_lease_writes_nothing` was vacuous because its slow LLM raised at a node boundary. Seven tests replace them, covering a stolen lease mid-node, a Redis-only cancel, a shutdown after one, a transient heartbeat failure, the lease expiry ordering, the bookkeeping sets and the closing node event.
+>
+> Suite: 718.
+
 ---
 
 ## Task 9: The reaper
