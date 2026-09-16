@@ -66,13 +66,14 @@ deploy/docker-compose.dev.yml postgres + redis for development
 ## Task 0: Dependencies, dev services, container fixtures
 
 **Files:**
+
 - Modify: `services/engine/pyproject.toml`
 - Create: `deploy/docker-compose.dev.yml`
 - Create: `services/engine/engine/config.py`
 - Create: `services/engine/tests/conftest.py`
 - Test: `services/engine/tests/test_config.py`
 
-- [ ] **Step 1: Add dependencies**
+- [ ]  **Step 1: Add dependencies**
 
 In `services/engine/pyproject.toml` replace the `dependencies` and `dev` lists:
 
@@ -83,7 +84,7 @@ dependencies = [
     "jsonschema>=4.26,<5",
     "httpx>=0.28,<1",
     "langgraph>=1.2.11,<1.3",
-    "langgraph-checkpoint-postgres>=2.0,<3",
+    "langgraph-checkpoint-postgres>=3.1,<4",  # 3.1 is the line that needs langgraph-checkpoint 4.x
     "psycopg[binary,pool]>=3.2,<4",
     "pycryptodome>=3.21,<4",
     "redis>=5.2,<6",
@@ -103,9 +104,9 @@ dev = [
 ```
 
 Run: `uv sync`
-Expected: resolves and installs. If `langgraph-checkpoint-postgres` conflicts with the pinned `langgraph`, report the conflict instead of loosening the `langgraph` pin.
+Expected: resolves and installs. `langgraph-checkpoint-postgres` 3.1 is the release that requires `langgraph-checkpoint>=4.1`, which is what `langgraph` 1.2 pulls in; older lines (2.x) need checkpoint 2.x and cannot resolve. If it still conflicts, report it instead of loosening the `langgraph` pin.
 
-- [ ] **Step 2: Verify the two libraries we depend on behaving a certain way**
+- [ ]  **Step 2: Verify the two libraries we depend on behaving a certain way**
 
 Write `services/engine/tests/test_smoke_runtime_deps.py`:
 
@@ -152,7 +153,7 @@ def _spin(seconds: float) -> str:
 Run: `uv run pytest tests/test_smoke_runtime_deps.py -q`
 Expected: PASS. `_spin` must be a module-level function so the pool can pickle it. If pebble cannot kill the worker on this platform, stop and report — the design's render deadline depends on it.
 
-- [ ] **Step 3: Development services**
+- [ ]  **Step 3: Development services**
 
 Create `deploy/docker-compose.dev.yml`:
 
@@ -182,7 +183,7 @@ services:
 
 Ports are shifted (5433/6380) so they never collide with a locally installed Postgres or Redis.
 
-- [ ] **Step 4: Write the failing config test**
+- [ ]  **Step 4: Write the failing config test**
 
 Create `services/engine/tests/test_config.py`:
 
@@ -229,7 +230,7 @@ def test_a_missing_database_url_is_an_error(monkeypatch):
 Run: `uv run pytest tests/test_config.py -q`
 Expected: FAIL (`No module named 'engine.config'`).
 
-- [ ] **Step 5: Implement the config**
+- [ ]  **Step 5: Implement the config**
 
 Create `services/engine/engine/config.py`:
 
@@ -305,7 +306,7 @@ def load_config() -> EngineConfig:
 Run: `uv run pytest tests/test_config.py -q`
 Expected: PASS.
 
-- [ ] **Step 6: Container fixtures**
+- [ ]  **Step 6: Container fixtures**
 
 Create `services/engine/tests/conftest.py`:
 
@@ -397,7 +398,7 @@ testpaths = ["tests"]
 markers = ["integration: needs Postgres/Redis containers"]
 ```
 
-- [ ] **Step 7: Run the whole suite and commit**
+- [ ]  **Step 7: Run the whole suite and commit**
 
 Run: `uv run pytest -q -m "not integration"` → the Plan 1 suite plus the new tests pass (645+).
 Run: `uv run ruff check .` → `All checks passed!`
@@ -416,13 +417,14 @@ git commit -m "chore(engine): add runtime dependencies, dev services and contain
 The single `outputs` channel is rewritten in full at every superstep, so checkpoint storage grows with (steps × total output size) — 226 MB measured for 40 nodes carrying a 250 KB input. Give each node its own channel.
 
 **Files:**
+
 - Modify: `services/engine/engine/compiler/state.py`
 - Modify: `services/engine/engine/compiler/wrapper.py:150-230`
 - Modify: `services/engine/engine/compiler/build.py`
 - Modify: `services/engine/engine/runtime/runner.py`
 - Test: `services/engine/tests/test_compiler_state.py` (new), existing compiler/runner tests
 
-- [ ] **Step 1: Write the failing tests**
+- [ ]  **Step 1: Write the failing tests**
 
 Create `services/engine/tests/test_compiler_state.py`:
 
@@ -496,7 +498,7 @@ async def test_checkpoint_writes_do_not_grow_with_the_number_of_steps():
 Run: `uv run pytest tests/test_compiler_state.py -q`
 Expected: FAIL — `build_state_type` and `outputs_of` do not exist; the size test fails on the import too.
 
-- [ ] **Step 2: Rewrite the state module**
+- [ ]  **Step 2: Rewrite the state module**
 
 Replace `services/engine/engine/compiler/state.py`:
 
@@ -548,7 +550,7 @@ def outputs_of(state: Mapping[str, Any]) -> dict[str, Any]:
     }
 ```
 
-- [ ] **Step 3: Write to the node's own channel**
+- [ ]  **Step 3: Write to the node's own channel**
 
 In `services/engine/engine/compiler/wrapper.py`:
 
@@ -569,7 +571,7 @@ In `services/engine/engine/compiler/wrapper.py`:
    `_context(plan, deps, state, outputs, exec_index, attempt, resumed)` and pass `outputs=outputs`, so the
    assembly happens once per node call.
 
-- [ ] **Step 4: Build the graph with the generated type**
+- [ ]  **Step 4: Build the graph with the generated type**
 
 In `services/engine/engine/compiler/build.py` replace the builder line:
 
@@ -587,14 +589,14 @@ In `services/engine/engine/runtime/runner.py` replace the success line:
 
 importing `outputs_of` from `engine.compiler.state`.
 
-- [ ] **Step 5: Run the tests**
+- [ ]  **Step 5: Run the tests**
 
 Run: `uv run pytest -q -m "not integration"`
 Expected: PASS. Existing tests that assert on `state["outputs"]` directly must be updated to `outputs_of(state)`; tests that only go through `execute_run` need no change. Do not change any assertion about node behaviour to make it pass — if a golden test fails, the wrapper change is wrong.
 
 Run: `uv run ruff check .` → `All checks passed!`
 
-- [ ] **Step 6: Commit**
+- [ ]  **Step 6: Commit**
 
 ```bash
 git add services/engine/engine/compiler services/engine/engine/runtime/runner.py services/engine/tests
@@ -608,11 +610,12 @@ git commit -m "perf(engine): give every node its own checkpoint channel"
 Template rendering is unbounded CPU work (measured 7.7 s for one loop over a 20k-item list) and cannot be interrupted in a thread. Add a hook so the worker can run it in a process with a deadline; without the hook the engine renders inline exactly as today.
 
 **Files:**
+
 - Modify: `services/engine/engine/runtime/deps.py`
 - Modify: `services/engine/engine/compiler/wrapper.py`
 - Test: `services/engine/tests/test_compiler_wrapper.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ]  **Step 1: Write the failing tests**
 
 Append to `services/engine/tests/test_compiler_wrapper.py`:
 
@@ -654,7 +657,7 @@ Adjust the helper names (`_deps`, `_run`, `_plan`, `LLM_CONFIG`) to the ones alr
 Run: `uv run pytest tests/test_compiler_wrapper.py -q`
 Expected: FAIL (`RunDeps` has no attribute `render`).
 
-- [ ] **Step 2: Add the hook to RunDeps**
+- [ ]  **Step 2: Add the hook to RunDeps**
 
 In `services/engine/engine/runtime/deps.py`:
 
@@ -678,7 +681,7 @@ and add the field to `RunDeps`:
     """
 ```
 
-- [ ] **Step 3: Use the hook**
+- [ ]  **Step 3: Use the hook**
 
 In `services/engine/engine/compiler/wrapper.py` split rendering from checking:
 
@@ -707,7 +710,7 @@ async def _rendered(deps: RunDeps, fields: list[TemplateField], outputs: dict[st
 
 and in `node_fn` replace `rendered = _render(fields, outputs)` with `rendered = await _rendered(deps, fields, outputs)`.
 
-- [ ] **Step 4: Run the tests and commit**
+- [ ]  **Step 4: Run the tests and commit**
 
 Run: `uv run pytest -q -m "not integration"` → PASS.
 Run: `uv run ruff check .` → clean.
@@ -722,11 +725,12 @@ git commit -m "feat(engine): let a run render template fields off the event loop
 ## Task 3: Schema, migrations and the checkpointer
 
 **Files:**
+
 - Create: `services/engine/engine/db/__init__.py`, `pool.py`, `migrate.py`, `alembic.ini`
 - Create: `services/engine/engine/db/migrations/env.py`, `migrations/script.py.mako`, `migrations/versions/0001_initial.py`
 - Test: `services/engine/tests/test_db_schema.py`
 
-- [ ] **Step 1: Write the failing test**
+- [ ]  **Step 1: Write the failing test**
 
 Create `services/engine/tests/test_db_schema.py`:
 
@@ -815,7 +819,7 @@ async def test_one_row_per_attempt(pool):
 Run: `uv run pytest tests/test_db_schema.py -q`
 Expected: FAIL — `engine.db.migrate` does not exist (the `pool` fixture imports it).
 
-- [ ] **Step 2: The pool helper**
+- [ ]  **Step 2: The pool helper**
 
 Create `services/engine/engine/db/__init__.py` (empty) and `services/engine/engine/db/pool.py`:
 
@@ -839,7 +843,7 @@ def make_pool(url: str, *, min_size: int = 1, max_size: int = 10) -> AsyncConnec
     )
 ```
 
-- [ ] **Step 3: Alembic wiring**
+- [ ]  **Step 3: Alembic wiring**
 
 Create `services/engine/engine/db/alembic.ini`:
 
@@ -891,7 +895,7 @@ with connectable.connect() as connection:
 
 Offline mode is not supported on purpose: migrations always run against a live database.
 
-- [ ] **Step 4: The initial migration**
+- [ ]  **Step 4: The initial migration**
 
 Create `services/engine/engine/db/migrations/versions/0001_initial.py`:
 
@@ -1012,7 +1016,7 @@ def downgrade() -> None:
 created: the worker and the API decide what to store without parsing the DSL again, and a later edit of the
 workflow cannot change how an in-flight run stores data.
 
-- [ ] **Step 5: The migration runner and the checkpointer**
+- [ ]  **Step 5: The migration runner and the checkpointer**
 
 Create `services/engine/engine/db/migrate.py`:
 
@@ -1046,7 +1050,7 @@ async def prepare_database(url: str) -> None:
         await saver.setup()
 ```
 
-- [ ] **Step 6: Run the tests**
+- [ ]  **Step 6: Run the tests**
 
 Run: `uv run pytest tests/test_db_schema.py -q`
 Expected: PASS (the first run pulls the Postgres image, which can take a minute).
@@ -1054,7 +1058,7 @@ Expected: PASS (the first run pulls the Postgres image, which can take a minute)
 Run: `uv run pytest -q -m "not integration"` → the Docker-free suite still passes.
 Run: `uv run ruff check .` → clean.
 
-- [ ] **Step 7: Commit**
+- [ ]  **Step 7: Commit**
 
 ```bash
 git add services/engine/engine/db services/engine/tests/test_db_schema.py
@@ -1066,10 +1070,11 @@ git commit -m "feat(engine): add the Postgres schema, migrations and checkpoint 
 ## Task 4: PostgresRecorder and redaction
 
 **Files:**
+
 - Create: `services/engine/engine/events/__init__.py`, `redact.py`, `writer.py`, `recorder.py`
 - Test: `services/engine/tests/test_events_redact.py`, `services/engine/tests/test_events_recorder.py`
 
-- [ ] **Step 1: Write the failing redaction test**
+- [ ]  **Step 1: Write the failing redaction test**
 
 Create `services/engine/tests/test_events_redact.py`:
 
@@ -1105,7 +1110,7 @@ def test_clip_json_keeps_small_values_and_replaces_large_ones():
 
 Run: `uv run pytest tests/test_events_redact.py -q` → FAIL (no module).
 
-- [ ] **Step 2: Implement redaction**
+- [ ]  **Step 2: Implement redaction**
 
 Create `services/engine/engine/events/__init__.py` (empty) and `services/engine/engine/events/redact.py`:
 
@@ -1155,7 +1160,7 @@ def clip_json(value: Any, limit: int) -> tuple[Any, bool]:
 
 Run: `uv run pytest tests/test_events_redact.py -q` → PASS.
 
-- [ ] **Step 3: Write the failing recorder tests**
+- [ ]  **Step 3: Write the failing recorder tests**
 
 Create `services/engine/tests/test_events_recorder.py`:
 
@@ -1312,7 +1317,7 @@ async def make_run(pool, *, dsl: dict[str, Any] | None = None, status: str = "ru
 
 Run: `uv run pytest tests/test_events_recorder.py -q` → FAIL (no `engine.events.recorder`).
 
-- [ ] **Step 4: Event writing**
+- [ ]  **Step 4: Event writing**
 
 Create `services/engine/engine/events/writer.py`:
 
@@ -1368,7 +1373,7 @@ async def append_event(
     }
 ```
 
-- [ ] **Step 5: Implement the recorder**
+- [ ]  **Step 5: Implement the recorder**
 
 Create `services/engine/engine/events/recorder.py`:
 
@@ -1531,7 +1536,7 @@ class PostgresRecorder:
 Note `node_started` calls `self._value(input)` and unpacks it as `stored[0]`; keep one style — use
 `stored, _ = self._value(input)` and pass `stored`.
 
-- [ ] **Step 6: Run the tests and commit**
+- [ ]  **Step 6: Run the tests and commit**
 
 Run: `uv run pytest tests/test_events_recorder.py tests/test_events_redact.py -q` → PASS.
 Run: `uv run pytest -q -m "not integration"` → unchanged.
@@ -1548,11 +1553,12 @@ git commit -m "feat(engine): record node runs and events in Postgres"
 ## Task 5: Redis publishing and the per-model semaphore
 
 **Files:**
+
 - Create: `services/engine/engine/events/publish.py`
 - Create: `services/engine/engine/llm/semaphore.py`
 - Test: `services/engine/tests/test_events_publish.py`, `services/engine/tests/test_llm_semaphore.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ]  **Step 1: Write the failing tests**
 
 Create `services/engine/tests/test_events_publish.py`:
 
@@ -1665,7 +1671,7 @@ async def test_the_wrapper_passes_the_call_through(redis):
 
 Run both files → FAIL (no modules).
 
-- [ ] **Step 2: Implement publishing**
+- [ ]  **Step 2: Implement publishing**
 
 Create `services/engine/engine/events/publish.py`:
 
@@ -1731,7 +1737,7 @@ async def run_events(redis: Any, run_id: str) -> AsyncIterator[dict[str, Any]]:
         await pubsub.aclose()
 ```
 
-- [ ] **Step 3: Implement the semaphore**
+- [ ]  **Step 3: Implement the semaphore**
 
 Create `services/engine/engine/llm/semaphore.py`:
 
@@ -1820,7 +1826,7 @@ class SemaphoreLLM:
                                           temperature=temperature, on_token=on_token)
 ```
 
-- [ ] **Step 4: Run the tests and commit**
+- [ ]  **Step 4: Run the tests and commit**
 
 Run: `uv run pytest tests/test_events_publish.py tests/test_llm_semaphore.py -q` → PASS.
 Run: `uv run ruff check .` → clean.
@@ -1838,10 +1844,11 @@ Every statement here carries its own guard: the claim only touches a `queued` ro
 carries `AND lease_owner = :me` (MVP design 5.2 fencing).
 
 **Files:**
+
 - Create: `services/engine/engine/db/runs.py`
 - Test: `services/engine/tests/test_db_runs.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ]  **Step 1: Write the failing tests**
 
 Create `services/engine/tests/test_db_runs.py`:
 
@@ -1961,7 +1968,7 @@ async def test_notify_wakes_a_listener(pool, listen_conn):
 
 Run: `uv run pytest tests/test_db_runs.py -q` → FAIL (no module).
 
-- [ ] **Step 2: Implement the queries**
+- [ ]  **Step 2: Implement the queries**
 
 Create `services/engine/engine/db/runs.py`:
 
@@ -2073,7 +2080,7 @@ async def get_version_dsl(conn: AsyncConnection, version_id: str) -> dict[str, A
     return row
 ```
 
-- [ ] **Step 3: Run the tests and commit**
+- [ ]  **Step 3: Run the tests and commit**
 
 Run: `uv run pytest tests/test_db_runs.py -q` → PASS.
 Run: `uv run ruff check .` → clean.
@@ -2088,11 +2095,12 @@ git commit -m "feat(engine): add run claiming, lease and transition queries"
 ## Task 7: The worker — claim, execute, finish
 
 **Files:**
+
 - Create: `services/engine/engine/worker/__init__.py`, `services/engine/engine/worker/worker.py`
 - Modify: `services/engine/tests/conftest.py` (worker fixture, `until` helper)
 - Test: `services/engine/tests/test_worker_run.py`
 
-- [ ] **Step 1: Test helpers**
+- [ ]  **Step 1: Test helpers**
 
 Append to `services/engine/tests/conftest.py`:
 
@@ -2131,7 +2139,7 @@ async def worker_factory(pool, redis, db_url):
         await worker.stop()
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [ ]  **Step 2: Write the failing test**
 
 Create `services/engine/tests/test_worker_run.py`:
 
@@ -2243,7 +2251,7 @@ async def test_only_one_of_two_workers_runs_a_given_run(pool, worker_factory):
 
 Run: `uv run pytest tests/test_worker_run.py -q` → FAIL (no `engine.worker.worker`).
 
-- [ ] **Step 3: Implement the worker**
+- [ ]  **Step 3: Implement the worker**
 
 Create `services/engine/engine/worker/__init__.py` (empty) and `services/engine/engine/worker/worker.py`:
 
@@ -2451,7 +2459,7 @@ class Worker:
 Note the `except (EngineFault, Exception)` line: write it as `except Exception` with a comment, since
 `EngineFault` is an `Exception` — the implementer must not leave a redundant tuple.
 
-- [ ] **Step 4: Run the tests**
+- [ ]  **Step 4: Run the tests**
 
 Run: `uv run pytest tests/test_worker_run.py -q`
 Expected: PASS. If a run hangs, check that `start` awaited `LISTEN` on a separate connection — a pooled
@@ -2459,7 +2467,7 @@ connection cannot be used for notifications.
 
 Run: `uv run ruff check .` → clean.
 
-- [ ] **Step 5: Commit**
+- [ ]  **Step 5: Commit**
 
 ```bash
 git add services/engine/engine/worker services/engine/tests/test_worker_run.py services/engine/tests/conftest.py
@@ -2471,10 +2479,11 @@ git commit -m "feat(engine): claim and execute runs in a worker"
 ## Task 8: Lease heartbeat, cancellation and the run time limit
 
 **Files:**
+
 - Modify: `services/engine/engine/worker/worker.py`
 - Test: `services/engine/tests/test_worker_lease.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ]  **Step 1: Write the failing tests**
 
 Create `services/engine/tests/test_worker_lease.py`:
 
@@ -2559,7 +2568,7 @@ Add `RUN_TIMEOUT` to `engine/errors.py`'s `ErrorCode` if it is not there yet (MV
 
 Run: `uv run pytest tests/test_worker_lease.py -q` → FAIL.
 
-- [ ] **Step 2: Heartbeat and control subscription**
+- [ ]  **Step 2: Heartbeat and control subscription**
 
 In `services/engine/engine/worker/worker.py` add to `start()`:
 
@@ -2608,7 +2617,7 @@ and implement:
 
 Track timeouts with `self._timed_out: set[str] = set()` in `__init__`.
 
-- [ ] **Step 3: Wire the heartbeat into `_execute`**
+- [ ]  **Step 3: Wire the heartbeat into `_execute`**
 
 Wrap the `execute_run` call:
 
@@ -2634,7 +2643,7 @@ Wrap the `execute_run` call:
 `RunCancelled` raised by the guard reaches `execute_run`, which returns `RunOutcome("cancelled")`, so the
 cancel path needs no special handling here beyond `_terminal` closing open `node_runs` rows.
 
-- [ ] **Step 4: Run the tests and commit**
+- [ ]  **Step 4: Run the tests and commit**
 
 Run: `uv run pytest tests/test_worker_lease.py tests/test_worker_run.py -q` → PASS.
 Run: `uv run ruff check .` → clean.
@@ -2649,12 +2658,13 @@ git commit -m "feat(engine): hold the run lease, honour cancels and bound active
 ## Task 9: The reaper
 
 **Files:**
+
 - Create: `services/engine/engine/worker/reaper.py`
 - Modify: `services/engine/engine/errors.py` (add `ENGINE_RECOVERY_EXHAUSTED`)
 - Modify: `services/engine/engine/worker/worker.py` (always write `run_started`; the reaper owns `run_recovered`)
 - Test: `services/engine/tests/test_worker_reaper.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ]  **Step 1: Write the failing tests**
 
 Create `services/engine/tests/test_worker_reaper.py`:
 
@@ -2755,7 +2765,7 @@ def _config():
 
 Run: `uv run pytest tests/test_worker_reaper.py -q` → FAIL.
 
-- [ ] **Step 2: Implement the reaper**
+- [ ]  **Step 2: Implement the reaper**
 
 Add `ENGINE_RECOVERY_EXHAUSTED = "ENGINE_RECOVERY_EXHAUSTED"` to `ErrorCode` in `engine/errors.py`.
 
@@ -2909,7 +2919,7 @@ class Reaper:
                 await self._publisher.publish(run_id, event)
 ```
 
-- [ ] **Step 3: Run the reaper inside the worker, and always write `run_started`**
+- [ ]  **Step 3: Run the reaper inside the worker, and always write `run_started`**
 
 The design puts the reaper in the worker process, so `Worker` owns one. In `engine/worker/worker.py`:
 
@@ -2922,7 +2932,6 @@ The design puts the reaper in the worker process, so `Worker` owns one. In `engi
 ```
 
 Every worker has a reaper; the advisory lock decides which one actually sweeps.
-
 
 In `engine/worker/worker.py` replace
 
@@ -2939,7 +2948,7 @@ with
 The reaper owns `run_recovered`: it is the event for the act of recovering, and every attempt to run still
 starts with `run_started`.
 
-- [ ] **Step 4: Run the tests and commit**
+- [ ]  **Step 4: Run the tests and commit**
 
 Run: `uv run pytest tests/test_worker_reaper.py tests/test_worker_run.py -q` → PASS.
 Run: `uv run ruff check .` → clean.
@@ -2954,16 +2963,17 @@ git commit -m "feat(engine): recover abandoned runs and expire stale approvals"
 ## Task 10: Render pool and the worker entrypoint
 
 **Files:**
+
 - Modify: `services/engine/engine/compiler/wrapper.py` (rename `_render` → `render_fields`)
 - Create: `services/engine/engine/worker/render.py`, `services/engine/engine/worker/main.py`
 - Test: `services/engine/tests/test_worker_render.py`
 
-- [ ] **Step 1: Make the pure renderer public**
+- [ ]  **Step 1: Make the pure renderer public**
 
 In `engine/compiler/wrapper.py` rename `_render` to `render_fields` (it is now called from another process)
 and update the two call sites. No behaviour change.
 
-- [ ] **Step 2: Write the failing test**
+- [ ]  **Step 2: Write the failing test**
 
 Create `services/engine/tests/test_worker_render.py`:
 
@@ -3039,7 +3049,7 @@ async def test_template_errors_come_back_as_errors():
 
 Run: `uv run pytest tests/test_worker_render.py -q` → FAIL.
 
-- [ ] **Step 3: Implement the pool**
+- [ ]  **Step 3: Implement the pool**
 
 Create `services/engine/engine/worker/render.py`:
 
@@ -3105,7 +3115,7 @@ class RenderPool:
 wrapper's deadline mapping (Task 2) applies unchanged. Template errors pickle back as themselves because
 they carry only a message.
 
-- [ ] **Step 4: The worker entrypoint**
+- [ ]  **Step 4: The worker entrypoint**
 
 Create `services/engine/engine/worker/main.py`:
 
@@ -3171,7 +3181,7 @@ if __name__ == "__main__":
 The checkpointer is `AsyncPostgresSaver(pool)` inside `Worker`; it must see an autocommit pool, which
 `make_pool` provides.
 
-- [ ] **Step 5: Run the tests and commit**
+- [ ]  **Step 5: Run the tests and commit**
 
 Run: `uv run pytest tests/test_worker_render.py -q` → PASS (no containers needed).
 Run: `uv run pytest -q` → the whole suite, including integration, passes.
@@ -3187,12 +3197,13 @@ git commit -m "feat(engine): render templates in a process pool and add the work
 ## Task 11: API skeleton — app, auth, strict bodies, errors, node types
 
 **Files:**
+
 - Create: `services/engine/engine/api/__init__.py`, `errors.py`, `security.py`, `body.py`, `app.py`
 - Create: `services/engine/engine/api/routers/__init__.py`, `routers/node_types.py`
 - Modify: `services/engine/tests/conftest.py` (api client fixture)
 - Test: `services/engine/tests/test_api_basics.py`
 
-- [ ] **Step 1: The API client fixture**
+- [ ]  **Step 1: The API client fixture**
 
 Append to `services/engine/tests/conftest.py`:
 
@@ -3216,7 +3227,7 @@ async def api(pool, redis):
         yield client
 ```
 
-- [ ] **Step 2: Write the failing tests**
+- [ ]  **Step 2: Write the failing tests**
 
 Create `services/engine/tests/test_api_basics.py`:
 
@@ -3255,7 +3266,7 @@ The body rules (strict JSON, size limit) are tested in Task 12, where the first 
 
 Run: `uv run pytest tests/test_api_basics.py -q` → FAIL.
 
-- [ ] **Step 3: Errors**
+- [ ]  **Step 3: Errors**
 
 Create `services/engine/engine/api/__init__.py` (empty) and `services/engine/engine/api/errors.py`:
 
@@ -3311,7 +3322,7 @@ def install(app: FastAPI) -> None:
         return JSONResponse(_body("INTERNAL", "서버 오류가 발생했습니다"), status_code=500)
 ```
 
-- [ ] **Step 4: Auth and bodies**
+- [ ]  **Step 4: Auth and bodies**
 
 Create `services/engine/engine/api/security.py`:
 
@@ -3382,7 +3393,7 @@ def field(body: dict[str, Any], name: str, kind: type, *, required: bool = True,
     return value
 ```
 
-- [ ] **Step 5: The app and `/node-types`**
+- [ ]  **Step 5: The app and `/node-types`**
 
 Create `services/engine/engine/api/routers/__init__.py` (empty) and `routers/node_types.py`:
 
@@ -3461,7 +3472,7 @@ def create_app(config: EngineConfig, pool: AsyncConnectionPool, redis: Any,
 `/healthz` keeps the app-wide token dependency (it is cheap and the editor never calls it anonymously); if a
 probe needs it open, the implementer may drop it from the dependency list — the test above sends the token.
 
-- [ ] **Step 6: Run the tests and commit**
+- [ ]  **Step 6: Run the tests and commit**
 
 Run: `uv run pytest tests/test_api_basics.py -q` → PASS.
 Run: `uv run ruff check .` → clean.
@@ -3476,12 +3487,13 @@ git commit -m "feat(engine): add the API skeleton with token auth and strict bod
 ## Task 12: Workflows — CRUD, optimistic locking, validation
 
 **Files:**
+
 - Create: `services/engine/engine/db/workflows.py`
 - Create: `services/engine/engine/api/routers/workflows.py`
 - Modify: `services/engine/engine/api/app.py` (include the router)
 - Test: `services/engine/tests/test_api_workflows.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ]  **Step 1: Write the failing tests**
 
 Create `services/engine/tests/test_api_workflows.py`:
 
@@ -3607,7 +3619,7 @@ async def test_a_workflow_with_an_active_run_cannot_be_deleted(api, pool):
 
 Run: `uv run pytest tests/test_api_workflows.py -q` → FAIL.
 
-- [ ] **Step 2: Workflow queries**
+- [ ]  **Step 2: Workflow queries**
 
 Create `services/engine/engine/db/workflows.py`:
 
@@ -3695,7 +3707,7 @@ async def pin_version(conn: AsyncConnection, *, workflow_id: str, dsl: dict[str,
     )).fetchone()
 ```
 
-- [ ] **Step 3: The router**
+- [ ]  **Step 3: The router**
 
 Create `services/engine/engine/api/routers/workflows.py`:
 
@@ -3806,7 +3818,7 @@ rather than duplicating the number.
 
 Include the router in `create_app`: `app.include_router(workflows.router)`.
 
-- [ ] **Step 4: Run the tests and commit**
+- [ ]  **Step 4: Run the tests and commit**
 
 Run: `uv run pytest tests/test_api_workflows.py tests/test_api_basics.py -q` → PASS.
 Run: `uv run ruff check .` → clean.
@@ -3821,11 +3833,12 @@ git commit -m "feat(engine): serve workflow CRUD and validation"
 ## Task 13: Creating and reading runs
 
 **Files:**
+
 - Modify: `services/engine/engine/db/runs.py` (insert, lookups, lists)
 - Create: `services/engine/engine/api/routers/runs.py`
 - Test: `services/engine/tests/test_api_runs.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ]  **Step 1: Write the failing tests**
 
 Create `services/engine/tests/test_api_runs.py`:
 
@@ -3933,7 +3946,7 @@ async def test_a_run_is_picked_up_and_its_nodes_readable(api, pool, worker_facto
 
 Run: `uv run pytest tests/test_api_runs.py -q` → FAIL.
 
-- [ ] **Step 2: Extend the run queries**
+- [ ]  **Step 2: Extend the run queries**
 
 Append to `services/engine/engine/db/runs.py`:
 
@@ -3994,7 +4007,7 @@ async def has_checkpoint(conn: AsyncConnection, run_id: str) -> bool:
     return row is not None
 ```
 
-- [ ] **Step 3: The runs router**
+- [ ]  **Step 3: The runs router**
 
 Create `services/engine/engine/api/routers/runs.py`:
 
@@ -4144,7 +4157,7 @@ async def _publish(request: Request, run_id: str, event: dict[str, Any]) -> None
 
 Include the router in `create_app`.
 
-- [ ] **Step 4: Run the tests and commit**
+- [ ]  **Step 4: Run the tests and commit**
 
 Run: `uv run pytest tests/test_api_runs.py -q` → PASS.
 Run: `uv run ruff check .` → clean.
@@ -4159,11 +4172,12 @@ git commit -m "feat(engine): create runs against a pinned version and read them 
 ## Task 14: Live events over SSE
 
 **Files:**
+
 - Create: `services/engine/engine/events/stream.py`
 - Modify: `services/engine/engine/api/routers/runs.py` (the `/events` route)
 - Test: `services/engine/tests/test_api_events.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ]  **Step 1: Write the failing tests**
 
 Create `services/engine/tests/test_api_events.py`:
 
@@ -4272,7 +4286,7 @@ async def test_token_events_carry_no_id(api, pool, redis):
 
 Run: `uv run pytest tests/test_api_events.py -q` → FAIL.
 
-- [ ] **Step 2: Implement the stream**
+- [ ]  **Step 2: Implement the stream**
 
 Create `services/engine/engine/events/stream.py`:
 
@@ -4366,7 +4380,7 @@ async def event_stream(pool: AsyncConnectionPool, redis: Any, run_id: str, *, af
             await subscriber
 ```
 
-- [ ] **Step 3: The route**
+- [ ]  **Step 3: The route**
 
 Add to `services/engine/engine/api/routers/runs.py`:
 
@@ -4384,7 +4398,7 @@ async def stream_events(run_id: str, request: Request) -> StreamingResponse:
 
 with `from fastapi.responses import StreamingResponse` and `from engine.events.stream import event_stream`.
 
-- [ ] **Step 4: Run the tests and commit**
+- [ ]  **Step 4: Run the tests and commit**
 
 Run: `uv run pytest tests/test_api_events.py -q` → PASS.
 Run: `uv run ruff check .` → clean.
@@ -4399,11 +4413,12 @@ git commit -m "feat(engine): stream run events over SSE with gap filling"
 ## Task 15: Resume, retry and cancel
 
 **Files:**
+
 - Modify: `services/engine/engine/db/runs.py` (queue_resume, queue_retry, cancel)
 - Modify: `services/engine/engine/api/routers/runs.py`
 - Test: `services/engine/tests/test_api_control.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ]  **Step 1: Write the failing tests**
 
 Create `services/engine/tests/test_api_control.py`:
 
@@ -4589,7 +4604,7 @@ async def test_cancelling_a_running_run_only_requests_it(api, pool, worker_facto
 
 Run: `uv run pytest tests/test_api_control.py -q` → FAIL.
 
-- [ ] **Step 2: Transition queries**
+- [ ]  **Step 2: Transition queries**
 
 Append to `services/engine/engine/db/runs.py`:
 
@@ -4628,7 +4643,7 @@ async def request_cancel(conn: AsyncConnection, run_id: str) -> bool:
     return row is not None
 ```
 
-- [ ] **Step 3: The routes**
+- [ ]  **Step 3: The routes**
 
 Add to `services/engine/engine/api/routers/runs.py`:
 
@@ -4710,7 +4725,7 @@ async def cancel_run(run_id: str, request: Request) -> dict[str, Any]:
 Add the imports: `from datetime import UTC, datetime`, `from engine.errors import NodeError`,
 `from engine.nodes.human_approval import resume_output`.
 
-- [ ] **Step 4: Keep the waiting payload even when run data is not stored**
+- [ ]  **Step 4: Keep the waiting payload even when run data is not stored**
 
 The approval payload is the only way to answer a waiting run, so `PostgresRecorder.node_waiting` must store
 it regardless of `store_run_data` (the review value is the reviewer's own data, shown back to them). In
@@ -4729,7 +4744,7 @@ async def test_the_waiting_payload_is_stored_even_without_run_data(pool):
     assert record["meta"]["waiting"]["review"] == "원고"  # required to resume the run
 ```
 
-- [ ] **Step 5: Run the tests and commit**
+- [ ]  **Step 5: Run the tests and commit**
 
 Run: `uv run pytest tests/test_api_control.py tests/test_events_recorder.py -q` → PASS.
 Run: `uv run ruff check .` → clean.
@@ -4748,9 +4763,10 @@ These are the tests the design's completion criteria are written against. They u
 never internal calls.
 
 **Files:**
+
 - Test: `services/engine/tests/test_runtime_e2e.py`
 
-- [ ] **Step 1: Write the scenarios**
+- [ ]  **Step 1: Write the scenarios**
 
 Create `services/engine/tests/test_runtime_e2e.py`:
 
@@ -4877,7 +4893,7 @@ class _Stuck:
         await asyncio.sleep(3600)
 ```
 
-- [ ] **Step 2: Run them**
+- [ ]  **Step 2: Run them**
 
 Run: `uv run pytest tests/test_runtime_e2e.py -q`
 Expected: PASS. These exercise Tasks 1–15 together; when one fails, fix the component, not the test.
@@ -4886,7 +4902,7 @@ If `test_a_dead_worker_is_recovered...` is flaky, the cause is usually the reape
 `lease_sec=1` with `reaper_interval_sec=0.2` leaves a whole second before recovery, and `until` waits 15 s.
 Do not paper over a real failure with a longer timeout.
 
-- [ ] **Step 3: Commit**
+- [ ]  **Step 3: Commit**
 
 ```bash
 git add services/engine/tests/test_runtime_e2e.py
@@ -4898,10 +4914,11 @@ git commit -m "test(engine): cover recovery, approval restart and live events en
 ## Task 17: Documentation and full verification
 
 **Files:**
+
 - Create: `services/engine/README.md`
 - Modify: `docs/superpowers/plans/2026-09-16-runtime-core.md` (check off the coverage table below)
 
-- [ ] **Step 1: Write the README**
+- [ ]  **Step 1: Write the README**
 
 Create `services/engine/README.md`:
 
@@ -4936,16 +4953,18 @@ uv run ruff check .
 
 ## Environment
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `ENGINE_DATABASE_URL` | — | Postgres connection string (required) |
-| `ENGINE_REDIS_URL` | `redis://localhost:6379/0` | Redis for events, control and the model semaphore |
-| `ENGINE_API_TOKEN` | none | Shared bearer token; unset means no authentication |
-| `LANGGRAPH_AES_KEY` | — | 16/24/32-byte key for checkpoint encryption (required) |
-| `ENGINE_DEV_INSECURE` | `0` | Start without an encryption key (development only) |
-| `WORKER_MAX_RUNS` | `10` | Concurrent runs per worker |
-| `RUN_MAX_ACTIVE_MS` | `3600000` | Active time before a run fails with `RUN_TIMEOUT` |
-| `RENDER_TIMEOUT_SEC` | `5` | Deadline for rendering one node's templates |
+
+| Variable              | Default                    | Meaning                                                |
+| ----------------------- | ---------------------------- | -------------------------------------------------------- |
+| `ENGINE_DATABASE_URL` | —                         | Postgres connection string (required)                  |
+| `ENGINE_REDIS_URL`    | `redis://localhost:6379/0` | Redis for events, control and the model semaphore      |
+| `ENGINE_API_TOKEN`    | none                       | Shared bearer token; unset means no authentication     |
+| `LANGGRAPH_AES_KEY`   | —                         | 16/24/32-byte key for checkpoint encryption (required) |
+| `ENGINE_DEV_INSECURE` | `0`                        | Start without an encryption key (development only)     |
+| `WORKER_MAX_RUNS`     | `10`                       | Concurrent runs per worker                             |
+| `RUN_MAX_ACTIVE_MS`   | `3600000`                  | Active time before a run fails with`RUN_TIMEOUT`       |
+| `RENDER_TIMEOUT_SEC`  | `5`                        | Deadline for rendering one node's templates            |
+
 ```
 
 - [ ] **Step 2: The API entrypoint**
@@ -4998,7 +5017,7 @@ app = build()
 If the FastAPI version in use deprecates `on_event`, use a `lifespan` context manager instead — the test
 fixture builds the app directly, so either style works there.
 
-- [ ] **Step 3: Full verification**
+- [ ]  **Step 3: Full verification**
 
 Run: `uv run pytest -q`
 Expected: every test passes, including integration. Note the count.
@@ -5009,7 +5028,7 @@ Expected: passes without Docker running.
 Run: `uv run ruff check .`
 Expected: `All checks passed!`
 
-- [ ] **Step 4: Confirm the coverage table below still holds, then commit**
+- [ ]  **Step 4: Confirm the coverage table below still holds, then commit**
 
 ```bash
 git add services/engine/README.md services/engine/engine/api/main.py docs/superpowers/plans/2026-09-16-runtime-core.md
@@ -5020,29 +5039,30 @@ git commit -m "docs(engine): document running the service and record Plan 2a ver
 
 ## Design coverage (Plan 2a)
 
-| Design section | Covered by |
-|---|---|
-| 1 목표와 완료 기준 | Task 16 (all six criteria), Task 17 |
-| 2 MVP 문서에서 달라지는 점 | Task 6 (claim/NOTIFY), Task 9 (reaper), Task 1 (channels), Task 3 (psycopg3, `waited`) |
-| 3 실행 상태 채널 구조 | Task 1 |
-| 4 CPU 격리 | Task 2 (hook), Task 10 (pool, deadline, memory) |
-| 5 데이터 계층 | Task 3 (schema, migrations, encrypted checkpointer) |
-| 6.1 점유 | Task 6, Task 7 |
-| 6.2 리스와 펜싱 | Task 6, Task 8 |
-| 6.3 취소 | Task 8, Task 15 (API side) |
-| 6.4 실행 루프 | Task 7, Task 8 (timeout), Task 16 (recovery) |
-| 6.5 reaper | Task 9 |
-| 7.1 PostgresRecorder | Task 4 |
-| 7.2 저장 정책 | Task 4 (redaction, truncation, `storeRunData`), Task 15 (waiting payload) |
-| 7.3 SSE | Task 14, Task 16 |
-| 8.1 공통 계층 | Task 11 |
-| 8.2 엔드포인트 | Tasks 11–15 |
-| 8.3 레지스트리 하나 | Task 7 (worker), Task 11 (API state) |
-| 8.4 컴파일 캐시 | Task 7 |
-| 9 Redis 사용 | Task 5 (publish, semaphore), Task 8 (control), Task 14 (SSE) |
-| 10 설정 | Task 0 |
-| 11 테스트 | Every task; Task 16 for the integration matrix |
-| 12 열린 위험 | Task 0 step 2 (pebble, EncryptedSerializer spikes) |
+
+| Design section             | Covered by                                                                            |
+| ---------------------------- | --------------------------------------------------------------------------------------- |
+| 1 목표와 완료 기준         | Task 16 (all six criteria), Task 17                                                   |
+| 2 MVP 문서에서 달라지는 점 | Task 6 (claim/NOTIFY), Task 9 (reaper), Task 1 (channels), Task 3 (psycopg3,`waited`) |
+| 3 실행 상태 채널 구조      | Task 1                                                                                |
+| 4 CPU 격리                 | Task 2 (hook), Task 10 (pool, deadline, memory)                                       |
+| 5 데이터 계층              | Task 3 (schema, migrations, encrypted checkpointer)                                   |
+| 6.1 점유                   | Task 6, Task 7                                                                        |
+| 6.2 리스와 펜싱            | Task 6, Task 8                                                                        |
+| 6.3 취소                   | Task 8, Task 15 (API side)                                                            |
+| 6.4 실행 루프              | Task 7, Task 8 (timeout), Task 16 (recovery)                                          |
+| 6.5 reaper                 | Task 9                                                                                |
+| 7.1 PostgresRecorder       | Task 4                                                                                |
+| 7.2 저장 정책              | Task 4 (redaction, truncation,`storeRunData`), Task 15 (waiting payload)              |
+| 7.3 SSE                    | Task 14, Task 16                                                                      |
+| 8.1 공통 계층              | Task 11                                                                               |
+| 8.2 엔드포인트             | Tasks 11–15                                                                          |
+| 8.3 레지스트리 하나        | Task 7 (worker), Task 11 (API state)                                                  |
+| 8.4 컴파일 캐시            | Task 7                                                                                |
+| 9 Redis 사용               | Task 5 (publish, semaphore), Task 8 (control), Task 14 (SSE)                          |
+| 10 설정                    | Task 0                                                                                |
+| 11 테스트                  | Every task; Task 16 for the integration matrix                                        |
+| 12 열린 위험               | Task 0 step 2 (pebble, EncryptedSerializer spikes)                                    |
 
 Deferred to Plan 2b by design: `http_request`, egress policy, secrets and `{{secret.NAME}}`, header/value
 redaction, retention purge, the deployment compose file.
