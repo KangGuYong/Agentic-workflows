@@ -26,6 +26,8 @@ from engine.runtime.runner import ResumeRejected, RunOutcome, execute_run
 
 log = logging.getLogger(__name__)
 
+MAX_COMPILED_CACHE = 32  # lru_cache-level cap (design 8.4); a plain FIFO eviction is enough here
+
 
 class Worker:
     """One process worth of execution. `owner` identifies this worker in `runs.lease_owner`."""
@@ -48,23 +50,20 @@ class Worker:
         self._tasks: set[asyncio.Task] = set()
         self._listen: AsyncConnection | None = None
         self._running = False
-        self._idle = asyncio.Event()
 
     # ------------------------------------------------------------------ lifecycle
 
     async def start(self) -> None:
         self._running = True
-        self._listen = await AsyncConnection.connect(self._config.database_url, autocommit=True)
-        await self._listen.execute(f"LISTEN {run_db.QUEUE_CHANNEL}")
+        await self._reconnect_listen()
         self._spawn(self._claim_loop())
 
     async def stop(self) -> None:
         self._running = False
-        for task in list(self._tasks):
+        tasks = list(self._tasks)
+        for task in tasks:
             task.cancel()
-        for task in list(self._tasks):
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        await asyncio.gather(*tasks, return_exceptions=True)
         if self._listen is not None:
             await self._listen.close()
 
@@ -79,15 +78,28 @@ class Worker:
     async def _claim_loop(self) -> None:
         in_flight: set[asyncio.Task] = set()
         while self._running:
-            while self._running and len(in_flight) < self._config.worker_max_runs:
-                async with self._pool.connection() as conn:
-                    row = await run_db.claim_next(conn, owner=self.owner, lease_sec=self._config.lease_sec)
-                if row is None:
-                    break
-                task = self._spawn(self._execute(row))
-                in_flight.add(task)
-                task.add_done_callback(in_flight.discard)
-            await self._wait_for_work()
+            try:
+                while self._running and len(in_flight) < self._config.worker_max_runs:
+                    async with self._pool.connection() as conn:
+                        row = await run_db.claim_next(conn, owner=self.owner, lease_sec=self._config.lease_sec)
+                    if row is None:
+                        break
+                    task = self._spawn(self._execute(row))
+                    in_flight.add(task)
+                    task.add_done_callback(in_flight.discard)
+                await self._wait_for_work()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # a failure here (claim query, listen reconnect, ...) must retry, not end the worker
+                log.exception("claim loop iteration failed; retrying after the poll interval")
+                await asyncio.sleep(self._config.claim_poll_sec)
+
+    async def _reconnect_listen(self) -> None:
+        self._listen = None  # cleared first: a failed connect must not leave a dead connection in place
+        listen = await AsyncConnection.connect(self._config.database_url, autocommit=True)
+        await listen.execute(f"LISTEN {run_db.QUEUE_CHANNEL}")
+        self._listen = listen
 
     async def _wait_for_work(self) -> None:
         """Sleep until something is queued or the poll interval elapses.
@@ -95,19 +107,18 @@ class Worker:
         The notification is an optimisation: it is sent inside the transaction that queued the run, and the
         poll covers the window where no worker was listening.
         """
-        assert self._listen is not None
-        try:
-            async with asyncio.timeout(self._config.claim_poll_sec):
-                async for _ in self._listen.notifies(stop_after=1):
-                    return
-        except TimeoutError:
+        if self._listen is None:
+            await self._reconnect_listen()
             return
-        except Exception:  # noqa: BLE001 - a dropped listener must not stop the worker
+        try:
+            async for _ in self._listen.notifies(timeout=self._config.claim_poll_sec, stop_after=1):
+                return
+        except Exception:
+            # a dropped listener must not stop the worker: close what's left and reconnect from scratch
             log.warning("listen connection failed; reconnecting", exc_info=True)
             with contextlib.suppress(Exception):
                 await self._listen.close()
-            self._listen = await AsyncConnection.connect(self._config.database_url, autocommit=True)
-            await self._listen.execute(f"LISTEN {run_db.QUEUE_CHANNEL}")
+            await self._reconnect_listen()
 
     # ------------------------------------------------------------------ one run
 
@@ -115,6 +126,27 @@ class Worker:
         run_id = str(row["id"])
         guard = FlagGuard()
         self._guards[run_id] = guard
+        try:
+            await self._run(run_id, row, guard)
+        except asyncio.CancelledError:
+            # stop() cancelled us mid-run: hand the lease back for recovery before the cancellation lands
+            with contextlib.suppress(Exception):
+                await asyncio.shield(self._expire_lease(run_id))
+            raise
+        except Exception:
+            log.exception("run %s: unhandled failure escaped _execute", run_id)
+            with contextlib.suppress(Exception):
+                await self._expire_lease(run_id)
+        finally:
+            self._guards.pop(run_id, None)
+
+    async def _expire_lease(self, run_id: str) -> None:
+        async with self._pool.connection() as conn:
+            await run_db.expire_lease(conn, run_id=run_id, owner=self.owner)
+
+    async def _run(self, run_id: str, row: dict[str, Any], guard: FlagGuard) -> None:
+        await self._event(run_id, "run_recovered" if row["recovery_count"] else "run_started")
+
         try:
             compiled = await self._compile(row)
         except WorkflowInvalid as exc:  # a stored version must already be valid; treat it as a run failure
@@ -124,8 +156,13 @@ class Worker:
                 "details": [issue.to_dict() for issue in exc.issues[:5]],
             })
             return
+        if compiled is None:  # the version was deleted between queueing and claiming
+            await self._terminal(run_id, "failed", error={
+                "code": str(ErrorCode.NODE_FAILED),
+                "message": "워크플로 버전을 찾을 수 없습니다",
+            })
+            return
 
-        await self._event(run_id, "run_recovered" if row["recovery_count"] else "run_started")
         recorder = PostgresRecorder(self._pool, run_id, publisher=self._publisher,
                                     store_run_data=row["store_run_data"])
         deps = RunDeps(run_id=run_id, llm=self._llm, recorder=recorder, guard=guard, render=self._render)
@@ -138,15 +175,14 @@ class Worker:
         except ResumeRejected as exc:  # the API checks first, so this is a stale payload
             log.warning("resume rejected for run %s: %s", run_id, exc)
             async with self._pool.connection() as conn:
-                await run_db.clear_resume_payload(conn, run_id=run_id, owner=self.owner)
+                await run_db.set_waiting(conn, run_id=run_id, owner=self.owner,
+                                         node_id=row["waiting_node_id"] or "",
+                                         exec_index=row["waiting_exec_index"] or 0)
             return
-        except Exception as exc:  # noqa: BLE001 - infrastructure problem: let recovery retry
+        except Exception as exc:  # infrastructure problem: let recovery retry
             log.error("run %s aborted: %s", run_id, type(exc).__name__, exc_info=True)
-            async with self._pool.connection() as conn:
-                await run_db.expire_lease(conn, run_id=run_id, owner=self.owner)
+            await self._expire_lease(run_id)
             return
-        finally:
-            self._guards.pop(run_id, None)
 
         await self._write_outcome(run_id, row, outcome)
 
@@ -185,14 +221,20 @@ class Worker:
         await self._publish(run_id, event)
 
     async def _publish(self, run_id: str, event: dict[str, Any]) -> None:
-        with contextlib.suppress(Exception):
+        try:  # the event is already committed; losing the live copy only delays the editor (SSE gap fill)
             await self._publisher.publish(run_id, event)
+        except Exception:
+            log.warning("publishing event failed for run %s", run_id, exc_info=True)
 
-    async def _compile(self, row: dict[str, Any]) -> CompiledWorkflow:
+    async def _compile(self, row: dict[str, Any]) -> CompiledWorkflow | None:
         async with self._pool.connection() as conn:
             version = await run_db.get_version_dsl(conn, str(row["workflow_version_id"]))
+        if version is None:  # the version was deleted between queueing and claiming
+            return None
         cached = self._compiled.get(version["dsl_hash"])
         if cached is None:
             cached = compile_workflow(version["dsl"], checkpointer=self._checkpointer, registry=self._registry)
             self._compiled[version["dsl_hash"]] = cached
+            if len(self._compiled) > MAX_COMPILED_CACHE:
+                self._compiled.pop(next(iter(self._compiled)))  # FIFO eviction of the oldest entry
         return cached
