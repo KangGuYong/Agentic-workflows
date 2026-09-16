@@ -5122,6 +5122,19 @@ git add services/engine/tests/test_runtime_e2e.py
 git commit -m "test(engine): cover recovery, approval restart and live events end to end"
 ```
 
+> **Post-review note (Task 16, as implemented):** commits `73914aa` and `ffc5bf2`.
+>
+> - The plan's `_responder` cannot answer `evaluator_loop`: it only fills a `category` enum, so `llm_eval`'s `{score, feedback}` came back `{}` and `condition_1` failed with `TEMPLATE_ERROR` on `{{llm_eval.score}}`.
+> - The review then mutated engine code and found that half the file could not fail for the reason it existed. `test_two_workers_share_the_queue_without_double_running` asserted one `llm_1` row in `node_runs` — which the schema's `UNIQUE (run_id, node_id, exec_index, attempt)` plus `ON CONFLICT DO NOTHING` guarantees whatever the claim protocol does. With `FOR UPDATE SKIP LOCKED` removed, 10 of 16 runs recorded two `run_started` events and the test passed every time. It counts `run_started` now, and fails 8 out of 8 against that mutation.
+> - `assert run["outputs"]` is true for any non-empty dict: replacing a run's outputs with `{"junk": "값"}` passed all four golden cases, as did routing every classification to `default`, and both parallel branches returned identical text so a crossed branch was invisible. The responder answers from each node's own prompt now and the scenarios assert exact outputs.
+> - The evaluator loop never looped: the generic filler scored 10 against a threshold of 8, so the back edge was never traversed and inverting the condition node changed nothing. A counter scores 5 and then 9, and the test asserts two `llm_gen` attempts and the failing handle on the first pass.
+> - `ids == sorted(ids)` admits both a gap and a duplicate — dropping every `node_finished` from the stream passed, and so did duplicating it. The assertion is a contiguous range now.
+> - `hitl.json` was the missing fifth golden workflow (design 11 asks for all five through the API), and no `reject` decision had ever run through the worker: the approval scenario used a hand-written DSL without the golden's `template_rejected` node. It loads the golden and runs both decisions.
+> - The recovery scenario's comment claimed the lease was left behind. It is not: `_execute`'s `CancelledError` handler hands it back, measurably expired 0.047 s after `stop()` returns, so `lease_sec=1` was dead configuration and only the graceful path was covered. A second case makes the handback itself fail, which is the one thing an abrupt kill actually prevents, and dies if the reaper's recovery query is broken.
+> - Kept as written: the recovery and approval scenarios, which between them catch five engine mutations through assertions no unit test reaches (`len(starts) == 1`, `len(approvals) == 1`).
+>
+> Suite: 897.
+
 ---
 
 ## Task 17: Documentation and full verification
