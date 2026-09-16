@@ -5,10 +5,11 @@ def test_encrypted_serializer_round_trips_with_an_env_key(monkeypatch):
     monkeypatch.setenv("LANGGRAPH_AES_KEY", "0" * 32)
     serde = EncryptedSerializer.from_pycryptodome_aes()
 
-    typed = serde.dumps_typed({"a": [1, "x"]})
+    secret = "SENSITIVE-PAYLOAD-0123456789"
+    typed = serde.dumps_typed({"a": [1, secret]})
 
-    assert serde.loads_typed(typed) == {"a": [1, "x"]}
-    assert b"x" not in typed[1]  # the payload is not stored in the clear
+    assert serde.loads_typed(typed) == {"a": [1, secret]}
+    assert secret.encode() not in typed[1]  # stored encrypted, not in the clear
 
 
 def test_pebble_kills_a_task_that_overruns_its_deadline():

@@ -17,9 +17,15 @@ def test_state_type_has_one_channel_per_node():
 
 
 def test_outputs_are_assembled_from_the_node_channels():
-    state = {"inputs": {"a": 1}, "out_start": {"a": 1}, "out_llm_1": {"text": "답"}, "routes": {}}
+    state = {
+        "inputs": {"a": 1},
+        "out_start": {"a": 1},
+        "out_llm_1": {"text": "답"},
+        "out_empty": {},
+        "routes": {},
+    }
 
-    assert outputs_of(state) == {"start": {"a": 1}, "llm_1": {"text": "답"}}
+    assert outputs_of(state) == {"start": {"a": 1}, "llm_1": {"text": "답"}, "empty": {}}
     assert outputs_of(initial_state({"a": 1})) == {}
 
 
