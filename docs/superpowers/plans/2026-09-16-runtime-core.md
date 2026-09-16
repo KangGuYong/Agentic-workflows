@@ -4957,6 +4957,17 @@ git add services/engine/engine/db/runs.py services/engine/engine/api/routers/run
 git commit -m "feat(engine): resume, retry and cancel runs through the API"
 ```
 
+> **Post-review note (Task 15, as implemented):** commits `870d4d3` and `9e04a26`.
+>
+> - Step 3's snippet omits the `_run_id` guard Task 13's review added to every other route in this file, so `POST /runs/not-a-uuid/cancel` was an `InvalidTextRepresentation` 500 with a logged traceback on all three routes.
+> - A stale `cancel_requested_at` made a requeued run discard everything it had just done. Reachable without touching the database: cancel a running run (202, `status: running`), let the node fail for its own reason inside the heartbeat window — `finish` writes `failed` and leaves the flag — then retry. The retried run executes to completion and is written `cancelled` with `outputs: null`, and `GET /runs/{id}` shows "취소 중" on a run the user just retried. `/resume` has the same hole when the Redis control message is lost and the node parks before the next heartbeat. Both queries clear the flag now.
+> - `queue_retry` reset the counter that gates the *reaper* but neither column that kills the new attempt: `active_ms` is cumulative, so retrying a `RUN_TIMEOUT` failure was 202 followed by `RUN_TIMEOUT` on the first heartbeat tick, forever. It resets `active_ms` too, and `recovery_count` — without that reset a retried run that had exhausted its recovery budget has zero crash tolerance.
+> - Three mutations survived: both `AND status=…` guards in the new queries (the suite only ever exercised the routes' own `FOR UPDATE` re-check) and the Redis `request_cancel` publish, which design 8.2 requires but which the test could not miss because the heartbeat's database poll answers it anyway at `heartbeat_sec=0.2`. `test_cancelling_a_running_run_only_requests_it` also asserted `status in ("running", "cancelled")`, which cannot fail.
+> - Also: `/retry`'s missing-checkpoint 409 blamed the retention period even for a run that never had a checkpoint (a compile failure, a deleted version, inputs rejected at `start`), and the cancel route's Redis publish was the one in the file that swallowed failures without a log.
+> - Verified and left alone: the answer body passes `check_storable` before anything is stored, and the 422 on an unexpected key is `resume_output`'s own `_ANSWER_KEYS`; `reviewedAt` cannot be defeated by case, duplicate keys or nesting, since `parse_json` rejects duplicates and an unknown key is a 422; `queue_resume` keeps `waiting_node_id`/`waiting_exec_index` on purpose, so a resume the engine rejects parks on the same approval and is answerable again; cancel and claim serialise correctly, as do cancel and resume; `seq` keeps increasing across a retry and a reconnect with `Last-Event-ID` delivers the new events.
+>
+> Suite: 887.
+
 ---
 
 ## Task 16: End-to-end scenarios
