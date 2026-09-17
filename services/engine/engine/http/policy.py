@@ -119,6 +119,24 @@ def _specificity(entry: AllowEntry) -> tuple[bool, int, bool]:
     return (not entry.host.startswith("*."), len(entry.host), not entry.allow_private)
 
 
+def is_hostname_syntax(host: str) -> bool:
+    """True if `host` has valid hostname label syntax (dot-separated labels, each starting and ending
+    with an alphanumeric, hyphens allowed inside).
+
+    A wildcard entry's `matches()` is a bare suffix test (`host.endswith(".example.com")`): it never
+    checks that what comes *before* the suffix is a well-formed label, because `_entry()` above already
+    guaranteed that for every allowlist entry at parse time. The client (client.py) has to make the same
+    guarantee for the request-side host it is about to match against that suffix, since nothing else
+    stops something like "..example.com" (an empty label) or "%.example.com" (an invalid character) from
+    passing the suffix test on its way to a wildcard entry. Neither can actually resolve, so this is
+    defence in depth rather than a live bypass -- callers should check `ip_category(host) != "invalid"`
+    first and skip this for an IP literal: an IPv4 literal happens to satisfy `_LABEL`'s digit-only
+    labels and would pass anyway, but an IPv6 literal's colons never will, so this must not be asked to
+    validate an address, only a name.
+    """
+    return bool(_HOSTNAME.fullmatch(host))
+
+
 def ip_category(address: str) -> str | None:
     """Name of the blocked category, or None -- but only when the address is confirmed globally
     routable (2b design §5.3, default-deny). An address that is neither named below nor provably global

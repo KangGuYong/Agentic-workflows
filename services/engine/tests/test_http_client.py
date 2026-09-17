@@ -15,9 +15,8 @@ from engine.http.client import (
     ResponseTooLarge,
     TransportFailed,
     UnsupportedMedia,
-    _redirect_headers,
 )
-from engine.http.policy import parse_allowlist
+from engine.http.policy import AllowEntry, parse_allowlist
 
 NAME = "api.internal.test"
 
@@ -185,6 +184,56 @@ async def test_a_redirect_to_a_host_outside_the_allowlist_is_blocked():
     await client.aclose()
 
 
+async def test_authorization_does_not_reach_a_cross_origin_redirect_target():
+    """Pins that _request actually calls redirect_headers -- not merely that redirect_headers itself is
+    correct in isolation (see test_http_headers.py). Replacing that call with a no-op dict(headers)
+    still passes every other test in this file; only checking the SECOND server's own captured wire
+    catches it, since the cookie-jar tests above cover the jar mechanism, not the caller's own
+    Authorization header."""
+    captured: list[str] = []
+    holder: dict = {}
+
+    async def handle_a(reader, writer):
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            location = f"http://other.internal.test:{holder['port_b']}/landed"
+            resp = (f"HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n"
+                    f"Connection: close\r\n\r\n")
+            writer.write(resp.encode())
+            await writer.drain()
+        finally:
+            writer.close()
+
+    async def handle_b(reader, writer):
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+            captured.append(head.decode())
+            body = b"ok"
+            resp = f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n"
+            writer.write(resp.encode() + body)
+            await writer.drain()
+        finally:
+            writer.close()
+
+    port_a, server_a = await _serve(handle_a)
+    port_b, server_b = await _serve(handle_b)
+    holder["port_b"] = port_b
+    resolver = FakeResolver({"origin.internal.test": ["127.0.0.1"], "other.internal.test": ["127.0.0.1"]})
+    client = _client(
+        f"http://origin.internal.test:{port_a};allowPrivate, "
+        f"http://other.internal.test:{port_b};allowPrivate",
+        resolver,
+    )
+
+    async with server_a, server_b:
+        await client.request(method="GET", url=f"http://origin.internal.test:{port_a}/start",
+                             headers={"Authorization": "Bearer SECRET"}, body=None, timeout_sec=5)
+
+    assert len(captured) == 1
+    assert "authorization" not in captured[0].lower()
+    await client.aclose()
+
+
 async def test_too_many_redirects_is_blocked():
     port = 0
     holder: dict = {}
@@ -348,25 +397,35 @@ async def test_a_connection_is_not_reused_across_hostnames_on_the_same_address()
     """httpcore's connection-pool key is (scheme, address, port); the SNI hostname pinning depends on is
     not part of it. Without disabling keep-alive, a second hostname resolving to the same address could
     reuse the first hostname's already-verified connection with no new handshake -- and no verification
-    against the second name -- at all."""
+    against the second name -- at all.
+
+    The server below never closes and never says "Connection: close" -- it loops, answering request
+    after request on the same socket, exactly like a real keep-alive-friendly server would. That
+    matters: a handler that serves one response and closes in its own `finally` ends the connection
+    itself, which would make this test pass whether or not the client's own keep-alive setting does
+    anything (confirmed by deleting `limits=` entirely and watching this test still pass). With a
+    looping server, only the client's own limit can stop the reuse.
+
+    A failed TLS handshake on the second connection never reaches this handler at all (verification
+    fails during the handshake itself, before asyncio hands the stream to the callback), so there is no
+    reliable "accepted N connections" count to assert here -- the outcome of the *second request* is
+    the whole test: TransportFailed means a fresh, correctly-refused handshake happened; a 200 would
+    mean the first connection's already-completed verification was reused for a name it never verified.
+    """
     authority = trustme.CA()
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     authority.issue_cert("a.internal.test").configure_cert(context)  # cert covers ONLY this name
 
     async def handle(reader, writer):
         try:
-            await reader.readuntil(b"\r\n\r\n")
-            body = b"ok"
-            # Deliberately no "Connection: close": a keep-alive-eligible response, so the only thing
-            # that can stop connection reuse is the client's own limits.
-            resp = f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\nContent-Type: text/plain\r\n\r\n"
-            writer.write(resp.encode() + body)
-            await writer.drain()
-            await asyncio.sleep(0.3)  # give a wrongly-reused connection a moment to arrive here
+            while True:
+                await reader.readuntil(b"\r\n\r\n")
+                body = b"ok"
+                resp = f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\nContent-Type: text/plain\r\n\r\n"
+                writer.write(resp.encode() + body)
+                await writer.drain()
         except Exception:
             pass
-        finally:
-            writer.close()
 
     port, server = await _serve(handle, context)
     verify = ssl.create_default_context()
@@ -377,17 +436,36 @@ async def test_a_connection_is_not_reused_across_hostnames_on_the_same_address()
         resolver, verify=verify,
     )
 
-    async with server:
-        first = await client.request(method="GET", url=f"https://a.internal.test:{port}/one", headers={},
-                                     body=None, timeout_sec=5)
+    # Not `async with server:` -- Server.wait_closed() waits for every accepted connection to finish,
+    # and the second (deliberately failed) handshake below never sends the close the server-side
+    # handler above is waiting to read, so wait_closed() would hang forever. server.close() alone just
+    # stops the listener; the dangling handler task is torn down with the test's own event loop.
+    try:
+        first = await asyncio.wait_for(
+            client.request(method="GET", url=f"https://a.internal.test:{port}/one", headers={},
+                           body=None, timeout_sec=5), timeout=8)
         assert first.status == 200
 
         # If the connection above were reused, this would also return 200 with no new handshake at all
         # -- a certificate issued only for a.internal.test silently accepted for b.internal.test.
         with pytest.raises(TransportFailed):
-            await client.request(method="GET", url=f"https://b.internal.test:{port}/two", headers={},
-                                 body=None, timeout_sec=5)
+            await asyncio.wait_for(
+                client.request(method="GET", url=f"https://b.internal.test:{port}/two", headers={},
+                               body=None, timeout_sec=5), timeout=8)
+    finally:
+        await client.aclose()
+        server.close()
 
+
+async def test_the_connection_pool_still_caps_total_connections():
+    """httpx.Limits() resets max_connections to unlimited if constructed to change anything else --
+    passing limits=httpx.Limits(max_keepalive_connections=0) alone would silently drop the default
+    100-connection cap along with disabling keep-alive. Read the pool's own configuration back rather
+    than trusting a second constant here to stay in sync with whatever client.py passes."""
+    client = _client("https://x.test", FakeResolver({}))
+    pool = client._client._transport._pool
+    assert pool._max_connections == 100
+    assert pool._max_keepalive_connections == 0
     await client.aclose()
 
 
@@ -463,6 +541,117 @@ async def test_a_set_cookie_does_not_survive_to_a_later_separate_request():
     assert len(captured) == 2
     assert "cookie" not in captured[1].lower()
     await client.aclose()
+
+
+async def test_the_cookie_jar_itself_is_empty_after_a_response_with_set_cookie():
+    """Isolates the jar clear in _request from the Cookie-header override in _send: even though _send
+    never trusts the jar for what goes out on the wire, the jar object itself must not keep growing --
+    removing self._client.cookies.clear() would leave this assertion failing even though no cookie
+    would (yet) have reached any wire, because nothing has asked the jar to attach itself again."""
+    port, server = await _serve(_responder(b"ok", headers="Content-Type: text/plain\r\n"
+                                           "Set-Cookie: sess=FROM_SERVER\r\n"))
+    resolver = FakeResolver({NAME: ["127.0.0.1"]})
+    client = _client(f"http://{NAME}:{port};allowPrivate", resolver)
+
+    async with server:
+        await client.request(method="GET", url=f"http://{NAME}:{port}/x", headers={}, body=None,
+                             timeout_sec=5)
+
+    assert dict(client._client.cookies) == {}
+    await client.aclose()
+
+
+async def test_a_preexisting_jar_cookie_never_reaches_the_wire():
+    """Isolates the Cookie-header pop in _send from the jar clear in _request: seed the jar directly
+    (as if a previous response's Set-Cookie had not been cleared in time, or anything else put
+    something there), before this request's own build_request() call ever runs. Only the pop in _send
+    -- not the clear, which has not had anything to act on yet -- can be what keeps this off the wire."""
+    captured: list[str] = []
+
+    async def handle(reader, writer):
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+            captured.append(head.decode())
+            body = b"ok"
+            resp = f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n"
+            writer.write(resp.encode() + body)
+            await writer.drain()
+        finally:
+            writer.close()
+
+    port, server = await _serve(handle)
+    resolver = FakeResolver({NAME: ["127.0.0.1"]})
+    client = _client(f"http://{NAME}:{port};allowPrivate", resolver)
+    client._client.cookies.set("sess", "PRESEEDED", domain="127.0.0.1")
+
+    async with server:
+        await client.request(method="GET", url=f"http://{NAME}:{port}/x", headers={}, body=None,
+                             timeout_sec=5)
+
+    assert "cookie" not in captured[0].lower()
+    await client.aclose()
+
+
+async def test_the_wire_cookie_is_the_callers_not_the_jars():
+    """Isolates the intended-cookie logic in _send from a "pass-through" that merely fails to clear
+    what httpx's jar already put on the built request: seed the jar with one value and pass a
+    *different* one explicitly, and check that the value that actually reaches the wire is the one
+    this call asked for, not the one already sitting in the jar."""
+    captured: list[str] = []
+
+    async def handle(reader, writer):
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+            captured.append(head.decode())
+            body = b"ok"
+            resp = f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n"
+            writer.write(resp.encode() + body)
+            await writer.drain()
+        finally:
+            writer.close()
+
+    port, server = await _serve(handle)
+    resolver = FakeResolver({NAME: ["127.0.0.1"]})
+    client = _client(f"http://{NAME}:{port};allowPrivate", resolver)
+    client._client.cookies.set("sess", "FROM_JAR", domain="127.0.0.1")
+
+    async with server:
+        await client.request(method="GET", url=f"http://{NAME}:{port}/x", headers={"Cookie": "mine=1"},
+                             body=None, timeout_sec=5)
+
+    cookie_lines = [ln for ln in captured[0].split("\r\n") if ln.lower().startswith("cookie:")]
+    assert cookie_lines == ["Cookie: mine=1"]
+    await client.aclose()
+
+
+async def test_the_jar_is_cleared_even_when_the_response_itself_is_refused():
+    """httpx extracts Set-Cookie inside send() before this client ever regains control, so a response
+    that this client goes on to refuse for an unrelated reason (here: a Location header httpx's own
+    parser rejects, escaping through request()'s safety net) still populates the jar first. The clear
+    has to run on that path too, or a failing request leaves the jar growing forever and a later,
+    unrelated request could pick up whatever it left behind."""
+    async def handle(reader, writer):
+        try:
+            while True:
+                await reader.readuntil(b"\r\n\r\n")
+                writer.write(b"HTTP/1.1 302 Found\r\nLocation: mailto:x@y.z\r\n"
+                             b"Set-Cookie: sess=STUCK\r\nContent-Length: 0\r\n\r\n")
+                await writer.drain()
+        except Exception:
+            pass
+
+    port, server = await _serve(handle)
+    resolver = FakeResolver({NAME: ["127.0.0.1"]})
+    client = _client(f"http://{NAME}:{port};allowPrivate", resolver)
+
+    with pytest.raises(EgressBlocked):
+        await asyncio.wait_for(
+            client.request(method="GET", url=f"http://{NAME}:{port}/x", headers={}, body=None,
+                           timeout_sec=5), timeout=8)
+
+    assert dict(client._client.cookies) == {}
+    await client.aclose()
+    server.close()
 
 
 async def test_tenant_supplied_framing_headers_never_reach_the_wire():
@@ -594,6 +783,28 @@ async def test_a_compressed_response_is_capped_against_the_wire_bytes_not_the_de
     await client.aclose()
 
 
+async def test_a_server_that_compresses_anyway_is_reported_as_unsupported_media():
+    """The other side of the previous test's trade, on the record rather than a surprise: a
+    *legitimate* server that ignores Accept-Encoding: identity and gzips its JSON anyway (some do) now
+    fails this call outright, because _read hands aiter_raw()'s undecompressed bytes straight to
+    _decode -- there is no decompression step left to run. Before switching to aiter_raw(), httpx would
+    have decompressed this transparently and the JSON would have parsed. Keeping the safer behaviour
+    (see the module docstring's last paragraph) means this functional cost is real and is accepted
+    deliberately, not accidentally."""
+    payload = gzip.compress(b'{"hello": "world"}')
+    port, server = await _serve(_responder(payload, headers="Content-Encoding: gzip\r\n"
+                                           "Content-Type: application/json\r\n"))
+    resolver = FakeResolver({NAME: ["127.0.0.1"]})
+    client = _client(f"http://{NAME}:{port};allowPrivate", resolver)
+
+    async with server:
+        with pytest.raises(UnsupportedMedia):
+            await client.request(method="GET", url=f"http://{NAME}:{port}/x", headers={}, body=None,
+                                 timeout_sec=5)
+
+    await client.aclose()
+
+
 async def test_a_confusable_unicode_host_is_blocked_not_crashed():
     """U+2100 NFKC-normalizes to "a/c"; Python's own urlsplit refuses a netloc like this with a raw
     ValueError rather than parsing it -- that must become EgressBlocked, never an unhandled crash."""
@@ -615,17 +826,18 @@ async def test_a_redirect_to_a_non_http_scheme_is_blocked(location):
     response.next_request, even with follow_redirects=False -- and its stricter URL parser rejects an
     opaque, non-hierarchical URI like these (no "/"-rooted path) before this client ever gets to look at
     the Location header itself. That surfaces as httpx.InvalidURL, caught by request()'s safety net and
-    reported as TransportFailed rather than EgressBlocked("scheme") -- a different category, but the
-    same guarantee: the request is never followed to a non-http(s) destination either way."""
+    reported as EgressBlocked("internal") rather than EgressBlocked("scheme") -- a different category,
+    but the same guarantee: the request is never followed to a non-http(s) destination either way."""
     port, server = await _serve(_responder(b"", status="302 Found", headers=f"Location: {location}\r\n"))
     resolver = FakeResolver({NAME: ["127.0.0.1"]})
     client = _client(f"http://{NAME}:{port};allowPrivate", resolver)
 
     async with server:
-        with pytest.raises((EgressBlocked, TransportFailed)):
+        with pytest.raises(EgressBlocked) as exc:
             await client.request(method="GET", url=f"http://{NAME}:{port}/x", headers={}, body=None,
                                  timeout_sec=5)
 
+    assert exc.value.category == "internal"
     await client.aclose()
 
 
@@ -689,10 +901,14 @@ async def test_a_redirect_to_a_malformed_port_is_blocked():
     await client.aclose()
 
 
-async def test_an_unexpected_exception_is_reported_as_a_transport_failure(caplog):
+async def test_an_unexpected_exception_is_reported_as_a_non_retryable_internal_error(caplog):
     """The client's contract is exactly four exception types (see request()'s docstring). Whatever the
     exact mechanism -- an httpx.InvalidURL that is not an HTTPError, an h11 protocol error, a resolver
-    that raises something other than OSError -- nothing else may escape request()."""
+    that raises something other than OSError -- nothing else may escape request(). It must come back
+    as EgressBlocked("internal"), not TransportFailed: per 2b design §5.6, EgressBlocked is
+    non-retryable and TransportFailed is retryable, and a bug in this module's own logic (a broken
+    policy classifier, here simulated with a resolver that raises the wrong exception type) must fail
+    the node once, loudly -- not be retried forever as if the network had merely blinked."""
     class ExplodingResolver:
         async def resolve(self, host):
             raise RuntimeError("boom")
@@ -701,38 +917,53 @@ async def test_an_unexpected_exception_is_reported_as_a_transport_failure(caplog
 
     with (
         caplog.at_level(logging.ERROR, logger="engine.http.client"),
-        pytest.raises(TransportFailed) as exc,
+        pytest.raises(EgressBlocked) as exc,
     ):
         await client.request(method="GET", url="https://api.example.com/x", headers={}, body=None,
                              timeout_sec=5)
 
-    assert exc.value.args[0] == "RuntimeError"
+    assert exc.value.category == "internal"
+    assert not isinstance(exc.value, TransportFailed)
     assert any("unexpected" in record.getMessage() for record in caplog.records)
     await client.aclose()
 
 
-def test_same_origin_redirect_keeps_every_header():
-    headers = {"Authorization": "Bearer t", "Cookie": "s=1", "X-API-Key": "k", "X-Foo": "bar"}
-    result = _redirect_headers(headers, "https://api.example.com/a", "https://api.example.com/b")
-    assert result == headers
+async def test_a_broken_policy_classifier_fails_closed_without_reaching_the_socket(monkeypatch):
+    """A bug in the policy layer itself must not turn into traffic. Simulate a typo in the address
+    classifier (ip_category raising instead of answering) against a private address that must be
+    blocked with no allowPrivate, and confirm the request never reaches the socket -- fail-closed, not
+    fail-open, even when the code that is supposed to say why is itself broken."""
+    import engine.http.client as mod
 
+    hits: list[int] = []
 
-def test_cross_origin_redirect_drops_credential_headers_but_keeps_others():
-    headers = {"Authorization": "Bearer t", "Cookie": "s=1", "X-API-Key": "k", "X-Foo": "bar"}
-    result = _redirect_headers(headers, "https://api.example.com/a", "https://other.example.com/b")
-    assert result == {"X-Foo": "bar"}
+    async def handle(reader, writer):
+        hits.append(1)
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 6\r\n"
+                         b"Connection: close\r\n\r\nSECRET")
+            await writer.drain()
+        finally:
+            writer.close()
 
+    port, server = await _serve(handle)
+    resolver = FakeResolver({NAME: ["10.0.0.5"]})  # private, and no allowPrivate -- must be blocked
+    client = _client(f"http://{NAME}:{port}", resolver)
 
-def test_an_http_to_https_upgrade_on_the_same_host_keeps_credentials():
-    headers = {"Authorization": "Bearer t", "Cookie": "s=1"}
-    result = _redirect_headers(headers, "http://api.example.com/a", "https://api.example.com/b")
-    assert result == headers
+    def broken(_address):
+        raise KeyError("typo in the category table")
 
+    monkeypatch.setattr(mod, "ip_category", broken)
 
-def test_origin_comparison_uses_host_and_port_not_host_alone():
-    headers = {"Authorization": "Bearer t"}
-    result = _redirect_headers(headers, "https://api.example.com:8443/a", "https://api.example.com/b")
-    assert result == {}  # different port -> different origin, even though the host string matches
+    async with server:
+        with pytest.raises(EgressBlocked) as exc:
+            await client.request(method="GET", url=f"http://{NAME}:{port}/x", headers={}, body=None,
+                                 timeout_sec=5)
+
+    assert exc.value.category == "internal"
+    assert hits == []  # fail-closed: the broken classifier never let the request reach the socket
+    await client.aclose()
 
 
 async def test_content_type_does_not_survive_the_post_to_get_conversion():
@@ -855,6 +1086,59 @@ async def test_an_empty_dns_answer_is_blocked():
                              timeout_sec=5)
 
     assert exc.value.category == "dns"
+    await client.aclose()
+
+
+async def test_an_allow_entry_with_an_empty_host_is_still_rejected_before_dns():
+    """parse_allowlist refuses to ever construct an AllowEntry with an empty host, so with it as the
+    only entry source, _check's own "if not host" guard is unobservable -- that argument is correct
+    (see this task's round-2 review) but AllowEntry is a public export, and nothing stops some future
+    entry source from building one directly with host="". White-box construct one to prove the guard
+    is what stands between that and find_entry's exact-match rule happily matching "" against "":
+    without it, this would resolve "" and classify whatever came back instead of refusing outright."""
+    resolver = FakeResolver({"": ["10.0.0.5"]})
+    client = GuardedClient((AllowEntry(scheme="https", host="", port=443, allow_private=False),),
+                           resolver=resolver)
+
+    with pytest.raises(EgressBlocked) as exc:
+        await client._check("https:///x")
+
+    assert exc.value.category == "allowlist"
+    assert resolver.calls == []
+    await client.aclose()
+
+
+@pytest.mark.parametrize("host", ["..example.com", "\x00.example.com", "%.example.com", ".example.com"])
+async def test_a_syntactically_invalid_host_does_not_pass_a_wildcard_suffix_match(host):
+    """AllowEntry.matches()'s wildcard branch is a bare suffix test (host.endswith(".example.com")); it
+    relies on the allowlist side always being a validated hostname (parse_allowlist guarantees that) but
+    has no opinion on the *request*-side host. None of these can actually resolve, so this is not a
+    live bypass, but the suffix test alone would happily match all four against "*.example.com" -- the
+    request-side syntax check in _check exists so that only a well-formed name reaches that match."""
+    resolver = FakeResolver({})
+    client = _client("https://*.example.com", resolver)
+
+    with pytest.raises(EgressBlocked) as exc:
+        await client.request(method="GET", url=f"https://{host}/x", headers={}, body=None,
+                             timeout_sec=5)
+
+    assert exc.value.category == "allowlist"
+    assert resolver.calls == []
+    await client.aclose()
+
+
+async def test_a_syntactically_valid_wildcard_match_still_reaches_dns():
+    """The companion to the test above: is_hostname_syntax must not be so strict that it blocks a
+    perfectly ordinary subdomain a wildcard entry is supposed to allow."""
+    resolver = FakeResolver({"sub.example.com": ["10.0.0.5"]})
+    client = _client("https://*.example.com", resolver)
+
+    with pytest.raises(EgressBlocked) as exc:
+        await client.request(method="GET", url="https://sub.example.com/x", headers={}, body=None,
+                             timeout_sec=5)
+
+    assert resolver.calls == ["sub.example.com"]  # it matched and reached DNS, not blocked at the gate
+    assert exc.value.category == "private"
     await client.aclose()
 
 
