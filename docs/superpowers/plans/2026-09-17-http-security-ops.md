@@ -211,7 +211,7 @@ git commit -m "test(engine): prove pinned-IP TLS keeps certificate verification"
 - Modify: `services/engine/engine/config.py`
 - Test: `services/engine/tests/test_http_policy.py`
 
-- [ ]  **Step 1: Write the failing tests**
+- [x]  **Step 1: Write the failing tests**
 
 Create `services/engine/tests/test_http_policy.py`:
 
@@ -319,12 +319,12 @@ def test_an_unparseable_address_is_treated_as_blocked():
     assert ip_category("not-an-ip") == "invalid"
 ```
 
-- [ ]  **Step 2: Run them to see them fail**
+- [x]  **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/test_http_policy.py -q`
 Expected: FAIL — `ModuleNotFoundError: No module named 'engine.http'`.
 
-- [ ]  **Step 3: Implement the policy**
+- [x]  **Step 3: Implement the policy**
 
 Create `services/engine/engine/http/__init__.py` (empty file) and `services/engine/engine/http/policy.py`:
 
@@ -479,12 +479,12 @@ def _is_ip(host: str) -> bool:
     return True
 ```
 
-- [ ]  **Step 4: Run the tests**
+- [x]  **Step 4: Run the tests**
 
 Run: `uv run pytest tests/test_http_policy.py -q`
 Expected: PASS (all parametrized cases).
 
-- [ ]  **Step 5: Wire the allowlist into the config**
+- [x]  **Step 5: Wire the allowlist into the config**
 
 In `services/engine/engine/config.py`, add to the `EngineConfig` dataclass, after `max_body_bytes`:
 
@@ -521,7 +521,7 @@ and to the `EngineConfig(...)` call:
         http_max_response_bytes=_int("HTTP_MAX_RESPONSE_BYTES", 5_000_000),
 ```
 
-- [ ]  **Step 6: Test the config wiring**
+- [x]  **Step 6: Test the config wiring**
 
 Append to `services/engine/tests/test_config.py`:
 
@@ -555,7 +555,7 @@ def test_no_allowlist_means_everything_is_blocked(monkeypatch):
 
 Check the imports at the top of `tests/test_config.py` — it already imports `load_config` and `ConfigError`; add `pytest` if it is not there.
 
-- [ ]  **Step 7: Run everything and commit**
+- [x]  **Step 7: Run everything and commit**
 
 Run: `uv run pytest -q` → all pass.
 Run: `uv run ruff check .` → `All checks passed!`
@@ -4641,3 +4641,54 @@ proves.
 convention 5. The two `async with` statements are combined, which ruff's SIM117 requires. The plan's code
 block at Task 0 Step 2 still shows the original test name and no Host assertion; it is a pre-implementation
 snippet and was left as the record of what was asked for.
+
+### Task 1 — egress policy
+
+**Commits:** `a717018`, `4b856c1`, `6a1b37c`, `3de6037`, `a2e6044`, `e1c8d7b`, `dae5805`. Design changes
+this task forced are recorded in the spec (`c3c5072`, `35b5962`).
+
+**The plan shipped a default-allow classifier, and that was a real SSRF hole.** The first implementation
+reproduced the plan's code byte for byte. A differential oracle — comparing `ip_category` against
+`ipaddress`'s own classification across 1,060,407 addresses — found 145 addresses the policy called public
+that are not globally routable. Three were reachable from a tenant-controlled AAAA record:
+`::169.254.169.254` (IPv4-compatible), `::ffff:0:169.254.169.254` (SIIT translated) and
+`64:ff9b:1::a9fe:a9fe` (NAT64 local-use, directly routable in IPv6-only VPCs, and sibling to a prefix that
+*was* already in the table). Two of them reach cloud metadata.
+
+Fixed by inverting the architecture: the table now *names* a blocked address, every IPv6-embeds-IPv4 form
+is unwrapped, and an address not in the table passes only if it is genuinely globally routable. The table
+stays authoritative rather than delegating to `is_global`, because `ipaddress`'s judgement of a few ranges
+has changed across Python patch releases and a security boundary must not move when the interpreter is
+upgraded. Final oracle: zero holes.
+
+**`allowPrivate` exempted only `private`, which made every one of the plan's own TLS tests impossible** —
+they all resolve to `127.0.0.1`, which classifies as `loopback`. Caught while reading Task 2 rather than
+by running it. The exemption set is now `{private, loopback, cgnat}` and deliberately excludes
+`link-local`: an operator who opened one internal API did not ask for `169.254.169.254`.
+
+**`match` failed open on duplicate entries.** First-match-wins meant
+`"https://api.example.com;allowPrivate, https://api.example.com"` granted private access purely because
+the privileged copy was written first — realistic when two allowlists are merged. Now most-specific-wins,
+order-independent, and a tie goes to the least-privileged entry. Renamed to `find_entry` because `match`
+and `AllowEntry.matches` were one word apart with different return types.
+
+**Mutation testing drove three rounds.** 14 of 38 mutations survived the first pass, including
+`AllowEntry.matches` returning `True` unconditionally for non-wildcard hosts. Two survivors turned out to
+be genuine *equivalent* mutants and the implementer correctly refused to write tests for unobservable
+behaviour: narrowing `240.0.0.0/4` was unobservable because `"reserved"` was both a table name and the
+fallback name, and that was fixed at the source by giving the fallback its own category, `"non-global"` —
+which makes every table entry's prefix length observable, not just that one.
+
+**Quality review** found three arguments each restated three or four times (comment/code ratio 1.06
+against a house range of 0.09–0.27), a test comment claiming coverage of "every range" while covering 7 of
+23, and six addresses pinned to `== "non-global"` that would have punished a maintainer for the correct
+hardening of tabling a range. All fixed; ratio now 0.93, the remainder being non-repeated reasoning in two
+long docstrings.
+
+**Known flakes, unrelated to this task and untouched by it:** two timing-sensitive tests failed once each
+across many full-suite runs and never in isolation —
+`tests/test_worker_render.py::test_a_slow_template_hits_the_deadline_and_the_pool_survives` (a 0.5 s
+render deadline raced against a `< 5 s` wall-clock assertion) and
+`tests/test_worker_lease.py::test_a_run_over_its_active_time_limit_fails` (a 300 ms deadline against real
+containers). Both have the same shape: a hard-coded deadline raced against wall-clock under full-suite
+load. Revisit when Task 14 touches the render pool.
