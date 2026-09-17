@@ -62,3 +62,17 @@ def test_no_allowlist_means_everything_is_blocked(monkeypatch):
     monkeypatch.setenv("LANGGRAPH_AES_KEY", "0" * 32)
 
     assert load_config().http_allowlist == ()
+
+
+def test_the_http_limits_take_their_documented_defaults(monkeypatch):
+    monkeypatch.setenv("ENGINE_DATABASE_URL", "postgresql://x/y")
+    monkeypatch.setenv("LANGGRAPH_AES_KEY", "0" * 32)
+    monkeypatch.delenv("HTTP_MAX_REDIRECTS", raising=False)
+    monkeypatch.delenv("HTTP_MAX_REQUEST_BYTES", raising=False)
+    monkeypatch.delenv("HTTP_MAX_RESPONSE_BYTES", raising=False)
+
+    config = load_config()
+
+    assert config.http_max_redirects == 3
+    assert config.http_max_request_bytes == 1_000_000
+    assert config.http_max_response_bytes == 5_000_000

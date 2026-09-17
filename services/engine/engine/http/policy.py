@@ -2,6 +2,11 @@
 
 Pure: no DNS, no sockets. The client (client.py) supplies resolved addresses and asks questions here, so
 the whole policy can be tested as a table without touching the network.
+
+`ip_category` is default-deny: it returns None only when it can positively confirm an address is
+globally routable. A range the tables below forgot to name is still blocked (generically, as
+"reserved"), never silently let through -- for an egress filter, a forgotten range is an SSRF hole,
+while a wrongly-blocked one is just a support ticket.
 """
 from __future__ import annotations
 
@@ -14,7 +19,8 @@ LABEL = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
 HOSTNAME = re.compile(rf"^{LABEL}(?:\.{LABEL})*$")
 WILDCARD = re.compile(rf"^\*(?:\.{LABEL})+$")
 
-# Blocked ranges by category. Order matters only for readability: the ranges do not overlap.
+# Named ranges, checked before the default-deny fallback below. Order matters only for readability:
+# the ranges do not overlap.
 _V4 = [
     ("loopback", ipaddress.ip_network("127.0.0.0/8")),
     ("link-local", ipaddress.ip_network("169.254.0.0/16")),
@@ -25,18 +31,35 @@ _V4 = [
     ("unspecified", ipaddress.ip_network("0.0.0.0/8")),
     ("multicast", ipaddress.ip_network("224.0.0.0/4")),
     ("reserved", ipaddress.ip_network("240.0.0.0/4")),
+    ("reserved", ipaddress.ip_network("192.0.0.0/24")),     # IETF protocol assignments (incl. the
+                                                              # NAT64/DNS64 discovery addresses)
+    ("reserved", ipaddress.ip_network("198.18.0.0/15")),     # benchmarking
+    ("tunneled", ipaddress.ip_network("192.88.99.0/24")),    # 6to4 relay anycast
 ]
 _V6 = [
     ("loopback", ipaddress.ip_network("::1/128")),
     ("unspecified", ipaddress.ip_network("::/128")),
     ("link-local", ipaddress.ip_network("fe80::/10")),
     ("private", ipaddress.ip_network("fc00::/7")),
+    ("private", ipaddress.ip_network("fec0::/10")),           # site-local, deprecated (RFC 3879)
     ("multicast", ipaddress.ip_network("ff00::/8")),
-    # Tunnel/translation ranges embed an IPv4 address that our v4 rules would otherwise never see.
-    ("tunneled", ipaddress.ip_network("2002::/16")),      # 6to4
-    ("tunneled", ipaddress.ip_network("2001::/32")),      # Teredo
-    ("tunneled", ipaddress.ip_network("64:ff9b::/96")),   # NAT64
+    # These are blanket blocks regardless of what they embed -- see _embedded_v4's docstring for why
+    # that matters for 64:ff9b::/96 and 64:ff9b:1::/48 specifically.
+    ("tunneled", ipaddress.ip_network("2002::/16")),          # 6to4
+    ("tunneled", ipaddress.ip_network("2001::/32")),          # Teredo
+    ("tunneled", ipaddress.ip_network("64:ff9b::/96")),       # NAT64, well-known prefix (RFC 6052)
+    ("tunneled", ipaddress.ip_network("64:ff9b:1::/48")),     # NAT64, local-use prefix (RFC 8215)
 ]
+
+# IPv6 forms that carry an IPv4 address in their low 32 bits. Consulted only after _V6 above has had
+# first refusal (see ip_category), so this never overrides a blanket block.
+_EMBEDDED_V4_NETWORKS = (
+    ipaddress.ip_network("::ffff:0:0/96"),     # IPv4-mapped (RFC 4291 §2.5.5.2)
+    ipaddress.ip_network("::/96"),             # IPv4-compatible, deprecated (RFC 4291 §2.5.5.1) --
+                                                # "::" and "::1" never reach this check: the _V6 table
+                                                # above already returns for those two exact addresses.
+    ipaddress.ip_network("::ffff:0:0:0/96"),   # IPv4-translated / SIIT
+)
 
 
 class PolicyError(Exception):
@@ -56,8 +79,10 @@ class AllowEntry:
         if not self.host.startswith("*."):
             return host == self.host
         suffix = self.host[1:]  # ".example.com"
-        # endswith alone would let "evil-example.com" through, and would also match the bare domain;
-        # requiring at least one more character means only a real sub-label matches.
+        # The leading dot in `suffix` is what makes this safe: ending in ".example.com" requires an
+        # actual label boundary right before "example.com", so "notexample.com" cannot match (no dot
+        # there) and the bare "example.com" cannot match either (too short to contain a leading dot at
+        # all). `len(host) > len(suffix)` excludes only the degenerate host == ".example.com" itself.
         return host.endswith(suffix) and len(host) > len(suffix)
 
 
@@ -67,16 +92,45 @@ def parse_allowlist(raw: str) -> tuple[AllowEntry, ...]:
 
 
 def match(entries: tuple[AllowEntry, ...], scheme: str, host: str, port: int) -> AllowEntry | None:
-    """The entry that permits this target, or None. The entry is returned, not a bool, because
-    `allowPrivate` belongs to the entry that matched and must not leak to any other."""
+    """The most specific entry that permits this target, or None.
+
+    "Most specific" -- not "first in the list" -- because `allowPrivate` belongs to the entry that
+    matched and must not leak to a broader entry that merely happens to match too: an exact host
+    always outranks a wildcard, and among wildcards a longer (more specific) pattern outranks a
+    shorter one. This makes the result independent of the order the operator wrote the entries in --
+    reversing "*.example.com;allowPrivate, api.example.com" must not change which one wins for
+    "api.example.com".
+
+    `host` must already be lowercase ASCII -- Task 2's client resolves DNS and is responsible for
+    IDNA-encoding the host before calling here. A non-ASCII host is refused outright rather than
+    casefolded, because casefolding non-ASCII text can equate characters that should stay distinct
+    (e.g. U+212A KELVIN SIGN lowercases to "k" and would otherwise alias an entry for "ok.example.com").
+    """
+    if not host.isascii():
+        return None
+    host = host.lower()
+    best = None
     for entry in entries:
-        if entry.matches(scheme, host.lower(), port):
-            return entry
-    return None
+        if entry.matches(scheme, host, port) and (best is None or _specificity(entry) > _specificity(best)):
+            best = entry
+    return best
+
+
+def _specificity(entry: AllowEntry) -> tuple[bool, int]:
+    # (is_exact, pattern_length): an exact host beats every wildcard regardless of length, and among
+    # wildcards the longer -- so more specific -- host pattern wins.
+    return (not entry.host.startswith("*."), len(entry.host))
 
 
 def ip_category(address: str) -> str | None:
-    """Name of the blocked category, or None when the address is publicly routable.
+    """Name of the blocked category, or None -- but only when the address is confirmed globally
+    routable (2b design §5.3, default-deny). An address that is neither named below nor provably
+    global still comes back blocked, generically as "reserved", instead of falling through to None.
+
+    The tables stay authoritative for the ranges they name: `ipaddress`'s own idea of what counts as
+    global has changed across Python patch releases, and a security boundary should not move just
+    because the interpreter was upgraded. They no longer have to be exhaustive for safety, though --
+    that is the fallback's job.
 
     Only a category name is ever shown to a tenant (2b design §5.6): the address itself would tell an
     attacker what the engine can see.
@@ -89,18 +143,36 @@ def ip_category(address: str) -> str | None:
         for name, network in _V6:
             if ip in network:
                 return name
-        if ip.ipv4_mapped is not None:  # ::ffff:127.0.0.1 must be classified as the address it carries
-            return ip_category(str(ip.ipv4_mapped))
-        return None
+        embedded = _embedded_v4(ip)
+        if embedded is not None:
+            return ip_category(str(embedded))
+        if ip.is_global and not ip.is_site_local:
+            return None
+        return "reserved"
     for name, network in _V4:
         if ip in network:
             return name
+    if ip.is_global:
+        return None
+    return "reserved"
+
+
+def _embedded_v4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
+    """The IPv4 address carried in ip's low 32 bits, for the known embedding forms -- or None.
+
+    Only called once the _V6 table above has had first refusal, so this can never soften a blanket
+    block: 64:ff9b::/96 (the well-known, globally-significant NAT64 prefix) and 64:ff9b:1::/48 (its
+    RFC 8215 local-use sibling) both stay blocked no matter what public address they embed -- that
+    over-blocking is deliberate, not a gap.
+    """
+    if any(ip in network for network in _EMBEDDED_V4_NETWORKS):
+        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
     return None
 
 
 def _entry(item: str) -> AllowEntry:
-    text, _, flag = item.partition(";")
-    if flag and flag.strip() != "allowPrivate":
+    text, semicolon, flag = item.partition(";")
+    if semicolon and flag.strip() != "allowPrivate":
         raise PolicyError(f"알 수 없는 옵션입니다: {item}")
     scheme, separator, rest = text.strip().lower().partition("://")
     if not separator or scheme not in DEFAULT_PORTS:
@@ -108,7 +180,13 @@ def _entry(item: str) -> AllowEntry:
     host, port = _split(rest, item)
     if not host:
         raise PolicyError(f"호스트가 없습니다: {item}")
-    if not (HOSTNAME.match(host) or WILDCARD.match(host) or _is_ip(host)):
+    if _is_ip(host):
+        # Normalise an IP-literal host to its canonical form at parse time, so an operator who wrote
+        # "[::0001]" gets an entry that actually matches requests for "::1" instead of a silently dead
+        # one. (The request-side host is expected to arrive already normalised the same way -- see
+        # match()'s docstring.)
+        host = ipaddress.ip_address(host).compressed
+    elif not (HOSTNAME.fullmatch(host) or WILDCARD.fullmatch(host)):
         raise PolicyError(f"호스트 형식이 올바르지 않습니다: {item}")
     if port is None:
         port = DEFAULT_PORTS[scheme]
