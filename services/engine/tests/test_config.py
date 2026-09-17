@@ -76,3 +76,20 @@ def test_the_http_limits_take_their_documented_defaults(monkeypatch):
     assert config.http_max_redirects == 3
     assert config.http_max_request_bytes == 1_000_000
     assert config.http_max_response_bytes == 5_000_000
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("HTTP_MAX_REDIRECTS", "-1"),           # below the 0..10 range
+    ("HTTP_MAX_REDIRECTS", "11"),           # above it
+    ("HTTP_MAX_REQUEST_BYTES", "0"),        # a 0-byte cap makes every request fail, not "unbounded"
+    ("HTTP_MAX_REQUEST_BYTES", "100000001"),  # above the 100 MB ceiling
+    ("HTTP_MAX_RESPONSE_BYTES", "0"),
+    ("HTTP_MAX_RESPONSE_BYTES", "100000001"),
+])
+def test_an_out_of_range_http_limit_refuses_to_start(monkeypatch, name, value):
+    monkeypatch.setenv("ENGINE_DATABASE_URL", "postgresql://x/y")
+    monkeypatch.setenv("LANGGRAPH_AES_KEY", "0" * 32)
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ConfigError):
+        load_config()

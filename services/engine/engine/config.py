@@ -44,6 +44,17 @@ def _int(name: str, default: int) -> int:
         raise ConfigError(f"{name} must be an integer") from None
 
 
+def _bounded_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    """Like _int, but refuses a value outside [minimum, maximum]. For the three HTTP egress limits
+    below, an unvalidated env var would load fine and only misbehave per-request: -1 redirects or a
+    0-byte response cap either breaks every http_request call or (read the other way) disables the
+    limit outright, and Task 2's client would inherit whichever happened silently."""
+    value = _int(name, default)
+    if not minimum <= value <= maximum:
+        raise ConfigError(f"{name} must be between {minimum} and {maximum}, got {value}")
+    return value
+
+
 def load_config() -> EngineConfig:
     database_url = os.getenv("ENGINE_DATABASE_URL")
     if not database_url:
@@ -76,7 +87,14 @@ def load_config() -> EngineConfig:
         render_pool_size=_int("RENDER_POOL_SIZE", os.cpu_count() or 2),
         max_body_bytes=_int("MAX_BODY_BYTES", 1_000_000),
         http_allowlist=allowlist,
-        http_max_redirects=_int("HTTP_MAX_REDIRECTS", 3),
-        http_max_request_bytes=_int("HTTP_MAX_REQUEST_BYTES", 1_000_000),
-        http_max_response_bytes=_int("HTTP_MAX_RESPONSE_BYTES", 5_000_000),
+        # 10 redirects is generous for any legitimate API and still short enough to bound a redirect
+        # loop; 0 is a valid choice (follow none). 1 byte..100 MB keeps a request/response cap from
+        # being configured into "unusable" (0) or "unbounded" (unset-equivalent) by a typo.
+        http_max_redirects=_bounded_int("HTTP_MAX_REDIRECTS", 3, minimum=0, maximum=10),
+        http_max_request_bytes=_bounded_int(
+            "HTTP_MAX_REQUEST_BYTES", 1_000_000, minimum=1, maximum=100_000_000
+        ),
+        http_max_response_bytes=_bounded_int(
+            "HTTP_MAX_RESPONSE_BYTES", 5_000_000, minimum=1, maximum=100_000_000
+        ),
     )

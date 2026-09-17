@@ -13,8 +13,8 @@ from engine.api.app import create_app
 from engine.api.body import field, read_json, require_object
 from engine.api.errors import ApiError
 from engine.api.security import TokenAuthMiddleware
-from engine.config import EngineConfig
 from engine.jsondata import MAX_JSON_DEPTH
+from tests.helpers import make_config
 
 # ---------------------------------------------------------------- against the real app (needs db/redis)
 
@@ -350,13 +350,7 @@ async def test_create_app_warns_when_no_token_is_configured(caplog):
     that contract is not changed here -- but create_app must say so loudly at startup rather than relying
     on main.py, since load_config() maps ENGINE_API_TOKEN="" to None and create_app is reachable without
     going through an entrypoint (e.g. from tests, as here)."""
-    config = EngineConfig(
-        database_url="postgresql://u:p@h/db", redis_url="redis://h:6379/0", api_token=None,
-        encrypt_checkpoints=False, ollama_base_url="http://localhost:11434", ollama_num_parallel=1,
-        worker_max_runs=1, lease_sec=1, heartbeat_sec=1, claim_poll_sec=1.0, reaper_interval_sec=1.0,
-        run_max_active_ms=1000, render_timeout_sec=1.0, render_pool_size=1, max_body_bytes=1000,
-        http_allowlist=(), http_max_redirects=3, http_max_request_bytes=1000, http_max_response_bytes=1000,
-    )
+    config = make_config()
 
     with caplog.at_level(logging.WARNING):
         create_app(config, pool=SimpleNamespace(), redis=SimpleNamespace())
@@ -404,14 +398,7 @@ class _OkRedis:
 
 
 def _healthz_app(pool, redis) -> FastAPI:
-    config = EngineConfig(
-        database_url="postgresql://u:p@h/db", redis_url="redis://h:6379/0", api_token=None,
-        encrypt_checkpoints=False, ollama_base_url="http://localhost:11434", ollama_num_parallel=1,
-        worker_max_runs=1, lease_sec=1, heartbeat_sec=1, claim_poll_sec=1.0, reaper_interval_sec=1.0,
-        run_max_active_ms=1000, render_timeout_sec=1.0, render_pool_size=1, max_body_bytes=1000,
-        http_allowlist=(), http_max_redirects=3, http_max_request_bytes=1000, http_max_response_bytes=1000,
-    )
-    return create_app(config, pool, redis)
+    return create_app(make_config(), pool, redis)
 
 
 async def test_healthz_reports_degraded_when_both_backends_are_broken():
