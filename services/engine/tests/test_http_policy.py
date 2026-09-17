@@ -49,6 +49,11 @@ def test_a_wildcard_matches_sub_labels_but_not_the_domain_itself():
     "https://*example.com",         # a wildcard must be its own label
     "https://*.*.example.com",
     "https://[::1]x8080",           # junk between "]" and the port must not be silently dropped
+    "https://api.example.com\n:8443",   # a trailing newline before ":" must not slip through $
+    "https://127.000.000.001",      # a typo'd IPv4 literal (leading zeros) must not become a hostname
+    "https://1.2.3",                # too few octets to be an IP, but every label is still digits-only
+    "https://999.1.1.1",            # an out-of-range octet, same reasoning
+    "https://[fe80::1%eth0]",       # a scope id names an interface on this machine, not a resolvable one
 ])
 def test_a_malformed_entry_refuses_to_parse(text):
     with pytest.raises(PolicyError):
@@ -101,6 +106,32 @@ def test_among_wildcards_the_longer_more_specific_pattern_wins():
     assert entry is not None
     assert entry.host == "*.eu.example.com"
     assert entry.allow_private is False
+
+
+def test_exact_host_beats_a_same_length_wildcard_pattern():
+    # "a.example.com" and "*.example.com" are both 13 characters, so a specificity metric based on
+    # pattern length alone (with the is_exact flag dropped) cannot tell them apart -- this is what
+    # actually distinguishes "an exact host always wins" from "the longer string wins".
+    entries = parse_allowlist("https://*.example.com;allowPrivate, https://a.example.com")
+
+    entry = match(entries, "https", "a.example.com", 443)
+
+    assert entry is not None
+    assert entry.host == "a.example.com"
+    assert entry.allow_private is False
+
+
+def test_a_tie_in_specificity_fails_closed_regardless_of_order():
+    # The same host listed twice -- plausibly from merging two allowlists -- is a tie in specificity.
+    # `>` alone resolves that tie by list position, which is a silent privilege upgrade if the
+    # privileged copy happens to come first. The unprivileged entry must win either way.
+    privileged_first = parse_allowlist("https://api.example.com;allowPrivate, https://api.example.com")
+    unprivileged_first = parse_allowlist("https://api.example.com, https://api.example.com;allowPrivate")
+
+    for entries in (privileged_first, unprivileged_first):
+        entry = match(entries, "https", "api.example.com", 443)
+        assert entry is not None
+        assert entry.allow_private is False
 
 
 def test_an_ipv6_literal_host_is_normalised_so_it_actually_matches():

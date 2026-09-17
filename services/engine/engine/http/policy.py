@@ -38,6 +38,9 @@ _V4 = [
 ]
 _V6 = [
     ("loopback", ipaddress.ip_network("::1/128")),
+    # "::" is covered here AND by the v4 fallback (it unwraps to 0.0.0.0, which 0.0.0.0/8 also names
+    # "unspecified") -- this row is deliberate defence in depth, not load-bearing: removing it changes
+    # no output today. "::1" has no such second cover; see the ordering comment in ip_category.
     ("unspecified", ipaddress.ip_network("::/128")),
     ("link-local", ipaddress.ip_network("fe80::/10")),
     ("private", ipaddress.ip_network("fc00::/7")),
@@ -56,8 +59,15 @@ _V6 = [
 _EMBEDDED_V4_NETWORKS = (
     ipaddress.ip_network("::ffff:0:0/96"),     # IPv4-mapped (RFC 4291 §2.5.5.2)
     ipaddress.ip_network("::/96"),             # IPv4-compatible, deprecated (RFC 4291 §2.5.5.1) --
-                                                # "::" and "::1" never reach this check: the _V6 table
-                                                # above already returns for those two exact addresses.
+                                                # "::" and "::1" both sit in here, but neither reaches
+                                                # this check: the _V6 table above returns for both first.
+                                                # Only "::1" actually depends on that -- without its
+                                                # table entry it would unwrap to 0.0.0.1 and get the
+                                                # wrong name ("unspecified", from 0.0.0.0/8) instead of
+                                                # "loopback". "::" unwraps to 0.0.0.0, which is already
+                                                # "unspecified" either way, so its table entry is
+                                                # deliberate double coverage, not something this order
+                                                # depends on.
     ipaddress.ip_network("::ffff:0:0:0/96"),   # IPv4-translated / SIIT
 )
 
@@ -95,16 +105,20 @@ def match(entries: tuple[AllowEntry, ...], scheme: str, host: str, port: int) ->
     """The most specific entry that permits this target, or None.
 
     "Most specific" -- not "first in the list" -- because `allowPrivate` belongs to the entry that
-    matched and must not leak to a broader entry that merely happens to match too: an exact host
-    always outranks a wildcard, and among wildcards a longer (more specific) pattern outranks a
-    shorter one. This makes the result independent of the order the operator wrote the entries in --
-    reversing "*.example.com;allowPrivate, api.example.com" must not change which one wins for
-    "api.example.com".
+    matched and must not leak to a broader entry that merely happens to match too: an exact host always
+    outranks a wildcard, and among wildcards a longer (more specific) pattern outranks a shorter one.
+    When two matching entries are equally specific -- the same host written twice, e.g. by an operator
+    who merged two allowlists -- the one WITHOUT `allowPrivate` wins: on a tie, the least privileged
+    result is the safe one, not whichever happened to be written first. Together this makes the result
+    fully independent of the order entries were written in: reversing "*.example.com;allowPrivate,
+    api.example.com", or even "api.example.com;allowPrivate, api.example.com", must not change which
+    entry -- or which privilege -- wins for a request to "api.example.com".
 
-    `host` must already be lowercase ASCII -- Task 2's client resolves DNS and is responsible for
-    IDNA-encoding the host before calling here. A non-ASCII host is refused outright rather than
-    casefolded, because casefolding non-ASCII text can equate characters that should stay distinct
-    (e.g. U+212A KELVIN SIGN lowercases to "k" and would otherwise alias an entry for "ok.example.com").
+    `host` is matched case-insensitively against the (already-lowercase) entries, but must already be
+    ASCII -- Task 2's client resolves DNS and is responsible for IDNA-encoding the host before calling
+    here. A non-ASCII host is refused outright rather than lowercased, because casefolding non-ASCII
+    text can equate characters that should stay distinct (e.g. U+212A KELVIN SIGN lowercases to "k" and
+    would otherwise alias an entry for "ok.example.com").
     """
     if not host.isascii():
         return None
@@ -116,10 +130,12 @@ def match(entries: tuple[AllowEntry, ...], scheme: str, host: str, port: int) ->
     return best
 
 
-def _specificity(entry: AllowEntry) -> tuple[bool, int]:
-    # (is_exact, pattern_length): an exact host beats every wildcard regardless of length, and among
-    # wildcards the longer -- so more specific -- host pattern wins.
-    return (not entry.host.startswith("*."), len(entry.host))
+def _specificity(entry: AllowEntry) -> tuple[bool, int, bool]:
+    # (is_exact, pattern_length, not allow_private): an exact host beats every wildcard regardless of
+    # length; among wildcards the longer -- so more specific -- host pattern wins; and between two
+    # otherwise-equal entries (a duplicated host, most plausibly), the one WITHOUT allowPrivate wins,
+    # so a tie fails closed instead of resolving by list position.
+    return (not entry.host.startswith("*."), len(entry.host), not entry.allow_private)
 
 
 def ip_category(address: str) -> str | None:
@@ -147,18 +163,23 @@ def ip_category(address: str) -> str | None:
     except ValueError:
         return "invalid"
     if isinstance(ip, ipaddress.IPv6Address):
-        # The table is checked before any unwrapping. Unwrapping first would need extra exclusions:
-        # "::" and "::1" both sit inside the IPv4-compatible embedding range (::/96) and would
-        # otherwise be reclassified as the v4 addresses "0.0.0.0"/"0.0.0.1" instead of "unspecified"/
-        # "loopback"; checking the table first lets the existing ::1/128 and ::/128 entries win with no
-        # special-casing, and is also what keeps 64:ff9b::/96 and 64:ff9b:1::/48 blanket blocks (see
-        # _embedded_v4's docstring) from ever reaching the unwrap step at all.
+        # The table is checked before any unwrapping. Unwrapping first would need an extra exclusion:
+        # "::1" sits inside the IPv4-compatible embedding range (::/96) and would otherwise be
+        # reclassified as "0.0.0.1", landing on the unrelated "unspecified" v4 entry instead of
+        # "loopback". ("::" is also in that range, but would unwrap to 0.0.0.0 and get the *same* name,
+        # "unspecified", either way -- see _EMBEDDED_V4_NETWORKS' comment.) Checking the table first
+        # lets the existing ::1/128 entry win with no special-casing, and is also what keeps
+        # 64:ff9b::/96 and 64:ff9b:1::/48 blanket blocks (see _embedded_v4's docstring) from ever
+        # reaching the unwrap step at all.
         for name, network in _V6:
             if ip in network:
                 return name
         embedded = _embedded_v4(ip)
         if embedded is not None:
             return ip_category(str(embedded))
+        # is_site_local is true only for fec0::/10, which the table above already caught -- this
+        # condition is unreachable today. Kept as a guard that stays correct if that table entry is
+        # ever removed, rather than something this code currently depends on.
         if ip.is_global and not ip.is_site_local:
             return None
         return "non-global"
@@ -194,11 +215,23 @@ def _entry(item: str) -> AllowEntry:
     if not host:
         raise PolicyError(f"호스트가 없습니다: {item}")
     if _is_ip(host):
+        if "%" in host:
+            # A scope id (RFC 4007, e.g. "fe80::1%eth0") names an interface on the machine that wrote
+            # the config -- no address the client resolves at request time can ever carry it, so an
+            # entry like this can never match anything. Refuse it instead of accepting silently-dead
+            # config.
+            raise PolicyError(f"스코프 ID가 있는 주소는 사용할 수 없습니다: {item}")
         # Normalise an IP-literal host to its canonical form at parse time, so an operator who wrote
         # "[::0001]" gets an entry that actually matches requests for "::1" instead of a silently dead
         # one. (The request-side host is expected to arrive already normalised the same way -- see
         # match()'s docstring.)
         host = ipaddress.ip_address(host).compressed
+    elif _looks_like_ip_literal(host):
+        # Every label is digits-only (e.g. "127.000.000.001", "1.2.3", "999.1.1.1"): this was meant to
+        # be an IPv4 address and _is_ip rejected it (leading zeros, too few octets, an out-of-range
+        # one), not a real hostname -- no real domain delegates an all-numeric label. Refuse it rather
+        # than silently accepting it as a hostname that happens to look like a typo'd IP.
+        raise PolicyError(f"IP 주소 형식이 올바르지 않습니다: {item}")
     elif not (HOSTNAME.fullmatch(host) or WILDCARD.fullmatch(host)):
         raise PolicyError(f"호스트 형식이 올바르지 않습니다: {item}")
     if port is None:
@@ -237,3 +270,12 @@ def _is_ip(host: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _looks_like_ip_literal(host: str) -> bool:
+    # True when every dot-separated label is digits-only. HOSTNAME would otherwise happily accept
+    # "127.000.000.001" or "1.2.3" as ordinary labels, since digits are valid label characters -- but
+    # ICANN never delegates an all-numeric label, so a host shaped like this was a typo'd IP, not a
+    # hostname.
+    labels = host.split(".")
+    return bool(labels) and all(label.isdigit() for label in labels)
