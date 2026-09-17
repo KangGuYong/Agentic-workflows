@@ -87,7 +87,7 @@ git commit -m "<subject>" -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.c
 - Modify: `services/engine/pyproject.toml` (dev dependency `trustme`)
 - Test: `services/engine/tests/test_http_pinning_spike.py`
 
-- [ ]  **Step 1: Add the test CA dependency**
+- [x]  **Step 1: Add the test CA dependency**
 
 In `services/engine/pyproject.toml`, add to `[dependency-groups] dev`:
 
@@ -98,7 +98,7 @@ In `services/engine/pyproject.toml`, add to `[dependency-groups] dev`:
 Run: `uv sync`
 Expected: `trustme` is installed.
 
-- [ ]  **Step 2: Write the spike**
+- [x]  **Step 2: Write the spike**
 
 Create `services/engine/tests/test_http_pinning_spike.py`:
 
@@ -186,14 +186,14 @@ async def test_without_the_sni_extension_the_ip_is_what_gets_verified():
                 await client.get(f"https://{LOCALHOST}:{port}/", headers={"Host": NAME})
 ```
 
-- [ ]  **Step 3: Run the spike**
+- [x]  **Step 3: Run the spike**
 
 Run: `uv run pytest tests/test_http_pinning_spike.py -q`
 Expected: 3 passed.
 
 **If any of these fail, stop and report it.** The fallback in 2b 설계 §12 is to open the socket and TLS by hand (`ssl_context.wrap_socket(server_hostname=…)`) and hand the stream to httpx, and the last resort is a dedicated egress proxy process. Do not continue with §5 until one of them is proven.
 
-- [ ]  **Step 4: Commit**
+- [x]  **Step 4: Commit**
 
 ```bash
 git add services/engine/pyproject.toml services/engine/uv.lock services/engine/tests/test_http_pinning_spike.py
@@ -4587,3 +4587,39 @@ Every section of `docs/superpowers/specs/2026-09-17-http-security-ops-design.md`
 Append one note per task here after its adversarial review, the way
 `docs/superpowers/plans/2026-09-16-runtime-core.md` does: what the review looked for, what it found, and
 what changed. A task with a clean review still gets a note saying so and naming what was checked.
+
+### Task 0 — spike: pinned-IP TLS
+
+**Commits:** `34963df`, `fd72b0e`, `e398f58`.
+
+**The gate holds.** Connecting to a validated IP while passing `Host` and
+`extensions={"sni_hostname": ...}` keeps TLS certificate verification bound to the original hostname.
+Proven against a real TLS server with a `trustme` CA, not inferred from reading `httpcore`. The §12
+fallbacks (hand-rolled `wrap_socket`, dedicated egress proxy) are not needed; §5 is safe to build on.
+
+**Spec review** confirmed the tests are not vacuous by running the negative controls itself: with
+`verify=False` both negative tests stop raising, and with a foreign CA the failure is
+`CERTIFICATE_VERIFY_FAILED`. It captured the wire traffic (SNI and `Host` both `api.internal.test`,
+socket to `127.0.0.1`, TLS 1.3, real 200) and confirmed a plain connection refusal does *not* satisfy the
+`"certificate"`/`"hostname"` assertion, so the assertion discriminates. No socket or server leakage across
+repeated runs under `-X dev -W always::ResourceWarning`.
+
+It found one real gap the plan itself had: the file's docstring claims to guard **Host**, SNI and
+certificate verification, but the test server read the request and threw it away, so every test would have
+passed if httpx stopped honouring an explicit `Host` override. `_serve` now records the request head and
+the first test asserts on it. Verified falsifiable: dropping the override produces
+`Host: 127.0.0.1:<port>` and fails the test.
+
+**Quality review** found the follow-up's second assertion
+(`LOCALHOST not in received[0].split("
+")[1]`) was both redundant — the exact-match check above it
+already pinned the Host line — and silently dependent on `Host` landing at line index 1. Replaced with
+`LOCALHOST not in received[0]`, which checks the whole request head and is order-independent; proven to
+fail on its own, with the first assertion commented out. The first test was renamed to name both legs it
+proves.
+
+**Deviations from the plan as written:** each `client.get` is wrapped in a `_get` helper that bounds it at
+5 s and converts a bare `TimeoutError` (whose `str()` is empty) into a `pytest.fail` naming the URL —
+convention 5. The two `async with` statements are combined, which ruff's SIM117 requires. The plan's code
+block at Task 0 Step 2 still shows the original test name and no Host assertion; it is a pre-implementation
+snippet and was left as the record of what was asked for.
