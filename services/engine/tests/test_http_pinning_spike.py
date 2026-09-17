@@ -53,7 +53,7 @@ async def _get(client: httpx.AsyncClient, url: str, **kwargs: object) -> httpx.R
         pytest.fail(f"GET {url} did not complete within 5s (handshake or connect hung)")
 
 
-async def test_a_pinned_ip_still_verifies_the_certificate_for_the_original_name():
+async def test_a_pinned_ip_still_sends_the_original_host_and_verifies_the_certificate():
     authority = trustme.CA()
     port, server, received = await _serve(_server_context(authority, NAME))
     async with server, httpx.AsyncClient(verify=_client_context(authority)) as client:
@@ -68,7 +68,7 @@ async def test_a_pinned_ip_still_verifies_the_certificate_for_the_original_name(
     # The server saw the original hostname, not the IP it was actually dialed on — the Host header
     # is the third leg (besides SNI and cert verification) that pinning must leave untouched.
     assert f"Host: {NAME}\r\n" in received[0]
-    assert LOCALHOST not in received[0].split("\r\n")[1]
+    assert LOCALHOST not in received[0]  # the IP we connected to appears nowhere in the request
 
 
 async def test_a_certificate_for_another_name_is_rejected():
