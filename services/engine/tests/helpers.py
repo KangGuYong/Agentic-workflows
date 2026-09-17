@@ -21,7 +21,7 @@ _BASE_CONFIG = EngineConfig(
 )
 
 
-def make_config(**overrides) -> EngineConfig:
+def make_config(**overrides: Any) -> EngineConfig:
     """An EngineConfig with test-friendly defaults (short timeouts, no token). Every field is spelled
     out once here rather than at each call site, so a new required field breaks one place, not every
     test that hand-built a config."""

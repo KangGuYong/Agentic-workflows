@@ -93,3 +93,23 @@ def test_an_out_of_range_http_limit_refuses_to_start(monkeypatch, name, value):
 
     with pytest.raises(ConfigError):
         load_config()
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("HTTP_MAX_REDIRECTS", "0"),             # the deliberate choice: follow none -- not an error
+    ("HTTP_MAX_REDIRECTS", "10"),
+    ("HTTP_MAX_REQUEST_BYTES", "1"),
+    ("HTTP_MAX_REQUEST_BYTES", "100000000"),
+    ("HTTP_MAX_RESPONSE_BYTES", "1"),
+    ("HTTP_MAX_RESPONSE_BYTES", "100000000"),
+])
+def test_a_boundary_http_limit_is_accepted(monkeypatch, name, value):
+    monkeypatch.setenv("ENGINE_DATABASE_URL", "postgresql://x/y")
+    monkeypatch.setenv("LANGGRAPH_AES_KEY", "0" * 32)
+    monkeypatch.setenv(name, value)
+
+    config = load_config()
+
+    field = {"HTTP_MAX_REDIRECTS": "http_max_redirects", "HTTP_MAX_REQUEST_BYTES": "http_max_request_bytes",
+              "HTTP_MAX_RESPONSE_BYTES": "http_max_response_bytes"}[name]
+    assert getattr(config, field) == int(value)

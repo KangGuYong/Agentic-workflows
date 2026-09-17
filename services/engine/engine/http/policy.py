@@ -30,8 +30,8 @@ _V4 = [
     ("reserved", ipaddress.ip_network("240.0.0.0/4")),
     ("reserved", ipaddress.ip_network("192.0.0.0/24")),        # IETF protocol assignments (incl. the
                                                                # NAT64/DNS64 discovery addresses)
-    ("reserved", ipaddress.ip_network("198.18.0.0/15")),      # benchmarking
-    ("tunneled", ipaddress.ip_network("192.88.99.0/24")),     # 6to4 relay anycast
+    ("reserved", ipaddress.ip_network("198.18.0.0/15")),       # benchmarking
+    ("tunneled", ipaddress.ip_network("192.88.99.0/24")),      # 6to4 relay anycast
 ]
 _V6 = [
     ("loopback", ipaddress.ip_network("::1/128")),
@@ -39,7 +39,7 @@ _V6 = [
     ("unspecified", ipaddress.ip_network("::/128")),
     ("link-local", ipaddress.ip_network("fe80::/10")),
     ("private", ipaddress.ip_network("fc00::/7")),
-    ("private", ipaddress.ip_network("fec0::/10")),           # site-local, deprecated (RFC 3879)
+    ("private", ipaddress.ip_network("fec0::/10")),            # site-local, deprecated (RFC 3879)
     ("multicast", ipaddress.ip_network("ff00::/8")),
     # Blanket blocks regardless of what they embed -- see _embedded_v4.
     ("tunneled", ipaddress.ip_network("2002::/16")),           # 6to4
@@ -213,7 +213,10 @@ def _entry(item: str) -> AllowEntry:
         # to be an IPv4 address and _is_ip rejected it (leading zeros, too few octets, an out-of-range
         # one), not a real hostname -- no real domain delegates an all-numeric label. Refuse it rather
         # than silently accepting it as a hostname that happens to look like a typo'd IP.
-        raise PolicyError(f"0으로 시작하는 IP 주소는 사용할 수 없습니다: {item}")
+        raise PolicyError(
+            f"IP 주소 형식이 올바르지 않습니다 (0으로 시작하거나, 옥텟이 4개가 아니거나, "
+            f"255를 넘습니다): {item}"
+        )
     elif not (_HOSTNAME.fullmatch(host) or _WILDCARD.fullmatch(host)):
         raise PolicyError(f"호스트 형식이 올바르지 않습니다: {item}")
     if port is None:

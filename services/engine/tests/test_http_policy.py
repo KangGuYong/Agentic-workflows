@@ -197,14 +197,15 @@ def test_blocked_addresses_are_classified(address, category):
 
 
 @pytest.mark.parametrize(("address", "category"), [
-    # First and last address of every range whose prefix length a mutation could narrow or widen
-    # without any single mid-range sample noticing. This is meant to cover every row of _V4 and _V6
-    # (excluding the single-address ::1/128 and ::/128 entries, which have no "narrowing" to detect):
-    # if you add a row there, add its first/last pair here too.
+    # First and last address of every row of _V4 and _V6 whose prefix length a mutation could narrow
+    # or widen without any single mid-range sample noticing -- excluding only the single-address
+    # ::1/128 and ::/128 entries, which have no "narrowing" to detect. If you add a row there, add its
+    # first/last pair here too.
     ("127.0.0.0", "loopback"), ("127.255.255.255", "loopback"),
     ("169.254.0.0", "link-local"), ("169.254.255.255", "link-local"),
     ("10.0.0.0", "private"), ("10.255.255.255", "private"),
     ("172.16.0.0", "private"), ("172.31.255.255", "private"),
+    ("192.168.0.0", "private"), ("192.168.255.255", "private"),
     ("100.64.0.0", "cgnat"), ("100.127.255.255", "cgnat"),
     ("0.0.0.0", "unspecified"), ("0.255.255.255", "unspecified"),
     ("224.0.0.0", "multicast"), ("239.255.255.255", "multicast"),
@@ -214,8 +215,11 @@ def test_blocked_addresses_are_classified(address, category):
     ("192.88.99.0", "tunneled"), ("192.88.99.255", "tunneled"),
     ("fe80::", "link-local"), ("febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "link-local"),
     ("fc00::", "private"), ("fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "private"),
+    ("fec0::", "private"), ("feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "private"),
     ("ff00::", "multicast"), ("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "multicast"),
     ("2002::", "tunneled"), ("2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "tunneled"),
+    ("2001::", "tunneled"), ("2001:0:ffff:ffff:ffff:ffff:ffff:ffff", "tunneled"),
+    ("64:ff9b::", "tunneled"), ("64:ff9b::ffff:ffff", "tunneled"),
     ("64:ff9b:1::", "tunneled"), ("64:ff9b:1:ffff:ffff:ffff:ffff:ffff", "tunneled"),
 ])
 def test_the_full_extent_of_each_range_is_blocked(address, category):
