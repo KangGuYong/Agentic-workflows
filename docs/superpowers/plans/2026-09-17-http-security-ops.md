@@ -681,6 +681,19 @@ async def test_an_allowlisted_ip_literal_is_still_classified():
     await client.aclose()
 
 
+async def test_allow_private_does_not_open_the_metadata_endpoint():
+    """allowPrivate means "a machine on my network", not "any address the policy would block"."""
+    resolver = FakeResolver({})
+    client = _client("http://169.254.169.254;allowPrivate", resolver)
+
+    with pytest.raises(EgressBlocked) as exc:
+        await client.request(method="GET", url="http://169.254.169.254/latest/meta-data/", headers={},
+                             body=None, timeout_sec=5)
+
+    assert exc.value.category == "link-local"
+    await client.aclose()
+
+
 async def test_allow_private_permits_only_its_own_entry():
     resolver = FakeResolver({"internal.test": ["10.0.0.7"], "other.test": ["10.0.0.8"]})
     client = _client("http://internal.test:8080;allowPrivate, http://other.test:8080", resolver)
@@ -903,6 +916,10 @@ from engine.jsondata import parse_json
 
 log = logging.getLogger(__name__)
 
+# allowPrivate exempts only the categories that mean "a machine on the operator's own network".
+# link-local is deliberately absent: 169.254.169.254 is the cloud metadata endpoint, and an operator who
+# opened one internal API did not ask for that (2b design §5.2).
+ALLOW_PRIVATE_CATEGORIES = frozenset({"private", "loopback", "cgnat"})
 REDIRECTS = {301, 302, 303, 307, 308}
 BODYLESS = {301, 302, 303}  # these become a GET without a body, as every browser and client does
 MAX_DECODED_CHARS = 5_000_000
@@ -1012,7 +1029,7 @@ class GuardedClient:
         addresses = [host] if ip_category(host) != "invalid" else await self._resolve(host)
         for address in addresses:
             category = ip_category(address)
-            if category is not None and not (entry.allow_private and category == "private"):
+            if category is not None and not (entry.allow_private and category in ALLOW_PRIVATE_CATEGORIES):
                 raise EgressBlocked(category)
         path = parts.path or "/"
         if parts.query:
@@ -1090,7 +1107,7 @@ def _decode(raw: bytes, headers: dict[str, str]) -> Any:
 - [ ]  **Step 4: Run the tests**
 
 Run: `uv run pytest tests/test_http_client.py -q`
-Expected: PASS (16 tests).
+Expected: PASS (17 tests).
 
 - [ ]  **Step 5: Run everything and commit**
 
