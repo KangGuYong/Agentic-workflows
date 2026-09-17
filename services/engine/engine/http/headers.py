@@ -1,23 +1,18 @@
 """Header rules for the guarded HTTP client (2b design §5.4).
 
-Two independent, pure functions -- pure in the sense that neither touches a socket or DNS, so both are
+Three independent, pure functions -- pure in the sense that none touches a socket or DNS, so each is
 fully covered by tests/test_http_headers.py without a fake server:
 
-- `sanitize_headers` runs once, on the tenant's original headers, before the first hop. It drops every
-  header a tenant must never control -- the framing pair (Content-Length, Transfer-Encoding), the
-  hop-by-hop set (Connection, Keep-Alive, Upgrade, TE, Trailer, Proxy-Authorization, Proxy-Authenticate),
-  and the two this client pins itself (Host, Accept-Encoding) -- then validates every name and value
-  that survives against RFC 7230's grammar. Nothing left in the result can inject a second header line,
-  desync the request's framing from what httpx tells the server, or smuggle a value h11 would refuse in
-  a way that looks like an unrelated transport failure.
-- `redirect_headers` runs again on every redirect hop. It drops the headers that must not follow a
-  request across an origin change -- Authorization, Cookie, and the common API-key convention
-  X-API-Key -- unless the change is a same-host http-to-https upgrade, which is not a new party to
-  trust less than the one the tenant already chose.
+- `sanitize_headers` runs once, on the tenant's original headers, before the first hop, dropping the
+  set defined in `UNSAFE_HEADERS` below and validating what survives against RFC 7230's grammar.
+- `headers_for_redirect` runs again on every redirect hop, dropping the headers in `CREDENTIAL_HEADERS`
+  below that must not follow a request across an origin change.
+- `bodyless_headers` runs once per hop that converts a 301/302/303 response's method to a bodyless GET,
+  dropping the headers in `CONTENT_HEADERS` below that would otherwise describe a body that no longer
+  exists.
 
-`client.py` calls `sanitize_headers` once and `redirect_headers` once per hop; see its module docstring
-for the four httpx behaviours that make correct use of these two functions non-obvious from client.py
-alone.
+`client.py` calls all three at the points its own module docstring names; see each function's docstring
+below for the reasoning behind what it drops.
 """
 from __future__ import annotations
 
@@ -42,7 +37,9 @@ CONTENT_HEADERS = frozenset({"content-type", "content-encoding", "content-langua
 # value here can desync what httpx thinks the body boundary is from what it tells the server (RFC 7230
 # §3.3.3), enabling request smuggling on a connection this client shares with other requests. Host is
 # pinned by the client itself; Accept-Encoding is pinned to "identity" so the response-size cap runs
-# against the bytes actually on the wire, not whatever a decompressor would expand them to.
+# against the bytes actually on the wire, not whatever a decompressor would expand them to; Expect
+# (specifically "100-continue") changes the request/response handshake itself, putting httpx into a
+# wait-for-100 flow this client's send/read pipeline never participates in.
 UNSAFE_HEADERS = frozenset({
     "host", "content-length", "transfer-encoding", "connection", "keep-alive", "expect", "upgrade", "te",
     "trailer", "proxy-authorization", "proxy-authenticate", "accept-encoding",
@@ -88,13 +85,13 @@ def sanitize_headers(headers: dict[str, str]) -> dict[str, str]:
     return clean
 
 
-def redirect_headers(headers: dict[str, str], previous_url: str, next_url: str) -> dict[str, str]:
+def headers_for_redirect(headers: dict[str, str], previous_url: str, next_url: str) -> dict[str, str]:
     """Strip credential-bearing headers that must not follow a request across an origin change.
 
     A same-origin redirect (the common case: a trailing slash, a path move) keeps every header --
-    there is no new party being trusted. Crossing an origin drops Authorization, Cookie and X-API-Key,
-    mirroring httpx's own `_redirect_headers`, with the same carve-out for a plain http-to-https upgrade
-    of the *same* host: that is not a new origin to trust less than the one the tenant already chose.
+    there is no new party being trusted. Crossing an origin drops the headers in `CREDENTIAL_HEADERS`,
+    with a carve-out for a plain http-to-https upgrade of the *same* host: that is not a new origin to
+    trust less than the one the tenant already chose.
 
     `.port` is a lazily-parsed property and can itself raise `ValueError` for a malformed port -- the
     caller in client.py wraps this call alongside the rest of its redirect-URL handling for that reason,
@@ -111,3 +108,14 @@ def redirect_headers(headers: dict[str, str], previous_url: str, next_url: str) 
     )
     drop = frozenset() if is_https_upgrade else CREDENTIAL_HEADERS
     return {name: value for name, value in headers.items() if name.lower() not in drop}
+
+
+def bodyless_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Drop the headers in `CONTENT_HEADERS` (case-insensitively).
+
+    Called once a 301/302/303 redirect has converted the method to a bodyless GET (RFC 7231 §6.4, and
+    what every browser and client actually does): there is no body left for Content-Type,
+    Content-Encoding, Content-Language or Content-MD5 to describe, so carrying any of them forward
+    would describe a body that no longer exists.
+    """
+    return {name: value for name, value in headers.items() if name.lower() not in CONTENT_HEADERS}

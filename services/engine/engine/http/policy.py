@@ -119,7 +119,7 @@ def _specificity(entry: AllowEntry) -> tuple[bool, int, bool]:
     return (not entry.host.startswith("*."), len(entry.host), not entry.allow_private)
 
 
-def is_hostname_syntax(host: str) -> bool:
+def has_hostname_syntax(host: str) -> bool:
     """True if `host` has valid hostname label syntax (dot-separated labels, each starting and ending
     with an alphanumeric, hyphens allowed inside).
 

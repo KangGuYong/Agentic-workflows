@@ -5,17 +5,17 @@ address that passed — repeated in full for every redirect hop. Checking the al
 unapproved host name is never even looked up, so the name cannot be used as a DNS exfiltration channel.
 This order is the design; it is not to be reshuffled to make some other fix read more naturally.
 
-Header rules (what a tenant may set, and what must not survive a redirect) live in headers.py, not here
--- see its module docstring. What follows is what httpx itself does that this module has to work around;
-read this once, because the workarounds are scattered across the methods below by necessity and none of
-them makes sense in isolation:
+Header rules -- what a tenant may set, what must not survive a redirect, and what must not survive the
+301/302/303-to-GET conversion -- live in headers.py, not here; see its module docstring. What follows is
+what httpx itself does that this module has to work around; read this once, because the workarounds are
+scattered across the methods below by necessity and none of them makes sense in isolation:
 
 - **The cookie jar is live even when constructed with `cookies=None`.** That argument only seeds the
   jar *empty*; `AsyncClient.send()` still calls `self.cookies.extract_cookies(response)` after every
   response, and `build_request()` still merges the jar into a `Cookie` header on the next one. `_send`
   never trusts that merge (it overwrites whatever httpx assembled with exactly the caller's own Cookie,
-  if any), and `_request` clears the jar after every hop as defence in depth -- see the comments at both
-  call sites for which one is the actual guarantee.
+  if any), and `_follow_redirects` clears the jar after every hop as defence in depth -- see the
+  comments at both call sites for which one is the actual guarantee.
 - **httpcore's connection-pool key is `(scheme, address, port)` -- the SNI hostname this client pins is
   not part of it.** A kept-alive connection to one allowlisted host would be reused, with no new
   handshake and so no new verification, for a *different* hostname that happens to resolve to the same
@@ -25,7 +25,7 @@ them makes sense in isolation:
   itself from the `Location` header) but cannot stop httpx from *trying*: a `Location` value httpx's own
   stricter URL model rejects (an opaque, non-hierarchical scheme like `mailto:`) raises `httpx.InvalidURL`
   before this client ever gets to inspect the header itself. `request()`'s safety net is what catches
-  that, not the scheme check in `_check`.
+  that, not the scheme check in `_resolve_target`.
 - **`httpx.Limits()` resets `max_connections` to unlimited if you construct it to change anything else.**
   The default `AsyncClient` pool caps both `max_connections` (100) and `max_keepalive_connections` (20);
   passing `limits=httpx.Limits(max_keepalive_connections=0)` alone silently drops the first cap along
@@ -56,8 +56,8 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 
-from engine.http.headers import CONTENT_HEADERS, HeaderRejected, redirect_headers, sanitize_headers
-from engine.http.policy import DEFAULT_PORTS, AllowEntry, find_entry, ip_category, is_hostname_syntax
+from engine.http.headers import HeaderRejected, bodyless_headers, headers_for_redirect, sanitize_headers
+from engine.http.policy import DEFAULT_PORTS, AllowEntry, find_entry, has_hostname_syntax, ip_category
 from engine.jsondata import parse_json
 
 log = logging.getLogger(__name__)
@@ -140,8 +140,8 @@ class GuardedClient:
         self._max_response_bytes = max_response_bytes
         # follow_redirects=False: every hop is re-checked here. trust_env=False so an ambient HTTP_PROXY
         # cannot silently route pinned traffic through a proxy instead of the address we validated.
-        # limits: keep-alive disabled (see the module docstring for why), but max_connections must be
-        # passed explicitly alongside it -- httpx.Limits() on its own resets that cap to unlimited.
+        # limits: keep-alive disabled -- see the module docstring for why, and for the max_connections
+        # caveat that makes passing it alone unsafe.
         self._client = httpx.AsyncClient(
             follow_redirects=False, trust_env=False, verify=verify, cookies=None,
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=0),
@@ -159,16 +159,20 @@ class GuardedClient:
         instead of leaking an unmapped exception type, or the wrong retry class, to tenant-facing code.
         """
         try:
-            return await self._request(method=method, url=url, headers=headers, body=body,
-                                       timeout_sec=timeout_sec)
+            return await self._follow_redirects(method=method, url=url, headers=headers, body=body,
+                                                timeout_sec=timeout_sec)
         except (EgressBlocked, ResponseTooLarge, UnsupportedMedia, TransportFailed):
             raise
         except Exception as exc:  # noqa: BLE001 -- deliberate catch-all, see the docstring above
             log.error("http_request: unexpected %s escaped the guarded client", type(exc).__name__)
             raise EgressBlocked("internal") from None
 
-    async def _request(self, *, method: str, url: str, headers: dict[str, str], body: str | None,
-                       timeout_sec: float) -> HttpResponse:
+    async def _follow_redirects(self, *, method: str, url: str, headers: dict[str, str], body: str | None,
+                                timeout_sec: float) -> HttpResponse:
+        """Run `method url` and every redirect hop it produces, up to `max_redirects`, re-validating
+        each hop's target from scratch via `_resolve_target` -- see the module docstring for why that
+        order is not to be reshuffled. Raises `EgressBlocked("too-many-redirects")` once the budget is
+        spent; every other exception this can raise is documented at its own call site below."""
         if body is not None and len(body.encode("utf-8")) > self._max_request_bytes:
             raise EgressBlocked("request-too-large")
         try:
@@ -177,7 +181,7 @@ class GuardedClient:
             raise EgressBlocked("header") from None
         current_method, current_body, current_url = method.upper(), body, url
         for _ in range(self._max_redirects + 1):
-            target = await self._check(current_url)
+            target = await self._resolve_target(current_url)
             try:
                 response = await self._send(target, current_method, current_headers, current_body,
                                             timeout_sec)
@@ -188,32 +192,40 @@ class GuardedClient:
                 # below, on the next redirect hop, or on a later, unrelated request on this shared
                 # client -- and it has to be in a `finally` because httpx extracts cookies inside
                 # `send()` itself, before an exception on this line (a transport failure, a redirect to
-                # a URL httpx's own parser refuses) ever reaches this method.
+                # a URL httpx's own parser refuses) ever reaches this method (`_follow_redirects`).
                 self._client.cookies.clear()
             if response.status_code not in REDIRECTS or "location" not in response.headers:
                 return await self._read(response)
             await response.aclose()
-            # Every URL touched below -- location, and inside redirect_headers, both endpoints' .port
-            # (a lazily-parsed property that raises ValueError just like .port did in _check) -- is
-            # wrapped in the same try, so a malformed Location header fails as EgressBlocked("url")
-            # instead of an unhandled ValueError.
+            # Every URL touched below -- location, and inside headers_for_redirect, both endpoints'
+            # .port (a lazily-parsed property that raises ValueError just like .port did in
+            # _resolve_target) -- is wrapped in the same try, so a malformed Location header fails as
+            # EgressBlocked("url") instead of an unhandled ValueError.
             try:
                 location = urljoin(current_url, response.headers["location"])
                 is_downgrade = urlsplit(current_url).scheme == "https" and urlsplit(location).scheme == "http"
-                next_headers = redirect_headers(current_headers, current_url, location)
+                next_headers = headers_for_redirect(current_headers, current_url, location)
             except ValueError:
                 raise EgressBlocked("url") from None
             if is_downgrade:
                 raise EgressBlocked("downgrade")
             if response.status_code in BODYLESS and current_method not in ("GET", "HEAD"):
                 current_method, current_body = "GET", None
-                next_headers = {name: value for name, value in next_headers.items()
-                                if name.lower() not in CONTENT_HEADERS}
+                next_headers = bodyless_headers(next_headers)
             current_headers = next_headers
             current_url = location
         raise EgressBlocked("too-many-redirects")
 
-    async def _check(self, url: str) -> _Target:
+    async def _resolve_target(self, url: str) -> _Target:
+        """Parse `url`, check its host against the allowlist, resolve it, validate every address DNS
+        returned, and pin the first one that passed. Returns the `_Target` `_send` connects to.
+
+        The order above is the whole design (see the module docstring) and is not incidental to this
+        method's shape: allowlist before DNS means an unapproved name is never looked up at all, and
+        every resolved address is checked -- not just the one that ends up pinned -- so a server that
+        answers with a mix of public and private addresses cannot get the private one used just by
+        listing it last.
+        """
         try:
             parts = urlsplit(url)
             host = (parts.hostname or "").lower()
@@ -223,6 +235,9 @@ class GuardedClient:
         if parts.scheme not in DEFAULT_PORTS:
             raise EgressBlocked("scheme")
         if not host:
+            # Unreachable: parse_allowlist cannot produce an empty-host entry (find_entry returns None
+            # first), and a directly-constructed one is caught by has_hostname_syntax("") below. Kept
+            # as an explicit statement of intent, not something this code depends on.
             raise EgressBlocked("allowlist")
         try:
             # find_entry requires an already-ASCII host (see its docstring); a Unicode host name has to
@@ -234,13 +249,16 @@ class GuardedClient:
         entry = find_entry(self._allowlist, parts.scheme, host, port)
         if entry is None:  # before DNS, deliberately
             raise EgressBlocked("allowlist")
-        if ip_category(host) != "invalid":
+        # "invalid" is policy.py's ip_category sentinel for "not an address at all" -- i.e. host is a
+        # name, not an IP literal, and needs DNS.
+        is_ip_literal = ip_category(host) != "invalid"
+        if is_ip_literal:
             addresses = [host]
         else:
-            # A wildcard entry's match is a bare suffix test (see is_hostname_syntax's docstring): make
+            # A wildcard entry's match is a bare suffix test (see has_hostname_syntax's docstring): make
             # sure the request-side host is actually a well-formed name before it is used that way, or
             # before it is handed to DNS at all.
-            if not is_hostname_syntax(host):
+            if not has_hostname_syntax(host):
                 raise EgressBlocked("allowlist")
             addresses = await self._resolve(host)
         for address in addresses:
@@ -268,7 +286,7 @@ class GuardedClient:
         pinned = f"{target.scheme}://{literal}:{target.port}{target.path}{suffix}"
         request = self._client.build_request(
             method, pinned,
-            # `headers` was sanitized once in `_request`: no Host, no framing/hop-by-hop headers, no
+            # `headers` was sanitized once in `_follow_redirects`: no Host, no framing/hop-by-hop headers, no
             # unsafe names or values. identity encoding is pinned here (not merely stripped from the
             # tenant's own headers above) so the response-size cap in `_read` runs against what is
             # actually on the wire.
@@ -280,10 +298,9 @@ class GuardedClient:
             extensions={"sni_hostname": target.host},
         )
         # This is the actual guarantee behind "cookies are never stored" (2b design §5.5), not the jar
-        # clear in _request: httpx.Request.__init__ merges the client's cookie jar into a Cookie header
-        # regardless of the `cookies=None` passed at construction (that argument only seeds the jar
-        # empty -- see the module docstring). Force the wire to carry exactly the Cookie value, if any,
-        # that survived sanitize_headers/redirect_headers above, never one httpx assembled on its own
+        # clear in _follow_redirects -- see the module docstring for why the jar merges a Cookie header
+        # at all despite `cookies=None`. Force the wire to carry exactly the Cookie value, if any, that
+        # survived sanitize_headers/headers_for_redirect above, never one httpx assembled on its own
         # from a jar entry this client did not intend to send.
         request.headers.pop("Cookie", None)
         intended_cookie = next((value for name, value in headers.items() if name.lower() == "cookie"), None)

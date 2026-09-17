@@ -1,6 +1,13 @@
 import pytest
 
-from engine.http.policy import AllowEntry, PolicyError, find_entry, ip_category, parse_allowlist
+from engine.http.policy import (
+    AllowEntry,
+    PolicyError,
+    find_entry,
+    has_hostname_syntax,
+    ip_category,
+    parse_allowlist,
+)
 
 
 def _one(text: str) -> AllowEntry:
@@ -278,3 +285,24 @@ def test_a_named_ranges_own_category_survives_next_to_the_fallback():
 
 def test_an_unparseable_address_is_treated_as_blocked():
     assert ip_category("not-an-ip") == "invalid"
+
+
+@pytest.mark.parametrize(("host", "expected"), [
+    ("example.com", True),
+    ("a.b.example.com", True),
+    ("xn--fiq.example.com", True),
+    ("a-b.example.com", True),
+    ("127.0.0.1", True),  # digit-only labels satisfy the grammar -- callers must check ip_category first
+    ("", False),  # the same empty string client.py's empty-host guard is (also) written to catch
+    ("..example.com", False),  # an empty label
+    (".example.com", False),  # a leading dot with nothing before it
+    ("%.example.com", False),  # an invalid label character
+    ("-a.example.com", False),  # a label cannot start with a hyphen
+    ("a-.example.com", False),  # a label cannot end with a hyphen
+    ("::1", False),  # a colon never satisfies the label grammar -- an IPv6 literal always fails this
+])
+def test_hostname_syntax_is_checked_directly(host, expected):
+    """is_hostname_syntax/has_hostname_syntax was previously exercised only indirectly through
+    GuardedClient -- policy.py's whole premise is that the policy can be tested as a table without a
+    client or network, so it earns the same direct treatment as find_entry and ip_category above."""
+    assert has_hostname_syntax(host) is expected

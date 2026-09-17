@@ -2,10 +2,12 @@
 import pytest
 
 from engine.http.headers import (
+    CONTENT_HEADERS,
     CREDENTIAL_HEADERS,
     UNSAFE_HEADERS,
     HeaderRejected,
-    redirect_headers,
+    bodyless_headers,
+    headers_for_redirect,
     sanitize_headers,
 )
 
@@ -19,6 +21,8 @@ _EXPECTED_UNSAFE_HEADERS = (
     "trailer", "proxy-authorization", "proxy-authenticate", "accept-encoding",
 )
 _EXPECTED_CREDENTIAL_HEADERS = ("authorization", "cookie", "x-api-key")
+# Same reasoning as the two tuples above, for bodyless_headers' strip set.
+_EXPECTED_CONTENT_HEADERS = ("content-type", "content-encoding", "content-language", "content-md5")
 
 # ---------------------------------------------------------------------------------------------------
 # sanitize_headers: the strip set, one entry at a time
@@ -130,40 +134,40 @@ def test_a_non_string_header_is_rejected(headers):
 
 
 # ---------------------------------------------------------------------------------------------------
-# redirect_headers
+# headers_for_redirect
 # ---------------------------------------------------------------------------------------------------
 
 
 def test_same_origin_redirect_keeps_every_header():
     headers = {"Authorization": "Bearer t", "Cookie": "s=1", "X-API-Key": "k", "X-Foo": "bar"}
-    result = redirect_headers(headers, "https://api.example.com/a", "https://api.example.com/b")
+    result = headers_for_redirect(headers, "https://api.example.com/a", "https://api.example.com/b")
     assert result == headers
 
 
 def test_cross_origin_redirect_drops_credential_headers_but_keeps_others():
     headers = {"Authorization": "Bearer t", "Cookie": "s=1", "X-API-Key": "k", "X-Foo": "bar"}
-    result = redirect_headers(headers, "https://api.example.com/a", "https://other.example.com/b")
+    result = headers_for_redirect(headers, "https://api.example.com/a", "https://other.example.com/b")
     assert result == {"X-Foo": "bar"}
 
 
 def test_an_http_to_https_upgrade_on_the_same_host_keeps_credentials():
     headers = {"Authorization": "Bearer t", "Cookie": "s=1"}
-    result = redirect_headers(headers, "http://api.example.com/a", "https://api.example.com/b")
+    result = headers_for_redirect(headers, "http://api.example.com/a", "https://api.example.com/b")
     assert result == headers
 
 
 def test_a_downgrade_shaped_pair_is_not_treated_as_an_upgrade():
-    """is_https_upgrade must check both directions -- an https-to-http pair (which _request blocks
-    before this function is ever reached, but this function has no opinion on that by itself) must not
-    accidentally satisfy the upgrade carve-out and keep credentials it should drop."""
+    """is_https_upgrade must check both directions -- an https-to-http pair (which _follow_redirects
+    blocks before this function is ever reached, but this function has no opinion on that by itself)
+    must not accidentally satisfy the upgrade carve-out and keep credentials it should drop."""
     headers = {"Authorization": "Bearer t"}
-    result = redirect_headers(headers, "https://api.example.com/a", "http://api.example.com/b")
+    result = headers_for_redirect(headers, "https://api.example.com/a", "http://api.example.com/b")
     assert result == {}
 
 
 def test_origin_comparison_uses_host_and_port_not_host_alone():
     headers = {"Authorization": "Bearer t"}
-    result = redirect_headers(headers, "https://api.example.com:8443/a", "https://api.example.com/b")
+    result = headers_for_redirect(headers, "https://api.example.com:8443/a", "https://api.example.com/b")
     assert result == {}  # different port -> different origin, even though the host string matches
 
 
@@ -175,5 +179,29 @@ def test_the_credential_header_set_has_not_silently_changed_shape():
 def test_every_credential_header_is_individually_dropped_cross_origin(name):
     """Hardcoded list, not sorted(CREDENTIAL_HEADERS) -- same reasoning as the unsafe-header table."""
     headers = {name: "secret", "X-Foo": "bar"}
-    result = redirect_headers(headers, "https://api.example.com/a", "https://other.example.com/b")
+    result = headers_for_redirect(headers, "https://api.example.com/a", "https://other.example.com/b")
     assert result == {"X-Foo": "bar"}
+
+
+# ---------------------------------------------------------------------------------------------------
+# bodyless_headers
+# ---------------------------------------------------------------------------------------------------
+
+
+def test_the_content_header_set_has_not_silently_changed_shape():
+    """A companion to the per-entry test below, same reasoning as the unsafe/credential shape tests:
+    this is what notices a mutant that removes a name from CONTENT_HEADERS entirely, rather than the
+    per-entry test silently collecting one row fewer."""
+    assert frozenset(_EXPECTED_CONTENT_HEADERS) == CONTENT_HEADERS
+
+
+@pytest.mark.parametrize("name", _EXPECTED_CONTENT_HEADERS)
+def test_every_content_header_is_individually_dropped(name):
+    """Hardcoded list, not sorted(CONTENT_HEADERS) -- same reasoning as the unsafe-header table."""
+    headers = {name: "x", name.upper(): "y", "X-Foo": "bar"}
+    assert bodyless_headers(headers) == {"X-Foo": "bar"}
+
+
+def test_a_header_outside_the_content_set_survives():
+    headers = {"Authorization": "Bearer t", "X-Foo": "bar"}
+    assert bodyless_headers(headers) == headers
