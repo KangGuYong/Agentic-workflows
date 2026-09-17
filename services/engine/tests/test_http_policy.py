@@ -30,6 +30,9 @@ def test_a_wildcard_matches_sub_labels_but_not_the_domain_itself():
     assert match(entries, "https", "example.com", 443) is None
     assert match(entries, "https", "notexample.com", 443) is None
     assert match(entries, "https", "example.com.evil.test", 443) is None
+    # The degenerate host equal to the suffix itself (leading dot and all) must not match either --
+    # this is the one case `len(host) > len(suffix)` exists to exclude.
+    assert match(entries, "https", ".example.com", 443) is None
 
 
 @pytest.mark.parametrize("text", [
@@ -206,9 +209,19 @@ def test_public_addresses_have_no_category(address):
     "2001:2::1",        # IPv6 benchmarking
 ])
 def test_default_deny_blocks_ranges_absent_from_either_table(address):
-    # None of these ranges is named in _V4/_V6 -- this is what proves the fallback itself blocks by
-    # default rather than only the ranges someone remembered to enumerate.
-    assert ip_category(address) is not None
+    # None of these ranges is named in _V4/_V6 -- this pins that the fallback itself blocks by default,
+    # under its own distinct name, rather than only the ranges someone remembered to enumerate. Using
+    # the specific name (not just "is not None") is what makes a table entry's prefix length observable:
+    # if the fallback returned the same name as some table category, narrowing or deleting that entry
+    # would be silently absorbed by the fallback instead of changing the output.
+    assert ip_category(address) == "non-global"
+
+
+def test_a_named_ranges_own_category_survives_next_to_the_fallback():
+    # 240.0.0.0/4 is named "reserved" in the table; the fallback for everything else is "non-global".
+    # The two must stay distinct, or narrowing/deleting the table entry would be invisible.
+    assert ip_category("240.0.0.1") == "reserved"
+    assert ip_category("192.0.2.1") == "non-global"
 
 
 def test_an_unparseable_address_is_treated_as_blocked():

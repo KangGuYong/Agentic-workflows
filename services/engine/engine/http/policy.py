@@ -4,8 +4,8 @@ Pure: no DNS, no sockets. The client (client.py) supplies resolved addresses and
 the whole policy can be tested as a table without touching the network.
 
 `ip_category` is default-deny: it returns None only when it can positively confirm an address is
-globally routable. A range the tables below forgot to name is still blocked (generically, as
-"reserved"), never silently let through -- for an egress filter, a forgotten range is an SSRF hole,
+globally routable. A range the tables below forgot to name is still blocked, generically as
+"non-global", never silently let through -- for an egress filter, a forgotten range is an SSRF hole,
 while a wrongly-blocked one is just a support ticket.
 """
 from __future__ import annotations
@@ -125,12 +125,19 @@ def _specificity(entry: AllowEntry) -> tuple[bool, int]:
 def ip_category(address: str) -> str | None:
     """Name of the blocked category, or None -- but only when the address is confirmed globally
     routable (2b design §5.3, default-deny). An address that is neither named below nor provably
-    global still comes back blocked, generically as "reserved", instead of falling through to None.
+    global still comes back blocked, as "non-global", instead of falling through to None. "non-global"
+    means specifically this: the catch-all rule blocked it, not a named range -- an operator seeing it
+    knows the table has no opinion on this address and Python's own classification was relied on.
 
     The tables stay authoritative for the ranges they name: `ipaddress`'s own idea of what counts as
     global has changed across Python patch releases, and a security boundary should not move just
     because the interpreter was upgraded. They no longer have to be exhaustive for safety, though --
-    that is the fallback's job.
+    that is the fallback's job. Keeping "non-global" distinct from every table category name (rather
+    than reusing one, e.g. "reserved") matters beyond naming: it is what makes each table entry
+    observable. If the fallback used the same name as some entry, narrowing or deleting that entry
+    would be silently absorbed by the fallback -- same output, on every input -- which is exactly the
+    kind of change a test (or an operator reading a diff) should be able to catch and cannot if the two
+    names collide.
 
     Only a category name is ever shown to a tenant (2b design §5.6): the address itself would tell an
     attacker what the engine can see.
@@ -140,6 +147,12 @@ def ip_category(address: str) -> str | None:
     except ValueError:
         return "invalid"
     if isinstance(ip, ipaddress.IPv6Address):
+        # The table is checked before any unwrapping. Unwrapping first would need extra exclusions:
+        # "::" and "::1" both sit inside the IPv4-compatible embedding range (::/96) and would
+        # otherwise be reclassified as the v4 addresses "0.0.0.0"/"0.0.0.1" instead of "unspecified"/
+        # "loopback"; checking the table first lets the existing ::1/128 and ::/128 entries win with no
+        # special-casing, and is also what keeps 64:ff9b::/96 and 64:ff9b:1::/48 blanket blocks (see
+        # _embedded_v4's docstring) from ever reaching the unwrap step at all.
         for name, network in _V6:
             if ip in network:
                 return name
@@ -148,13 +161,13 @@ def ip_category(address: str) -> str | None:
             return ip_category(str(embedded))
         if ip.is_global and not ip.is_site_local:
             return None
-        return "reserved"
+        return "non-global"
     for name, network in _V4:
         if ip in network:
             return name
     if ip.is_global:
         return None
-    return "reserved"
+    return "non-global"
 
 
 def _embedded_v4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
