@@ -44,6 +44,7 @@ git commit -m "<subject>" -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.c
 | `engine/http/__init__.py` | (empty) |
 | `engine/http/policy.py` | Allowlist parsing and matching, IP category classification. Pure, no I/O |
 | `engine/http/client.py` | `GuardedClient`: resolve → validate → pinned connect → redirect loop → size caps. Raises its own exceptions, knows nothing about nodes |
+| `engine/http/headers.py` | Header sanitising and redirect filtering: the strip/credential/content tables, the RFC 7230 validators. Pure, table-driven (added during Task 2 review) |
 | `engine/secrets/__init__.py` | (empty) |
 | `engine/secrets/crypto.py` | AES-GCM seal/open with `ENGINE_SECRET_KEY`, AAD = secret name |
 | `engine/secrets/markers.py` | Nonce derivation, the marker mapping the renderer binds, marker discovery, substitution, value redaction |
