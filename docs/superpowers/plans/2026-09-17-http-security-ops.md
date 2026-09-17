@@ -898,7 +898,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 
-from engine.http.policy import DEFAULT_PORTS, AllowEntry, ip_category, match
+from engine.http.policy import DEFAULT_PORTS, AllowEntry, find_entry, ip_category
 from engine.jsondata import parse_json
 
 log = logging.getLogger(__name__)
@@ -1006,7 +1006,7 @@ class GuardedClient:
         if not host:
             raise EgressBlocked("allowlist")
         port = parts.port or DEFAULT_PORTS[parts.scheme]
-        entry = match(self._allowlist, parts.scheme, host, port)
+        entry = find_entry(self._allowlist, parts.scheme, host, port)
         if entry is None:  # before DNS, deliberately
             raise EgressBlocked("allowlist")
         addresses = [host] if ip_category(host) != "invalid" else await self._resolve(host)
@@ -4611,7 +4611,8 @@ the first test asserts on it. Verified falsifiable: dropping the override produc
 `Host: 127.0.0.1:<port>` and fails the test.
 
 **Quality review** found the follow-up's second assertion
-(`LOCALHOST not in received[0].split("
+(`LOCALHOST not in received[0].split("
+
 ")[1]`) was both redundant — the exact-match check above it
 already pinned the Host line — and silently dependent on `Host` landing at line index 1. Replaced with
 `LOCALHOST not in received[0]`, which checks the whole request head and is order-independent; proven to
