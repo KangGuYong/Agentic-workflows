@@ -355,6 +355,7 @@ async def test_create_app_warns_when_no_token_is_configured(caplog):
         encrypt_checkpoints=False, ollama_base_url="http://localhost:11434", ollama_num_parallel=1,
         worker_max_runs=1, lease_sec=1, heartbeat_sec=1, claim_poll_sec=1.0, reaper_interval_sec=1.0,
         run_max_active_ms=1000, render_timeout_sec=1.0, render_pool_size=1, max_body_bytes=1000,
+        http_allowlist=(), http_max_redirects=3, http_max_request_bytes=1000, http_max_response_bytes=1000,
     )
 
     with caplog.at_level(logging.WARNING):
@@ -408,6 +409,7 @@ def _healthz_app(pool, redis) -> FastAPI:
         encrypt_checkpoints=False, ollama_base_url="http://localhost:11434", ollama_num_parallel=1,
         worker_max_runs=1, lease_sec=1, heartbeat_sec=1, claim_poll_sec=1.0, reaper_interval_sec=1.0,
         run_max_active_ms=1000, render_timeout_sec=1.0, render_pool_size=1, max_body_bytes=1000,
+        http_allowlist=(), http_max_redirects=3, http_max_request_bytes=1000, http_max_response_bytes=1000,
     )
     return create_app(config, pool, redis)
 

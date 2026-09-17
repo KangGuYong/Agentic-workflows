@@ -35,3 +35,30 @@ def test_a_missing_database_url_is_an_error(monkeypatch):
     monkeypatch.setenv("LANGGRAPH_AES_KEY", "0" * 32)
     with pytest.raises(ConfigError):
         load_config()
+
+
+def test_the_allowlist_is_parsed_at_startup(monkeypatch):
+    monkeypatch.setenv("ENGINE_DATABASE_URL", "postgresql://x/y")
+    monkeypatch.setenv("LANGGRAPH_AES_KEY", "0" * 32)
+    monkeypatch.setenv("HTTP_ALLOWLIST", "https://api.example.com, http://10.0.0.7:8080;allowPrivate")
+
+    config = load_config()
+
+    assert [entry.host for entry in config.http_allowlist] == ["api.example.com", "10.0.0.7"]
+
+
+def test_a_malformed_allowlist_refuses_to_start(monkeypatch):
+    monkeypatch.setenv("ENGINE_DATABASE_URL", "postgresql://x/y")
+    monkeypatch.setenv("LANGGRAPH_AES_KEY", "0" * 32)
+    monkeypatch.setenv("HTTP_ALLOWLIST", "http://api.example.com:443")
+
+    with pytest.raises(ConfigError):
+        load_config()
+
+
+def test_no_allowlist_means_everything_is_blocked(monkeypatch):
+    monkeypatch.setenv("ENGINE_DATABASE_URL", "postgresql://x/y")
+    monkeypatch.delenv("HTTP_ALLOWLIST", raising=False)
+    monkeypatch.setenv("LANGGRAPH_AES_KEY", "0" * 32)
+
+    assert load_config().http_allowlist == ()
