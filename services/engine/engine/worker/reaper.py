@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from engine.config import EngineConfig
+from engine.db import purge as purge_db
 from engine.db import runs as run_db
 from engine.errors import ErrorCode
 from engine.events.publish import RedisPublisher
@@ -87,6 +88,7 @@ class Reaper:
                 return
             await self._recover_expired()
             await self._expire_waiting()
+            await self._purge()
 
     async def _recover_expired(self) -> None:
         async with self._pool.connection() as conn:
@@ -206,3 +208,24 @@ class Reaper:
             await self._publisher.publish(run_id, event)
         except Exception:
             log.warning("publishing event failed for run %s", run_id, exc_info=True)
+
+    async def _purge(self) -> None:
+        """Retention, one small batch per sweep (2b design §7): cheap once caught up, and a worker that
+        restarts hourly never skips a day the way a daily cron would."""
+        async with self._pool.connection() as conn:
+            rows = await purge_db.expired_runs(conn, retention_days=self._config.retention_days,
+                                               limit=self._config.purge_batch)
+        for row in rows:
+            run_id = str(row["id"])
+            try:
+                async with self._pool.connection() as conn, conn.transaction():
+                    await purge_db.purge_run(conn, run_id)
+            except Exception:
+                log.warning("purging run %s failed; the next sweep will retry", run_id, exc_info=True)
+        try:
+            async with self._pool.connection() as conn, conn.transaction():
+                collected = await purge_db.collect_orphan_checkpoints(conn, limit=self._config.purge_batch)
+            if collected:
+                log.info("collected %s orphan checkpoint rows", collected)
+        except Exception:
+            log.warning("collecting orphan checkpoints failed", exc_info=True)

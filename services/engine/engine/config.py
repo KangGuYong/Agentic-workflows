@@ -33,6 +33,8 @@ class EngineConfig:
     http_max_redirects: int
     http_max_request_bytes: int
     http_max_response_bytes: int
+    retention_days: int
+    purge_batch: int
 
 
 def _int(name: str, default: int) -> int:
@@ -107,4 +109,8 @@ def load_config() -> EngineConfig:
         http_max_response_bytes=_bounded_int(
             "HTTP_MAX_RESPONSE_BYTES", 5_000_000, minimum=1, maximum=100_000_000
         ),
+        # 1 day .. 10 years: a 0-day retention would purge every run the moment it finished, and a
+        # negative one would purge runs that have not finished yet.
+        retention_days=_bounded_int("RUN_DATA_RETENTION_DAYS", 30, minimum=1, maximum=3650),
+        purge_batch=_bounded_int("RUN_PURGE_BATCH", 100, minimum=1, maximum=10_000),
     )

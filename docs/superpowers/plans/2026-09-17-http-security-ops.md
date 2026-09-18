@@ -2971,7 +2971,7 @@ git commit -m "feat(engine): encrypt run inputs and outputs at rest" -m "Co-Auth
 - Modify: `services/engine/engine/config.py`, `services/engine/engine/worker/reaper.py`
 - Test: `services/engine/tests/test_db_purge.py`
 
-- [ ]  **Step 1: Write the failing tests**
+- [x]  **Step 1: Write the failing tests**
 
 Create `services/engine/tests/test_db_purge.py`:
 
@@ -3118,12 +3118,12 @@ SELECT column_name, is_nullable FROM information_schema.columns WHERE table_name
 
 Adjust the INSERTs above to the real column set and NOT NULL constraints before running the tests.
 
-- [ ]  **Step 2: Run them to see them fail**
+- [x]  **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/test_db_purge.py -q`
 Expected: FAIL — `ModuleNotFoundError: No module named 'engine.db.purge'`.
 
-- [ ]  **Step 3: Implement the queries**
+- [x]  **Step 3: Implement the queries**
 
 Create `services/engine/engine/db/purge.py`:
 
@@ -3196,7 +3196,7 @@ async def collect_orphan_checkpoints(conn: AsyncConnection, *, limit: int) -> in
 
 If `checkpoints` has no `created_at` column, use its own timestamp column or fall back to the run's absence plus a `checkpoint_id` age — check the real schema in Step 1 and adjust both the query and the two tests that depend on the age bound.
 
-- [ ]  **Step 4: Add the settings**
+- [x]  **Step 4: Add the settings**
 
 In `services/engine/engine/config.py`, add to `EngineConfig`:
 
@@ -3212,7 +3212,7 @@ and to `load_config()`:
         purge_batch=_int("RUN_PURGE_BATCH", 100),
 ```
 
-- [ ]  **Step 5: Run it from the reaper**
+- [x]  **Step 5: Run it from the reaper**
 
 In `services/engine/engine/worker/reaper.py`, extend `sweep`:
 
@@ -3254,12 +3254,12 @@ and add:
 
 with `from engine.db import purge as purge_db` at the top.
 
-- [ ]  **Step 6: Run the tests**
+- [x]  **Step 6: Run the tests**
 
 Run: `uv run pytest tests/test_db_purge.py tests/test_worker_reaper.py -q`
 Expected: PASS.
 
-- [ ]  **Step 7: Run everything and commit**
+- [x]  **Step 7: Run everything and commit**
 
 Run: `uv run pytest -q` → all pass.
 Run: `uv run ruff check .` → `All checks passed!`
@@ -4948,3 +4948,52 @@ a lock fails loudly instead of hanging collection.
 of that test clean, two consecutive full suites at 1,322 passed. One of the 24 took 11.1s instead of 1.2s
 — the underlying condition still happening, with the bound catching it. That is the honest state: the
 symptom is contained and observable, the cause is not yet fixed.
+
+### Task 11 — post-review note
+
+**The `EXPLAIN` debt is paid, and the index is real.** 60,000 runs (a fifth unfinished, the finished ones
+spread over 400 days, everything past day 60 already purged — 7,200 rows matching the sweep's predicate),
+`ANALYZE`d, against the retention query:
+
+```
+Limit  (cost=0.29..47.90 rows=100) (actual time=0.036..0.621 rows=100)
+  ->  Index Scan using runs_retention_idx on runs
+        Index Cond: (finished_at < (now() - '30 days'::interval))
+        Buffers: shared hit=102
+Execution Time: 0.683 ms
+```
+
+With index and bitmap scans disabled, the same query is a Seq Scan + top-N heapsort: **1,299 buffers and
+13.5 ms**, twenty times the work. The partial index is 88 kB against a 10 MB table, so it earns its write
+cost. `runs_retention_idx` stays.
+
+**Two defects in the plan's own code.**
+
+1. `purge_run` packs three `DELETE`s into one parameterised `conn.execute`, which psycopg refuses outright
+   ("cannot insert multiple commands into a prepared statement"). Split into one statement per table,
+   still inside the caller's transaction.
+2. `collect_orphan_checkpoints` filters on `c.created_at`, **and that column does not exist**. LangGraph
+   owns the checkpoint tables and its `MIGRATIONS` list gives them no timestamp column at all. Nor can one
+   be added: `prepare_database` runs Alembic *before* `AsyncPostgresSaver.setup()`, so on a fresh database
+   our migration would hit a table that is not there yet.
+
+**So the orphan rule is the run row's existence, with no age bound.** What makes that safe is the write
+order, not a timer: a checkpoint is only ever written by a worker executing a run it has already claimed,
+so the run row is committed before any checkpoint for it exists, and run rows disappear only when a
+workflow is deleted — exactly when their checkpoints should follow. The plan's "a young orphan is left
+alone" test cannot exist, and pretending otherwise would have meant a test asserting a guarantee nothing
+provides. In its place: a **queued** run's checkpoint is never collected (the closest thing to a race
+there is), and a `thread_id` that is not a uuid is still collected — the join casts `runs.id` to text
+rather than the other way round, because casting text to uuid raises on the first non-uuid thread id and
+would stop every sweep from collecting anything. **If a future path writes a checkpoint before committing
+its run row, it needs its own protection here.**
+
+**Also added:** the retention boundary itself (29 days is inside the window, 31 is not — the plan tested
+only the far side), the batch limit actually limiting, and all three checkpoint tables emptied rather than
+just `checkpoints`, since the blobs are where the state really is. `retention_days` and `purge_batch` are
+bounded like the HTTP limits: a 0-day retention would purge every run the moment it finished.
+
+**Flaky test, not this task's.** `test_two_renders_overlap_in_a_pool_of_two` failed once in the full suite
+and reproduces **one run in five in isolation**, with Task 11 touching only `config.py` and `reaper.py`.
+That is handoff §9's known flake, sharper than "once each": it is a hardcoded deadline racing a wall
+clock. Task 14 touches the render pool and should fix it there.
