@@ -576,7 +576,7 @@ git commit -m "feat(engine): parse the egress allowlist and classify addresses" 
 - Create: `services/engine/engine/http/client.py`
 - Test: `services/engine/tests/test_http_client.py`
 
-- [ ]  **Step 1: Write the failing tests**
+- [x]  **Step 1: Write the failing tests**
 
 Create `services/engine/tests/test_http_client.py`:
 
@@ -881,12 +881,12 @@ async def test_an_unsupported_content_type_is_reported():
     await client.aclose()
 ```
 
-- [ ]  **Step 2: Run them to see them fail**
+- [x]  **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/test_http_client.py -q`
 Expected: FAIL — `ModuleNotFoundError: No module named 'engine.http.client'`.
 
-- [ ]  **Step 3: Implement the client**
+- [x]  **Step 3: Implement the client**
 
 Create `services/engine/engine/http/client.py`:
 
@@ -1105,12 +1105,12 @@ def _decode(raw: bytes, headers: dict[str, str]) -> Any:
     raise UnsupportedMedia(media or "unknown")
 ```
 
-- [ ]  **Step 4: Run the tests**
+- [x]  **Step 4: Run the tests**
 
 Run: `uv run pytest tests/test_http_client.py -q`
 Expected: PASS (17 tests).
 
-- [ ]  **Step 5: Run everything and commit**
+- [x]  **Step 5: Run everything and commit**
 
 Run: `uv run pytest -q` → all pass.
 Run: `uv run ruff check .` → `All checks passed!`
@@ -1130,7 +1130,7 @@ git commit -m "feat(engine): add the guarded HTTP client with pinned-address egr
 - Create: `services/engine/engine/db/migrations/versions/0002_secrets_and_retention.py`
 - Test: `services/engine/tests/test_db_schema.py` (append)
 
-- [ ]  **Step 1: Write the failing test**
+- [x]  **Step 1: Write the failing test**
 
 Append to `services/engine/tests/test_db_schema.py`:
 
@@ -1153,12 +1153,12 @@ async def test_the_secrets_table_and_retention_columns_exist(pool):
     assert [row["attname"] for row in key] == ["name", "workspace_id"]
 ```
 
-- [ ]  **Step 2: Run it to see it fail**
+- [x]  **Step 2: Run it to see it fail**
 
 Run: `uv run pytest tests/test_db_schema.py -q`
 Expected: FAIL — the `secrets` column set comes back empty.
 
-- [ ]  **Step 3: Write the migration**
+- [x]  **Step 3: Write the migration**
 
 Create `services/engine/engine/db/migrations/versions/0002_secrets_and_retention.py`:
 
@@ -1206,12 +1206,12 @@ def downgrade() -> None:
     op.execute(DOWN)
 ```
 
-- [ ]  **Step 4: Run the test**
+- [x]  **Step 4: Run the test**
 
 Run: `uv run pytest tests/test_db_schema.py -q`
 Expected: PASS.
 
-- [ ]  **Step 5: Check the truncation list**
+- [x]  **Step 5: Check the truncation list**
 
 `tests/conftest.py` truncates `APP_TABLES` between tests. Add `secrets` so a secret written by one test cannot leak into another:
 
@@ -1219,7 +1219,7 @@ Expected: PASS.
 APP_TABLES = ("run_events", "node_runs", "runs", "workflow_versions", "workflows", "secrets")
 ```
 
-- [ ]  **Step 6: Run everything and commit**
+- [x]  **Step 6: Run everything and commit**
 
 Run: `uv run pytest -q` → all pass.
 Run: `uv run ruff check .` → `All checks passed!`
@@ -1240,7 +1240,7 @@ git commit -m "feat(engine): add the secrets table and retention columns" -m "Co
 - Modify: `services/engine/engine/config.py`, `services/engine/tests/conftest.py`
 - Test: `services/engine/tests/test_secrets_store.py`
 
-- [ ]  **Step 1: Write the failing tests**
+- [x]  **Step 1: Write the failing tests**
 
 Create `services/engine/tests/test_secrets_store.py`:
 
@@ -1340,12 +1340,12 @@ async def test_deleting_reports_whether_it_applied(pool):
         assert await delete_secret(conn, "TOKEN") is False
 ```
 
-- [ ]  **Step 2: Run them to see them fail**
+- [x]  **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/test_secrets_store.py -q`
 Expected: FAIL — `ModuleNotFoundError: No module named 'engine.secrets'`.
 
-- [ ]  **Step 3: Implement the crypto**
+- [x]  **Step 3: Implement the crypto**
 
 Create `services/engine/engine/secrets/__init__.py` (empty) and `services/engine/engine/secrets/crypto.py`:
 
@@ -1391,7 +1391,7 @@ def open_secret(key: bytes, name: str, sealed: bytes) -> str:
         raise SecretCryptoError("secret could not be decrypted") from exc
 ```
 
-- [ ]  **Step 4: Implement the store**
+- [x]  **Step 4: Implement the store**
 
 Create `services/engine/engine/secrets/store.py`:
 
@@ -1471,7 +1471,7 @@ class PostgresSecretResolver:
         return resolved
 ```
 
-- [ ]  **Step 5: Add the key to the config**
+- [x]  **Step 5: Add the key to the config**
 
 In `services/engine/engine/config.py`, add to `EngineConfig`:
 
@@ -1492,7 +1492,7 @@ and in `load_config()`, right after the existing `LANGGRAPH_AES_KEY` check:
 
 and to the `EngineConfig(...)` call: `secret_key=secret_key,`.
 
-- [ ]  **Step 6: Give the fixtures a key**
+- [x]  **Step 6: Give the fixtures a key**
 
 In `services/engine/tests/conftest.py`, in the `db_url` fixture next to the existing `LANGGRAPH_AES_KEY` line:
 
@@ -1505,7 +1505,7 @@ Then fix every test that builds an environment by hand and calls `load_config()`
 Run: `uv run pytest -q tests/test_config.py tests/test_worker_main.py tests/test_api_main.py`
 Expected: PASS. If the existing "missing LANGGRAPH_AES_KEY" test now fails on the secret key instead, give it an `ENGINE_SECRET_KEY` so it still tests what its name says.
 
-- [ ]  **Step 7: Add config tests**
+- [x]  **Step 7: Add config tests**
 
 Append to `services/engine/tests/test_config.py`:
 
@@ -1531,7 +1531,7 @@ def test_a_secret_key_of_the_wrong_length_is_refused(monkeypatch):
         load_config()
 ```
 
-- [ ]  **Step 8: Run everything and commit**
+- [x]  **Step 8: Run everything and commit**
 
 Run: `uv run pytest tests/test_secrets_store.py -q` → PASS.
 Run: `uv run pytest -q` → all pass.
