@@ -4693,3 +4693,88 @@ render deadline raced against a `< 5 s` wall-clock assertion) and
 `tests/test_worker_lease.py::test_a_run_over_its_active_time_limit_fails` (a 300 ms deadline against real
 containers). Both have the same shape: a hard-coded deadline raced against wall-clock under full-suite
 load. Revisit when Task 14 touches the render pool.
+
+### Task 2 — the guarded HTTP client
+
+**Commits:** `0b18123`, `a8199b7`, `37ae89f`, `ba174a1`. Plan file structure updated in `4b4ec71`.
+
+**The core SSRF property held from the first round.** Across two adversarial rounds nothing reached a
+socket for an address `ip_category` rejects: userinfo confusion, relative and protocol-relative `Location`
+headers, split DNS answers, rebinding across hops, percent-encoding, trailing dots and IPv6 zone ids all
+fail closed. There is no TOCTOU window, because the URL handed to httpx already contains the validated IP
+literal.
+
+**Everything around that property was broken, and the plan's code was the source of most of it.** The
+implementer found five defects in the plan before review even started: tenant headers merged as
+`{**headers, "Host": …}` (h11 refuses two Host headers, so the plan's code was a tenant-triggerable denial
+of every request); `Authorization` and `Cookie` forwarded unchanged to a cross-origin redirect; no IDNA
+encoding, though `find_entry` refuses non-ASCII hosts; a `MAX_DECODED_CHARS` constant that was dead below
+5 MB and a silent *lower* cap above it; and an unbracketed IPv6 `Host`.
+
+Review then found three more, all of which needed *executing* something rather than reading it:
+
+- **TLS verification was bypassed by connection reuse.** httpcore keys its pool on `(scheme, IP, port)` and
+  `sni_hostname` is not in the key, so a second request to a *different* hostname on the same IP:port
+  reused the first verified connection with no handshake. One TCP accept, two hostnames, both 200. The
+  client is one per worker, so this crossed runs and tenants. Closed with
+  `max_keepalive_connections=0`.
+- **The cookie jar was live.** `cookies=None` seeds an empty jar, it does not disable one, and because the
+  request URL carries the pinned IP every cookie became a host-only cookie for that IP — leaking across
+  hostnames and re-adding the exact `Cookie` header the redirect filter strips.
+- **Request smuggling.** Only `Host` was stripped; `Content-Length`, `Transfer-Encoding`, `Connection` and
+  `Expect` reached the wire verbatim. One tenant header produced both framing headers, and a real desync
+  was demonstrated against a keep-alive server with a chunk-size line parsed as the next request line.
+
+Plus a decompression bomb that peaked at 148.7 MB against a 1,000-byte cap (httpx yields *decompressed*
+bytes), and a `log.warning` — written into the plan by me — that printed the query string two lines under
+a comment about not leaking the URL, on a path where Task 7 puts secrets.
+
+**The fix for the TLS bypass had a test that could not fail.** Deleting the entire `limits=` argument left
+all 60 tests passing, because the test's server closed the connection after one request in its `finally`;
+the `sleep(0.3)` delayed that close rather than preventing it. Only a mutant exposed it. The same fix also
+silently removed httpx's default `max_connections=100` — `Limits.__init__` defaults it to `None`, meaning
+unlimited — so a security fix uncapped file descriptors.
+
+**Structure.** Header rules moved to `engine/http/headers.py` after `client.py` accumulated six invariants
+a modifier had to hold simultaneously with nothing but comments enforcing them, and 8 of 18 surviving
+mutants were header-table entries. The split was judged successful on re-review, with one leak (the
+bodyless-GET content strip) closed in the final round. The order in `_resolve_target` — allowlist, DNS,
+validate every address, pin — was deliberately left alone; it survived every attack and reads top to
+bottom on one screen.
+
+**Accepted trade, recorded:** `Accept-Encoding: identity` plus `aiter_raw()` means a server that
+compresses anyway now fails with `UnsupportedMedia` rather than being decompressed transparently. Bounded
+incremental decompression was considered and rejected for now: the httpx route needs a private
+underscore-prefixed API in a security-critical module, and bounding output size does not bound
+decompression CPU.
+
+**Renames from the plan's text:** `match` → `find_entry`, `_check` → `_resolve_target`,
+`_request` → `_follow_redirects`, `is_hostname_syntax` → `has_hostname_syntax`,
+`redirect_headers` → `headers_for_redirect`. The plan's Task 2 code block still shows the original names
+and a `previous_scheme` parameter that was never used; it is left as the record of what was asked for.
+
+### Task 3 — migration 0002
+
+**Commits:** `0317c16`, `a9f7fec`.
+
+**Not yet verified.** Docker Desktop's daemon was not running, so every integration test — including
+`test_the_secrets_table_and_retention_columns_exist`, the only thing that executes this migration — was
+deselected from every run. `977 passed, 210 deselected` is a real number and it proves nothing about this
+task. **The migration SQL has never been executed against a Postgres.** Re-run `uv run pytest -q` with
+Docker up before treating Task 3 as done, and before starting Task 4, which writes to these tables.
+
+**`CHECK (length(name) <= 64)` was added to `secrets.name`, deliberately.** `name` is half of a btree
+primary key, and an oversized btree key is not a validation error but a `ProgramLimitExceeded` — a 500.
+Plan 2a hit exactly that with a 3 KB idempotency key. The API will constrain names to
+`^[A-Z][A-Z0-9_]{0,63}$` (Task 5), so the column agrees with the API rather than trusting it. Two reviewers
+flagged this as an unapproved deviation; it was not — the implementer was explicitly asked to consider that
+failure mode, and reported it. Keep it.
+
+**The downgrade is re-runnable.** `DROP INDEX IF EXISTS`, because a downgrade is what an operator reaches
+for when something has already gone wrong, and a partially-applied one should not be a dead end.
+
+**Still owed, and it needs Docker:** proof that the query planner actually chooses `runs_retention_idx` for
+the retention sweep's real query, via `EXPLAIN` against a populated `runs` table. An index the planner
+ignores costs write throughput and misleads every future reader. The review lens assigned to this reported
+"cannot verify without populated runs table" instead of populating one, and presented static analysis as
+if it were verification — the finding is real but unproven either way.
