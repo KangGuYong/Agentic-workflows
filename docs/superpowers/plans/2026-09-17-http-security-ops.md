@@ -4499,7 +4499,7 @@ git commit -m "test(engine): prove the 2b invariants end to end" -m "Co-Authored
 - Modify: `services/engine/README.md`
 - Test: the whole suite, plus a migration round trip
 
-- [ ]  **Step 1: Document what a tenant can now do**
+- [x]  **Step 1: Document what a tenant can now do**
 
 Add to `services/engine/README.md`, after the existing node list:
 
@@ -4524,7 +4524,7 @@ Add an "Operations" section covering:
 - That rotating `ENGINE_SECRET_KEY` or `LANGGRAPH_AES_KEY` makes existing data unreadable: there is no
   re-encryption path in this release.
 
-- [ ]  **Step 2: Verify the migrations both ways**
+- [x]  **Step 2: Verify the migrations both ways**
 
 Run: `uv run alembic -c engine/db/alembic.ini upgrade head` (check the real config path with
 `ls services/engine/engine/db`)
@@ -4533,7 +4533,7 @@ Run: `uv run alembic -c engine/db/alembic.ini upgrade head`
 Expected: all three succeed. A downgrade that fails is a broken migration even though nothing is deployed
 yet — it is what an operator reaches for when an upgrade goes wrong.
 
-- [ ]  **Step 3: Verify the whole branch**
+- [x]  **Step 3: Verify the whole branch**
 
 Run: `uv run pytest -q`
 Expected: every test passes. Record the count.
@@ -4547,7 +4547,7 @@ Expected: no output.
 Run: `git log --oneline feat/runtime-core..HEAD`
 Expected: one commit per task, in order, each with the trailer.
 
-- [ ]  **Step 4: Check the secret really is absent, by hand**
+- [x]  **Step 4: Check the secret really is absent, by hand**
 
 With the stack up and one `http_call` run finished:
 
@@ -4558,7 +4558,7 @@ docker compose -f deploy/docker-compose.yml exec postgres psql -U engine -d engi
 Expected: `0`, using whatever value you actually stored. Do the same against `run_events.payload`. This is
 the check an operator would run, and it is worth running once by hand rather than only in a fixture.
 
-- [ ]  **Step 5: Commit**
+- [x]  **Step 5: Commit**
 
 ```bash
 git add services/engine/README.md
@@ -5194,3 +5194,39 @@ which would seal the worker's run payloads under a key the API cannot open: outp
 for a reason unrelated to what is being tested. The tests use the configured key for both.
 
 Five mutants, all killed. Ran twice, as the plan asks, plus the full suite twice: 1,360 passed.
+
+### Task 18 — post-review note
+
+**Step 4 found a real defect, and only deploying could have found it.** The first `http_call` run against
+the deployed stack failed with `ENGINE_RECOVERY_EXHAUSTED`, and the worker log said
+`EngineFault: http_request needs an HTTP client` — the exact failure Task 17's new entrypoint test
+predicts. The cause was a stale image: `engine:local` had been built during Task 16, before Task 17 wired
+the client in, so the container was running code from four commits earlier. Rebuilding fixed it. Worth
+recording for two reasons: `--no-build` is easy to leave in a deploy command, and the symptom is a *run*
+failure with a recovery loop, not a startup failure — nothing about the container looks unhealthy.
+
+**The operator's leak check, against the deployed database, with a genuinely working credential.** The
+secret stored was the API's own token and the `http_request` node called `http://api:8000/healthz` with
+it, so a wrong or unresolved credential would have come back `401` instead of `200 {"status":"ok"}`. The
+run succeeded, and then:
+
+| Where | Occurrences of the secret |
+|---|---|
+| `node_runs.input` / `.output` | 0 |
+| `run_events.payload` | 0 |
+| `runs.inputs` / `.outputs` (bytea) | 0 |
+| `secrets.ciphertext` | 0 |
+| `checkpoints.checkpoint` / `.metadata` | 0 |
+| every container log | 0 |
+
+What *is* recorded for the header: `{"url": "http://api:8000/healthz", "headers.Authorization": "[REDACTED]"}`.
+
+**Migration round trip (Step 2).** `upgrade head` → `downgrade 0001` → `upgrade head` all succeed, and
+the schema afterwards is the right one: `runs.inputs`/`outputs` are `bytea` again, `purged_at` is back,
+`secrets` exists and `runs_retention_idx` is rebuilt. The plan's CLI invocation does not work as written —
+`alembic -c engine/db/alembic.ini` cannot find `migrations`, because `script_location` is set
+programmatically in `engine/db/migrate.py::_alembic_config`. Driving `alembic.command` through that same
+helper is both what works and what actually exercises the app's own configuration.
+
+**Branch verification (Step 3).** `1360 passed`, `ruff check .` clean, `docker compose config -q` silent,
+44 commits, every one carrying the `Co-Authored-By` trailer.
