@@ -1,3 +1,4 @@
+import asyncio
 import dataclasses
 
 import pytest
@@ -425,3 +426,67 @@ async def test_without_a_nonce_a_secret_reference_fails_the_node():
         await _run(plan, deps)
 
     assert exc.value.error.code == ErrorCode.TEMPLATE_ERROR
+
+
+async def test_a_slow_render_fails_the_node_with_its_own_timeout():
+    """A render that outlives the node's budget must fail as NODE_TIMEOUT, not run on unbounded.
+
+    Before this, `timeoutSec` covered `execute` only: a render (tenant-controlled CPU work) had just
+    `RENDER_TIMEOUT_SEC`, and the wait for a free pool worker had no bound at all.
+    """
+    async def slow_render(fields, outputs, secret_nonce):
+        await asyncio.sleep(30)
+        return {}
+
+    deps, _, _ = _deps(ScriptedLLM(["답"]))
+    deps.render = slow_render
+    plan = _plan(TemplateNode(), {"template": "{{ start.topic }}"},
+                 policy=Policy(timeoutSec=1, retry=RetrySpec(maxAttempts=1)))
+
+    with pytest.raises(NodeFailedError) as exc:
+        await _run(plan, deps)
+
+    assert exc.value.error.code == ErrorCode.NODE_TIMEOUT
+
+
+async def test_the_render_and_the_call_share_one_budget():
+    """Two `asyncio.timeout(timeout)` blocks would give a node twice its policy; one deadline does not.
+
+    Measured from inside the call rather than by total elapsed time: the node's budget is 1s and the
+    render eats 0.8s of it, so a shared deadline leaves `execute` about 0.2s before it is cancelled,
+    while a per-stage budget would hand it a fresh 1s. Those two are 5x apart, which is a margin a loaded
+    machine cannot blur — unlike comparing two wall-clock totals that differ by a few hundred ms.
+    """
+    async def most_of_the_budget(fields, outputs, secret_nonce):
+        await asyncio.sleep(0.8)
+        return {"prompt": "x"}
+
+    class _MeasuringLLM:
+        """Records how much of the budget was left for it by the time it ran."""
+
+        def __init__(self) -> None:
+            self.slice_sec: float | None = None
+
+        async def chat(self, **kwargs):
+            started = asyncio.get_running_loop().time()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                self.slice_sec = asyncio.get_running_loop().time() - started
+                raise
+            raise AssertionError("the deadline should have fired first")
+
+    llm = _MeasuringLLM()
+    deps, _, _ = _deps(llm)
+    deps.render = most_of_the_budget
+    plan = _plan(LLMNode(), LLM_CONFIG, policy=Policy(timeoutSec=1, retry=RetrySpec(maxAttempts=1)))
+
+    with pytest.raises(NodeFailedError) as exc:
+        await _run(plan, deps)
+
+    assert exc.value.error.code == ErrorCode.NODE_TIMEOUT
+    assert llm.slice_sec is not None, "the call never ran, so this proves nothing about its budget"
+    assert llm.slice_sec < 0.5, (
+        f"execute got {llm.slice_sec:.2f}s after the render had already spent 0.8s of a 1s budget: "
+        "the render and the call are not sharing one deadline"
+    )

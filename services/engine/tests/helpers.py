@@ -20,7 +20,7 @@ _BASE_CONFIG = EngineConfig(
     worker_max_runs=1, lease_sec=1, heartbeat_sec=1, claim_poll_sec=1.0, reaper_interval_sec=1.0,
     run_max_active_ms=1000, render_timeout_sec=1.0, render_pool_size=1, max_body_bytes=1000,
     http_allowlist=(), http_max_redirects=3, http_max_request_bytes=1000, http_max_response_bytes=1000,
-    retention_days=30, purge_batch=100,
+    db_pool_max=10, retention_days=30, purge_batch=100,
 )
 
 

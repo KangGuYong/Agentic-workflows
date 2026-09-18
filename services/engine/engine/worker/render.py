@@ -91,15 +91,30 @@ class RenderPool:
     def __init__(self, *, size: int = 2, timeout: float = 5.0,
                  memory_limit_mb: int | None = _DEFAULT_MEMORY_LIMIT_MB) -> None:
         self._timeout = timeout
+        self._size = max(1, size)
+        # pebble queues everything handed to it, so without this a hundred nodes hand it a hundred jobs
+        # and each one's wait is invisible. With the semaphore the wait happens here, inside the caller's
+        # node deadline, so a saturated pool fails the node it belongs to instead of stretching every run
+        # on the worker (2b design §8.4).
+        self._slots = asyncio.Semaphore(self._size)
         context = _fork_safe_context()
         pool_kwargs: dict[str, Any] = {"context": context} if context is not None else {}
-        self._pool = ProcessPool(max_workers=max(1, size), initializer=_init, initargs=(memory_limit_mb,),
+        self._pool = ProcessPool(max_workers=self._size, initializer=_init, initargs=(memory_limit_mb,),
                                  **pool_kwargs)
         self._closed = False
         self._futures: set[ProcessFuture] = set()
 
+    @property
+    def in_flight(self) -> int:
+        return len(self._futures)
+
     async def __call__(self, fields: list[TemplateField], outputs: dict[str, Any],
                        secret_nonce: str | None = None) -> dict[str, Any]:
+        async with self._slots:
+            return await self._render(fields, outputs, secret_nonce)
+
+    async def _render(self, fields: list[TemplateField], outputs: dict[str, Any],
+                      secret_nonce: str | None) -> dict[str, Any]:
         try:
             future = self._pool.schedule(_job, args=(fields, outputs, secret_nonce), timeout=self._timeout)
         except RuntimeError as exc:

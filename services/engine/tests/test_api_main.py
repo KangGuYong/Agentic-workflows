@@ -109,7 +109,9 @@ def fakes(monkeypatch: pytest.MonkeyPatch, main_module: ModuleType) -> Fakes:
             raise RuntimeError("prepare_database boom")
 
     monkeypatch.setattr(main_module, "prepare_database", fake_prepare_database)
-    monkeypatch.setattr(main_module, "make_pool", lambda database_url: FakePool(state))
+    # `**_` so the double keeps matching `make_pool` as its keyword arguments grow (max_size
+    # arrived with DB_POOL_MAX); this test is about lifecycle order, not the pool's sizing.
+    monkeypatch.setattr(main_module, "make_pool", lambda database_url, **_: FakePool(state))
     monkeypatch.setattr(main_module, "Redis", FakeRedis(state))
     return state
 

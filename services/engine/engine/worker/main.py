@@ -48,7 +48,10 @@ async def run(stop: asyncio.Event | None = None) -> None:
 
     await prepare_database(config.database_url)
 
-    pool = make_pool(config.database_url, max_size=config.worker_max_runs + 4)
+    # The worker needs a connection per in-flight run plus the recorder/reaper traffic around them; the
+    # heartbeat has its own connection (2b design §8.1) and is deliberately not counted here.
+    pool = make_pool(config.database_url, max_size=max(config.db_pool_max, config.worker_max_runs + 4))
+    log.info("render pool size %s bounds concurrent template renders", config.render_pool_size)
     redis: Redis | None = None
     raw: OllamaRaw | None = None
     render: RenderPool | None = None

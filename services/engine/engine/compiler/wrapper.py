@@ -230,8 +230,13 @@ def make_node_fn(plan: NodePlan):
 
         for tries in range(1, max_attempts + 1):
             error = None
+            # One deadline for the whole attempt, not one per stage: rendering is tenant-controlled CPU
+            # work and waiting for a free render worker is queueing, so both belong inside the node's
+            # policy budget (2b design §8.4). `timeout_at(None)` is simply no deadline.
+            deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
             try:
-                rendered = await _rendered(deps, fields, outputs)
+                async with asyncio.timeout_at(deadline):
+                    rendered = await _rendered(deps, fields, outputs)
             except CONTROL_FLOW:  # a dead render pool is the worker's problem, not this attempt's
                 raise
             except Exception as exc:  # noqa: BLE001 - a template failure is this attempt's node error
@@ -242,7 +247,7 @@ def make_node_fn(plan: NodePlan):
             if error is None:
                 try:
                     ctx = _context(plan, deps, state, outputs, exec_index, attempt, resumed, timeout)
-                    async with asyncio.timeout(timeout):
+                    async with asyncio.timeout_at(deadline):
                         result = await plan.spec.execute(ctx, plan.config, rendered)
                     _check_output(result.output)
                     decision = _decide(plan, result.output, loop_counters)

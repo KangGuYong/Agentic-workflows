@@ -3679,7 +3679,7 @@ the worker's real concurrency limit and nothing says so.
 - Test: `services/engine/tests/test_compiler_wrapper.py` (append),
   `services/engine/tests/test_worker_render.py` (append)
 
-- [ ]  **Step 1: Write the failing tests**
+- [x]  **Step 1: Write the failing tests**
 
 Append to `services/engine/tests/test_compiler_wrapper.py`:
 
@@ -3761,13 +3761,13 @@ async def test_a_full_queue_makes_callers_wait_rather_than_pile_up():
         await asyncio.to_thread(pool.close)
 ```
 
-- [ ]  **Step 2: Run them to see them fail**
+- [x]  **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/test_compiler_wrapper.py tests/test_worker_render.py -q`
 Expected: FAIL — the slow render finishes after 10 s instead of timing out, and `RenderPool` has no
 `in_flight`.
 
-- [ ]  **Step 3: Give the attempt one deadline**
+- [x]  **Step 3: Give the attempt one deadline**
 
 In `services/engine/engine/compiler/wrapper.py`, inside the `for tries in ...` loop:
 
@@ -3790,7 +3790,7 @@ In `services/engine/engine/compiler/wrapper.py`, inside the `for tries in ...` l
 and replace the `execute` block's `async with asyncio.timeout(timeout):` with
 `async with asyncio.timeout_at(deadline):`.
 
-- [ ]  **Step 4: Bound the render queue**
+- [x]  **Step 4: Bound the render queue**
 
 In `services/engine/engine/worker/render.py`:
 
@@ -3828,7 +3828,7 @@ renamed method changes.
 `asyncio.Semaphore()` binds to the running loop on first use, not at construction, so building the pool
 outside the loop (as `worker/main.py` does) stays fine on Python 3.10+.
 
-- [ ]  **Step 5: Size both pools the same way**
+- [x]  **Step 5: Size both pools the same way**
 
 In `services/engine/engine/config.py`, add `db_pool_max: int` and
 `db_pool_max=_int("DB_POOL_MAX", 10),`.
@@ -3844,12 +3844,12 @@ In `services/engine/engine/worker/main.py`:
     log.info("render pool size %s bounds concurrent template renders", config.render_pool_size)
 ```
 
-- [ ]  **Step 6: Run the tests**
+- [x]  **Step 6: Run the tests**
 
 Run: `uv run pytest tests/test_compiler_wrapper.py tests/test_worker_render.py tests/test_worker_main.py tests/test_api_main.py -q`
 Expected: PASS.
 
-- [ ]  **Step 7: Run everything and commit**
+- [x]  **Step 7: Run everything and commit**
 
 Run: `uv run pytest -q` → all pass.
 Run: `uv run ruff check .` → `All checks passed!`
@@ -5056,3 +5056,41 @@ around it — the degraded stream delivers what Postgres has, and ends when the 
 
 Five mutants, all killed. `retry_run`'s docstring promised the old reconnect contract and now describes
 the new one.
+
+### Task 14 — post-review note
+
+**The plan's tests could not run.** `Policy.timeoutSec` has a minimum of 1 second, so every `timeoutSec=0.2`
+/ `0.5` in Step 1 is a `ValidationError`; the helpers it names (`make_plan`, `make_deps`, `run_node`,
+`SlowLLM`) are not this file's (`_plan`, `_deps`, `_run`); and `test_compiler_wrapper.py` does not import
+`asyncio`, so the plan's `asyncio.sleep` render stub raised `NameError` **inside** the node — which the
+wrapper faithfully reported as `NODE_FAILED`, a green-looking failure for entirely the wrong reason.
+
+**The shared-budget test is no longer a stopwatch.** The plan compares total elapsed time against
+`0.3 + 0.5`, margins of a few hundred ms — the same shape as the flaky test this task was supposed to fix.
+It now measures from *inside* the call: the budget is 1s, the render eats 0.8s of it, so a shared deadline
+leaves `execute` ~0.2s while a per-stage budget would hand it a fresh 1s. Those are 5x apart.
+
+**Handoff §9's flaky test is fixed, and it was flakier than recorded** — `test_two_renders_overlap_in_a_
+pool_of_two` failed about one run in five in isolation, not "once each". Two separate problems:
+
+1. It compared two wall clocks (`concurrent < solo * 1.6`). On a loaded machine that ratio describes the
+   machine. Replaced by `in_flight`, which counts scheduled-and-unfinished renders — seeing 2 *is* the
+   overlap, not evidence for it.
+2. The `pid1 != pid2` assertion was itself racy: two `os.getpid()` jobs are instantaneous, so pebble can
+   serve the second from the worker that just finished the first (caught once in twelve runs after the
+   timing fix). Worker processes are now read from `multiprocessing.active_children()`, which is a fact
+   about the OS rather than a race. 12/12 clean afterwards.
+
+**A rendezvous test had to be abandoned, and the reason is worth knowing.** The first attempt proved
+concurrency with two pool jobs waiting for each other through a shared directory. It cannot work: a
+function defined in the test module cannot be unpickled in a pool worker (`BrokenProcessPool` on the very
+first schedule), while `engine.*` functions can. Warming the pool first does not help. That is why the
+existing `_get_pid` job works only *after* an ordinary render has run.
+
+**One mutant survived the first pass.** Removing the semaphore entirely left everything green, because the
+third caller is unfinished either way — waiting for a slot and waiting in pebble's queue look identical
+from the outside. `in_flight` separates them: a third *scheduled* render means the wait moved back inside
+pebble, where no node deadline can see it. Four mutants, all killed.
+
+**Also:** `tests/test_api_main.py`'s `make_pool` double took `database_url` only, so `max_size` broke three
+lifespan tests that have nothing to do with pool sizing. It takes `**_` now.

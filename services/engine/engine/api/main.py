@@ -50,7 +50,7 @@ _windows_selector_loop()
 def build() -> FastAPI:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     config = load_config()
-    pool = make_pool(config.database_url)
+    pool = make_pool(config.database_url, max_size=config.db_pool_max)
     redis = Redis.from_url(config.redis_url, decode_responses=True)
     application = create_app(config, pool, redis)
 
