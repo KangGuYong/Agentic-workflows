@@ -95,3 +95,36 @@ async def test_the_secrets_table_and_retention_columns_exist(pool):
         "workspace_id", "name", "ciphertext", "created_at", "updated_at"}
     assert [row["column_name"] for row in purged] == ["purged_at"]
     assert [row["attname"] for row in key] == ["name", "workspace_id"]
+
+
+async def test_a_secret_name_longer_than_the_api_allows_is_refused(pool):
+    """The API constrains names to `^[A-Z][A-Z0-9_]{0,63}$`, but the column is the last line of defence.
+
+    `name` is half of a btree primary key, and an oversized value on a btree index is not a validation
+    error -- it is a `ProgramLimitExceeded`, which surfaces as a 500. Plan 2a hit exactly that with a 3 KB
+    idempotency key. The CHECK keeps the failure a refusal rather than a crash even if some future caller
+    reaches the table without going through the API.
+    """
+    workspace = await _new_workspace(pool)
+    async with pool.connection() as conn:
+        await conn.execute("INSERT INTO secrets (workspace_id, name, ciphertext) VALUES (%s, %s, %s)",
+                           (workspace, "A" * 64, b"ciphertext"))
+    async with pool.connection() as conn, pytest.raises(CheckViolation):
+        await conn.execute("INSERT INTO secrets (workspace_id, name, ciphertext) VALUES (%s, %s, %s)",
+                           (workspace, "A" * 65, b"ciphertext"))
+
+
+async def test_the_same_name_can_exist_in_two_workspaces(pool):
+    """The primary key is composite on purpose: one tenant's API_TOKEN is not another's."""
+    async with pool.connection() as conn:
+        for workspace in (await _new_workspace(pool), await _new_workspace(pool)):
+            await conn.execute("INSERT INTO secrets (workspace_id, name, ciphertext) VALUES (%s, %s, %s)",
+                               (workspace, "API_TOKEN", b"ciphertext"))
+        rows = await (await conn.execute("SELECT count(*) AS n FROM secrets WHERE name='API_TOKEN'")).fetchone()
+    assert rows["n"] == 2
+
+
+async def _new_workspace(pool) -> str:
+    async with pool.connection() as conn:
+        row = await (await conn.execute("SELECT gen_random_uuid() AS id")).fetchone()
+    return row["id"]

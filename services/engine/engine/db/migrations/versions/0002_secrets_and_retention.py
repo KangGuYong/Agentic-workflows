@@ -28,7 +28,10 @@ CREATE INDEX runs_retention_idx ON runs (finished_at) WHERE purged_at IS NULL AN
 """
 
 DOWN = """
-DROP INDEX runs_retention_idx;
+-- Dropping purged_at would drop this index anyway (its predicate references the column), but naming it
+-- keeps the teardown explicit and order-independent. IF EXISTS so a partially-applied downgrade can be
+-- re-run: a downgrade is what an operator reaches for when something has already gone wrong.
+DROP INDEX IF EXISTS runs_retention_idx;
 ALTER TABLE runs DROP COLUMN purged_at;
 DROP TABLE secrets;
 """
