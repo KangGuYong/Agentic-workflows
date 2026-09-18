@@ -44,7 +44,8 @@ def _import_main(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     """
     if "ENGINE_DATABASE_URL" not in os.environ:
         monkeypatch.setenv("ENGINE_DATABASE_URL", "postgresql://fake/db")
-    if not os.environ.get("LANGGRAPH_AES_KEY") and os.environ.get("ENGINE_DEV_INSECURE") != "1":
+    missing_a_key = not os.environ.get("LANGGRAPH_AES_KEY") or not os.environ.get("ENGINE_SECRET_KEY")
+    if missing_a_key and os.environ.get("ENGINE_DEV_INSECURE") != "1":
         monkeypatch.setenv("ENGINE_DEV_INSECURE", "1")
     import engine.api.main as main
 
@@ -108,7 +109,9 @@ def fakes(monkeypatch: pytest.MonkeyPatch, main_module: ModuleType) -> Fakes:
             raise RuntimeError("prepare_database boom")
 
     monkeypatch.setattr(main_module, "prepare_database", fake_prepare_database)
-    monkeypatch.setattr(main_module, "make_pool", lambda database_url: FakePool(state))
+    # `**_` so the double keeps matching `make_pool` as its keyword arguments grow (max_size
+    # arrived with DB_POOL_MAX); this test is about lifecycle order, not the pool's sizing.
+    monkeypatch.setattr(main_module, "make_pool", lambda database_url, **_: FakePool(state))
     monkeypatch.setattr(main_module, "Redis", FakeRedis(state))
     return state
 

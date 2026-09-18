@@ -13,9 +13,11 @@ from redis.asyncio import Redis
 from engine.config import load_config
 from engine.db.migrate import prepare_database
 from engine.db.pool import make_pool
+from engine.http.client import GuardedClient, SystemResolver
 from engine.llm.gateway import LLMGateway
 from engine.llm.ollama import OllamaRaw
 from engine.llm.semaphore import ModelSemaphore, SemaphoreLLM
+from engine.secrets.store import PostgresSecretResolver
 from engine.worker.render import RenderPool
 from engine.worker.worker import Worker
 
@@ -48,10 +50,14 @@ async def run(stop: asyncio.Event | None = None) -> None:
 
     await prepare_database(config.database_url)
 
-    pool = make_pool(config.database_url, max_size=config.worker_max_runs + 4)
+    # The worker needs a connection per in-flight run plus the recorder/reaper traffic around them; the
+    # heartbeat has its own connection (2b design §8.1) and is deliberately not counted here.
+    pool = make_pool(config.database_url, max_size=max(config.db_pool_max, config.worker_max_runs + 4))
+    log.info("render pool size %s bounds concurrent template renders", config.render_pool_size)
     redis: Redis | None = None
     raw: OllamaRaw | None = None
     render: RenderPool | None = None
+    http: GuardedClient | None = None
     worker: Worker | None = None
     try:
         await pool.open(wait=True)
@@ -59,7 +65,19 @@ async def run(stop: asyncio.Event | None = None) -> None:
         raw = OllamaRaw(config.ollama_base_url)
         llm = SemaphoreLLM(LLMGateway(raw), ModelSemaphore(redis, limit=config.ollama_num_parallel))
         render = RenderPool(size=config.render_pool_size, timeout=config.render_timeout_sec)
-        worker = Worker(config, pool, redis, llm=llm, render=render)  # the worker runs its own reaper
+        # The egress client and the secret resolver, built once for the process. An empty allowlist still
+        # builds a client: every http_request is then blocked, which is the documented default.
+        http = GuardedClient(config.http_allowlist, resolver=SystemResolver(limit=config.worker_max_runs),
+                             max_redirects=config.http_max_redirects,
+                             max_request_bytes=config.http_max_request_bytes,
+                             max_response_bytes=config.http_max_response_bytes)
+        secrets = PostgresSecretResolver(pool, config.secret_key) if config.secret_key else None
+        # Hosts only, never a full URL (MVP design 10.1).
+        log.info("egress allowlist: %s",
+                 ", ".join(f"{e.scheme}://{e.host}:{e.port}" for e in config.http_allowlist)
+                 or "(empty: all http_request calls are blocked)")
+        worker = Worker(config, pool, redis, llm=llm, render=render, http=http,
+                        secrets=secrets)  # the worker runs its own reaper
 
         await worker.start()
         log.info("worker %s ready", worker.owner)
@@ -76,6 +94,7 @@ async def run(stop: asyncio.Event | None = None) -> None:
             # RenderPool.close's docstring) - tens of seconds for a large pool, well past a typical SIGTERM
             # grace period, so it must not run directly on the event loop.
             ("render pool", (lambda r=render: asyncio.to_thread(r.close)) if render is not None else None),
+            ("http client", http.aclose if http is not None else None),
             ("ollama client", raw.aclose if raw is not None else None),
             ("redis client", redis.aclose if redis is not None else None),
             ("db pool", pool.close),

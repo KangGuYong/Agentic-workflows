@@ -21,6 +21,7 @@ class NodeRegistry:
 def default_registry() -> NodeRegistry:
     from engine.nodes.classifier import ClassifierNode
     from engine.nodes.condition import ConditionNode
+    from engine.nodes.http_request import HttpRequestNode
     from engine.nodes.human_approval import HumanApprovalNode
     from engine.nodes.io import EndNode, StartNode
     from engine.nodes.llm import LLMNode
@@ -37,5 +38,6 @@ def default_registry() -> NodeRegistry:
             ConditionNode(),
             MergeNode(),
             HumanApprovalNode(),
+            HttpRequestNode(),
         ]
     )

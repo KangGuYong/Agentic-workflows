@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import time
 
 from engine.db import runs as run_db
@@ -20,11 +21,16 @@ class _SlowLLM:
 
     def __init__(self, seconds: float = 30.0) -> None:
         self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
         self._seconds = seconds
 
     async def chat(self, **kwargs):
         self.started.set()
-        await asyncio.sleep(self._seconds)
+        try:
+            await asyncio.sleep(self._seconds)
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
         raise AssertionError("should have been cancelled")
 
 
@@ -331,3 +337,173 @@ async def _stays_expired(pool, run_id, *, span_sec: float, interval: float = 0.0
         row = await _expired_row(pool, run_id)
         assert row is not None, "lease_expires_at was pushed back out after the infra failure"
     return row
+
+
+async def test_stop_gives_up_on_a_task_that_will_not_cancel(pool, redis, worker_factory, caplog):
+    """A shutdown step that can wait forever turns a deploy into a SIGKILL — and, in the suite, into a
+    hang with no output at all. The run is not lost: it keeps its lease, the lease expires, and the
+    reaper recovers it, which is what happens when a worker dies outright anyway (design 6.2)."""
+    import asyncio
+    import logging
+
+    from engine.worker import worker as worker_module
+
+    worker = await worker_factory(ScriptedLLM([]))
+    ignored_one_cancel = asyncio.Event()
+
+    async def slow_to_cancel():
+        """Swallows the first cancel, the way a task stuck in an uninterruptible cleanup does, then
+        exits on the second — a task that never dies would hang the event loop's own shutdown, which is
+        the failure this test exists to prevent, not to cause."""
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            ignored_one_cancel.set()
+            await asyncio.sleep(3600)
+
+    stuck = worker._spawn(slow_to_cancel())
+    original = worker_module.STOP_TIMEOUT_SEC
+    worker_module.STOP_TIMEOUT_SEC = 0.2
+    try:
+        with caplog.at_level(logging.WARNING):
+            async with asyncio.timeout(10):  # the point of the test: stop() returns at all
+                await worker.stop()
+    finally:
+        worker_module.STOP_TIMEOUT_SEC = original
+        stuck.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stuck
+
+    assert ignored_one_cancel.is_set()
+    assert "did not stop" in caplog.text
+
+
+async def test_the_heartbeat_does_not_use_the_shared_pool(pool, redis, worker_factory):
+    """Pool starvation must not be able to cost a healthy run its lease."""
+    worker = await worker_factory(ScriptedLLM(["요약본"]))
+
+    assert worker._beat_conn is not None
+    assert worker._beat_conn is not pool
+
+
+async def test_the_lease_survives_a_pool_with_no_free_connections(pool, redis, worker_factory, db_url):
+    """§11.2's first hardening invariant, and the measurement that motivated this task: 10 runs x a 10-way
+    fan-out used 13 of 14 connections with 7 waiting. A heartbeat queued behind that can wait out the very
+    lease it is trying to extend, and the reaper then hands a perfectly healthy run to a second worker."""
+    from psycopg import AsyncConnection
+    from psycopg.rows import dict_row
+
+    from tests.factories import make_run
+
+    run_id = await make_run(pool, dsl=CHAIN, status="queued", inputs={"topic": "AI"})
+    llm = _SlowLLM(6.0)
+    await worker_factory(llm, lease_sec=2, heartbeat_sec=0.2)
+    await asyncio.wait_for(llm.started.wait(), 10)
+
+    async with contextlib.AsyncExitStack() as stack:
+        for _ in range(pool.max_size):  # nothing is left for anyone else
+            await stack.enter_async_context(pool.connection())
+        await asyncio.sleep(3)  # longer than lease_sec: an unextended lease is gone by now
+        # A connection of its own, because the pool has nothing left to give -- the same reason the
+        # heartbeat now has one.
+        probe = await AsyncConnection.connect(db_url, autocommit=True, row_factory=dict_row)
+        try:
+            row = await (await probe.execute(
+                "SELECT status, lease_expires_at > now() AS alive FROM runs WHERE id=%s",
+                (run_id,))).fetchone()
+        finally:
+            await probe.close()
+
+    assert row["status"] == "running"
+    assert row["alive"], "the lease expired while the pool was full"
+
+
+async def test_a_heartbeat_that_cannot_reach_the_database_gives_up_the_run(pool, redis, worker_factory,
+                                                                          monkeypatch):
+    """After lease_sec of failures the worker must stop, or two workers end up on one checkpoint."""
+    from engine.db import runs as run_db
+    from tests.factories import make_run
+
+    async def always_fails(*args, **kwargs):
+        raise RuntimeError("database is unreachable")
+
+    monkeypatch.setattr(run_db, "heartbeat", always_fails)
+    run_id = await make_run(pool, dsl=CHAIN, status="queued", inputs={"topic": "AI"})
+    llm = _SlowLLM(30.0)
+    await worker_factory(llm, lease_sec=1, heartbeat_sec=0.2)
+
+    async with asyncio.timeout(20):
+        await llm.started.wait()
+
+        async def stopped():
+            return llm.cancelled.is_set()
+
+        await until(stopped)
+
+    async with pool.connection() as conn:
+        row = await run_db.get_run(conn, run_id)
+    assert row["status"] == "running"  # left for recovery, not written by a worker that lost its lease
+
+
+async def test_a_broken_heartbeat_connection_is_replaced_rather_than_fatal(pool, redis, worker_factory):
+    """The dedicated connection is a single point of failure by construction: if it drops and is not
+    reconnected, every run this worker holds silently loses its lease."""
+    from tests.factories import make_run
+
+    await make_run(pool, dsl=CHAIN, status="queued", inputs={"topic": "AI"})
+    llm = _SlowLLM(6.0)
+    worker = await worker_factory(llm, lease_sec=5, heartbeat_sec=0.2)
+    await asyncio.wait_for(llm.started.wait(), 10)
+
+    await worker._beat_conn.close()  # as if the database had dropped it
+
+    async def reconnected():
+        conn = worker._beat_conn
+        return conn is not None and not conn.closed
+
+    await until(reconnected, timeout=10.0)
+
+
+async def test_a_transient_heartbeat_failure_does_not_give_up_a_healthy_run(pool, redis, worker_factory,
+                                                                            monkeypatch):
+    """The give-up rule is measured from the last *successful* beat, not from when the run started.
+
+    Without that, a long-running run that has been beating happily for longer than its lease would be
+    abandoned by the very first transient blip — which is the opposite of what the rule is for. The
+    failures here are surrounded by successes on both sides, so only the reset of the success clock
+    distinguishes the two behaviours.
+    """
+    from engine.db import runs as run_db
+    from tests.factories import make_run
+
+    run_id = await make_run(pool, dsl=CHAIN, status="queued", inputs={"topic": "AI"})
+    real_heartbeat = run_db.heartbeat
+    state = {"calls": 0, "failed": 0}
+
+    async def flaky(*args, **kwargs):
+        state["calls"] += 1
+        if 4 <= state["calls"] <= 6:  # a blip well after the run has been beating successfully
+            state["failed"] += 1
+            raise RuntimeError("database blip")
+        return await real_heartbeat(*args, **kwargs)
+
+    monkeypatch.setattr(run_db, "heartbeat", flaky)
+    llm = _GatedLLM()
+    # lease_sec=1 with heartbeat_sec=0.2: the run is alive far longer than one lease before the blip,
+    # so a rule keyed on the run's age rather than the last good beat would abandon it here.
+    await worker_factory(llm, lease_sec=1, heartbeat_sec=0.2)
+    await asyncio.wait_for(llm.started.wait(), 10)
+
+    async def blip_is_over():
+        return state["failed"] >= 3 and state["calls"] >= 8
+
+    await until(blip_is_over, timeout=15.0)
+    llm.proceed.set()
+
+    async def finished():
+        async with pool.connection() as conn:
+            row = await run_db.get_run(conn, run_id)
+        return row if row["status"] in ("succeeded", "failed", "cancelled") else None
+
+    row = await until(finished, timeout=15.0)
+    assert row["status"] == "succeeded"

@@ -1,3 +1,4 @@
+import asyncio
 import dataclasses
 
 import pytest
@@ -336,22 +337,28 @@ async def test_classifier_on_error_default_routes_through_its_default_handle():
 
 async def test_rendering_goes_through_the_deps_hook_when_one_is_set():
     seen: list[dict] = []
+    nonces: list[str | None] = []
 
-    async def render(fields, outputs):
+    async def render(fields, outputs, secret_nonce):
         seen.append({field.path: field.source for field in fields})
+        nonces.append(secret_nonce)
         return {field.path: "치환됨" for field in fields}
 
     deps, _, _ = _deps(ScriptedLLM(["답"]))
     deps.render = render
+    deps.secret_nonce = "0123456789abcdef"
 
     result = await _run(_plan(LLMNode(), LLM_CONFIG, policy=LLMNode.default_policy), deps)
 
     assert seen and outputs_of(result)["n"] == {"text": "답"}
+    # The off-loop path is where the nonce can silently go missing: without it the pool renders with no
+    # `secret` binding at all and every http_request template fails instead of producing a marker.
+    assert nonces == ["0123456789abcdef"]
     assert deps.llm.calls[0]["messages"][-1].content == "치환됨"
 
 
 async def test_a_render_deadline_fails_the_node_without_retrying():
-    async def render(fields, outputs):
+    async def render(fields, outputs, secret_nonce):
         raise TimeoutError("render deadline")
 
     deps, recorder, _ = _deps(ScriptedLLM(["답"]))
@@ -366,7 +373,7 @@ async def test_a_render_deadline_fails_the_node_without_retrying():
 
 
 async def test_a_render_hook_exception_becomes_a_non_retryable_node_error():
-    async def render(fields, outputs):
+    async def render(fields, outputs, secret_nonce):
         raise RuntimeError("pool is gone")
 
     deps, recorder, _ = _deps(ScriptedLLM(["답"]))
@@ -382,7 +389,7 @@ async def test_a_render_hook_exception_becomes_a_non_retryable_node_error():
 
 
 async def test_a_render_abort_escapes_the_run_instead_of_failing_the_node():
-    async def render(fields, outputs):
+    async def render(fields, outputs, secret_nonce):
         raise EngineFault("render pool is not active")
 
     deps, recorder, _ = _deps(ScriptedLLM(["답"]))
@@ -393,3 +400,93 @@ async def test_a_render_abort_escapes_the_run_instead_of_failing_the_node():
         await _run(plan, deps)
 
     assert recorder.records == []  # infrastructure failures belong to crash recovery, not to the run
+
+
+async def test_a_secret_renders_as_a_marker_not_a_value():
+    from engine.secrets.markers import marker_for
+
+    deps, recorder, _ = _deps(ScriptedLLM(["답"]))
+    deps.secret_nonce = "0123456789abcdef"
+    plan = _plan(LLMNode(), {"model": "m", "prompt": "key={{ secret.API_TOKEN }}"},
+                 policy=LLMNode.default_policy)
+
+    await _run(plan, deps)
+
+    assert marker_for("API_TOKEN", "0123456789abcdef") in str(recorder.records)
+
+
+async def test_without_a_nonce_a_secret_reference_fails_the_node():
+    """Defence in depth: every node except http_request renders with secret_nonce=None, and the
+    validator already refuses `secret` anywhere else."""
+    deps, _, _ = _deps(ScriptedLLM(["답"]))
+    plan = _plan(LLMNode(), {"model": "m", "prompt": "key={{ secret.API_TOKEN }}"},
+                 policy=LLMNode.default_policy)
+
+    with pytest.raises(NodeFailedError) as exc:
+        await _run(plan, deps)
+
+    assert exc.value.error.code == ErrorCode.TEMPLATE_ERROR
+
+
+async def test_a_slow_render_fails_the_node_with_its_own_timeout():
+    """A render that outlives the node's budget must fail as NODE_TIMEOUT, not run on unbounded.
+
+    Before this, `timeoutSec` covered `execute` only: a render (tenant-controlled CPU work) had just
+    `RENDER_TIMEOUT_SEC`, and the wait for a free pool worker had no bound at all.
+    """
+    async def slow_render(fields, outputs, secret_nonce):
+        await asyncio.sleep(30)
+        return {}
+
+    deps, _, _ = _deps(ScriptedLLM(["답"]))
+    deps.render = slow_render
+    plan = _plan(TemplateNode(), {"template": "{{ start.topic }}"},
+                 policy=Policy(timeoutSec=1, retry=RetrySpec(maxAttempts=1)))
+
+    with pytest.raises(NodeFailedError) as exc:
+        await _run(plan, deps)
+
+    assert exc.value.error.code == ErrorCode.NODE_TIMEOUT
+
+
+async def test_the_render_and_the_call_share_one_budget():
+    """Two `asyncio.timeout(timeout)` blocks would give a node twice its policy; one deadline does not.
+
+    Measured from inside the call rather than by total elapsed time: the node's budget is 1s and the
+    render eats 0.8s of it, so a shared deadline leaves `execute` about 0.2s before it is cancelled,
+    while a per-stage budget would hand it a fresh 1s. Those two are 5x apart, which is a margin a loaded
+    machine cannot blur — unlike comparing two wall-clock totals that differ by a few hundred ms.
+    """
+    async def most_of_the_budget(fields, outputs, secret_nonce):
+        await asyncio.sleep(0.8)
+        return {"prompt": "x"}
+
+    class _MeasuringLLM:
+        """Records how much of the budget was left for it by the time it ran."""
+
+        def __init__(self) -> None:
+            self.slice_sec: float | None = None
+
+        async def chat(self, **kwargs):
+            started = asyncio.get_running_loop().time()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                self.slice_sec = asyncio.get_running_loop().time() - started
+                raise
+            raise AssertionError("the deadline should have fired first")
+
+    llm = _MeasuringLLM()
+    deps, _, _ = _deps(llm)
+    deps.render = most_of_the_budget
+    plan = _plan(LLMNode(), LLM_CONFIG, policy=Policy(timeoutSec=1, retry=RetrySpec(maxAttempts=1)))
+
+    with pytest.raises(NodeFailedError) as exc:
+        await _run(plan, deps)
+
+    assert exc.value.error.code == ErrorCode.NODE_TIMEOUT
+    assert llm.slice_sec is not None, "the call never ran, so this proves nothing about its budget"
+    assert llm.slice_sec < 0.5, (
+        f"execute got {llm.slice_sec:.2f}s after the render had already spent 0.8s of a 1s budget: "
+        "the render and the call are not sharing one deadline"
+    )

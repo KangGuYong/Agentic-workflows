@@ -6,6 +6,8 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
+from engine.config import load_config
+from engine.db.crypto import seal_payload
 from engine.db.workflows import WORKSPACE
 
 
@@ -26,6 +28,10 @@ async def make_run(pool, *, dsl: dict[str, Any] | None = None, status: str = "ru
         await conn.execute(
             "INSERT INTO runs (id, workspace_id, workflow_id, workflow_version_id, status, inputs,"
             " store_run_data) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (run_id, WORKSPACE, workflow_id, version_id, status, Jsonb(inputs or {}), store_run_data),
+            # Sealed with the configured key, exactly as insert_queued writes it (2b design §9): a row
+            # written any other way is ciphertext the worker cannot open, and every test hanging off it
+            # would start its run from an empty input.
+            (run_id, WORKSPACE, workflow_id, version_id, status,
+             seal_payload(load_config().secret_key, "inputs", inputs or {}), store_run_data),
         )
     return run_id

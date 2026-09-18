@@ -10,6 +10,7 @@ from typing import Any, Literal
 from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
+from engine.db.crypto import open_payload, seal_payload
 from engine.events.redact import redact
 
 QUEUE_CHANNEL = "runs_queued"
@@ -48,6 +49,7 @@ async def heartbeat(conn: AsyncConnection, *, run_id: str, owner: str, lease_sec
 
 async def finish(conn: AsyncConnection, *, run_id: str, owner: str,
                  status: Literal["succeeded", "failed", "cancelled"],
+                 key: bytes | None,
                  outputs: dict[str, Any] | None = None, error: dict[str, Any] | None = None,
                  clear_inputs: bool = False) -> bool:
     """Terminal transition. False means this worker no longer owns the run and wrote nothing.
@@ -66,7 +68,7 @@ async def finish(conn: AsyncConnection, *, run_id: str, owner: str,
         "   finished_at=now(), updated_at=now()"
         " WHERE id=%(id)s AND lease_owner=%(owner)s AND status='running' RETURNING id",
         {"id": run_id, "owner": owner, "status": status, "clear": clear_inputs,
-         "outputs": Jsonb(redact(outputs)) if outputs is not None else None,
+         "outputs": seal_payload(key, "outputs", redact(outputs)) if outputs is not None else None,
          "error": Jsonb(error) if error is not None else None},
     )).fetchone()
     return row is not None
@@ -127,7 +129,7 @@ MAX_IDEMPOTENCY_KEY_BYTES = 200  # half of runs_idempotency_idx's btree key; see
 
 async def insert_queued(conn: AsyncConnection, *, workflow_id: str, version_id: str, workspace_id: str,
                         inputs: dict[str, Any], idempotency_key: str | None,
-                        store_run_data: bool) -> dict[str, Any]:
+                        store_run_data: bool, key: bytes | None) -> dict[str, Any]:
     """`inputs` is stored **unredacted**, unlike every other observation column (design 10.1 lists it
     among the redacted-at-rest columns; A1 of the whole-branch review records the conflict this runs
     into). The worker feeds this exact column to `execute_run` as the run's initial state
@@ -135,13 +137,19 @@ async def insert_queued(conn: AsyncConnection, *, workflow_id: str, version_id: 
     `"[REDACTED]"` instead of whatever a field that happens to look like a secret key actually held,
     silently corrupting the run. Redaction is applied on the read path instead
     (`routers.runs._run_view`), which is the transmission path design 10.3 actually governs, and which
-    `outputs` (see `finish`) goes through the same way in addition to being redacted at write."""
-    return await (await conn.execute(
+    `outputs` (see `finish`) goes through the same way in addition to being redacted at write.
+
+    It is encrypted at rest instead (2b design §9), which is the protection this column *can* have: a
+    database dump no longer carries every run's input. The returned row carries the plaintext back,
+    because the caller just supplied it and has no use for the ciphertext."""
+    row = await (await conn.execute(
         "INSERT INTO runs (id, workspace_id, workflow_id, workflow_version_id, status, inputs,"
         " idempotency_key, store_run_data) VALUES (gen_random_uuid(), %s, %s, %s, 'queued', %s, %s, %s)"
         " RETURNING *",
-        (workspace_id, workflow_id, version_id, Jsonb(inputs), idempotency_key, store_run_data),
+        (workspace_id, workflow_id, version_id, seal_payload(key, "inputs", inputs), idempotency_key,
+         store_run_data),
     )).fetchone()
+    return {**row, "inputs": inputs}
 
 
 async def find_by_idempotency_key(conn: AsyncConnection, workflow_id: str, key: str) -> dict[str, Any] | None:
@@ -300,3 +308,18 @@ async def request_cancel(conn: AsyncConnection, run_id: str) -> bool:
         " WHERE id=%s AND status='running' RETURNING id", (run_id,),
     )).fetchone()
     return row is not None
+
+
+def decode_run(row: dict[str, Any] | None, key: bytes | None) -> dict[str, Any] | None:
+    """Return the row with its two encrypted columns decoded in place.
+
+    Every reader of `runs.inputs`/`runs.outputs` goes through this: the columns are `bytea`, so a caller
+    that forgets gets ciphertext where it expected a dict -- the worker would start a run from nonsense
+    and the API would try to serialise bytes.
+    """
+    if row is None:
+        return None
+    decoded = dict(row)
+    decoded["inputs"] = open_payload(key, "inputs", row.get("inputs"))
+    decoded["outputs"] = open_payload(key, "outputs", row.get("outputs"))
+    return decoded

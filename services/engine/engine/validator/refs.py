@@ -140,7 +140,15 @@ def _check_ref(
     label = clip(".".join((ref.root, *ref.path)), MAX_LABEL_CHARS)
     root = clip(ref.root, MAX_LABEL_CHARS)
     if ref.root == "secret":
-        return [error("SECRET_NOT_ALLOWED", "시크릿은 HTTP 요청 노드에서만 참조할 수 있습니다", **where)]
+        node_type = graph.nodes[where["nodeId"]].spec.type
+        field_ok = (template_field.path in ("url", "body")
+                    or template_field.path.startswith("headers."))
+        # Exactly one label below `secret`: a bare `{{ secret }}` would render the marker mapping itself,
+        # and `{{ secret.A.B }}` would resolve an attribute of the marker string rather than a secret.
+        if node_type == "http_request" and field_ok and len(ref.path) == 1:
+            return []
+        return [error("SECRET_NOT_ALLOWED",
+                      "시크릿은 HTTP 요청 노드의 url·headers·body에서만 참조할 수 있습니다", **where)]
     if ref.root not in graph.nodes or ref.root == "end":
         return [error("REF_UNKNOWN_NODE", f"존재하지 않거나 참조할 수 없는 노드입니다: {root}", **where)]
     issues: list[Issue] = []

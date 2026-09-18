@@ -25,6 +25,7 @@ dev = [
     "pytest-asyncio>=1.4,<2",
     "ruff>=0.8,<1",
     "testcontainers[postgres,redis]>=4.9,<5",
+    "trustme>=1.1,<2",
 ]
 
 [build-system]

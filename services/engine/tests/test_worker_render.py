@@ -22,6 +22,13 @@ from engine.templates.render import TemplateRenderError
 from engine.worker.render import RenderPool
 
 
+async def until_sync(check, *, timeout: float = 30.0, interval: float = 0.01) -> None:
+    """Wait for a synchronous predicate, bounded. Plan convention 5: no test may wait forever."""
+    async with asyncio.timeout(timeout):
+        while not check():
+            await asyncio.sleep(interval)
+
+
 def _get_pid() -> int:
     """A tiny job scheduled directly through pebble (bypassing `_job`/`render_fields`, which has no way to
     report one): identifies which worker process actually ran it."""
@@ -121,50 +128,43 @@ def test_template_field_outputs_and_render_error_survive_pickling():
 
 async def test_two_renders_overlap_in_a_pool_of_two():
     """A pool that is really one worker underneath would still pass every test above (they each schedule
-    one render at a time): this proves size=2 actually runs two renders at once, two ways.
+    one render at a time): this proves size=2 actually runs two renders at once, and in two processes.
 
-    Both pools are warmed with one solo render before either clock starts: pebble spawns workers lazily on
-    first use, and that spawn (~1.3s) dwarfs the render itself (~0.64s) - unwarmed, a timing comparison
-    would be measuring spawn cost on both sides, not whether the renders actually overlapped, which is how
-    the original version of this test stayed green even forced down to one worker regardless of `size`.
-
-    Once both pools are warm, the two-worker pool should finish two renders scheduled together in close to
-    the time one alone takes (not ~2x); and, directly rather than by inference, both of two concurrently
-    scheduled jobs reporting `os.getpid()` come back with two different pids, neither the parent's - the
-    first test here that proves rendering actually happens in another process.
+    Neither half is timed any more. The original version compared two wall clocks -- two renders on a
+    two-worker pool against one render on a one-worker pool, asserting the pair finished in under 1.6x --
+    which failed about one run in five under full-suite load, because on a loaded machine that ratio is a
+    property of the machine, not of the pool. Both facts are now read directly instead: `in_flight` counts
+    renders that are scheduled and unfinished, and `multiprocessing.active_children()` names the worker
+    processes the OS actually has.
     """
-    solo_pool = RenderPool(size=1, timeout=30)
-    data = {"start": {"rows": list(range(1_200))}}
-    try:
-        await solo_pool(SLOW, data)  # warm: pay the worker spawn before the clock starts
-        started = time.monotonic()
-        await solo_pool(SLOW, data)
-        solo_elapsed = time.monotonic() - started
-    finally:
-        solo_pool.close()
-
     pool = RenderPool(size=2, timeout=30)
+    data = {"start": {"rows": list(range(1_200))}}
     try:
         await asyncio.gather(pool(SLOW, data), pool(SLOW, data))  # warm both workers
 
-        started = time.monotonic()
-        await asyncio.gather(pool(SLOW, data), pool(SLOW, data))
-        concurrent_elapsed = time.monotonic() - started
+        # Both in flight at the same moment, observed rather than inferred from elapsed time. The old
+        # version of this assertion compared two wall clocks (`concurrent < solo * 1.6`) and failed about
+        # one run in five under full-suite load — it was measuring the machine, not the pool. `in_flight`
+        # counts scheduled-and-unfinished renders, so seeing 2 *is* the overlap.
+        both = [asyncio.create_task(pool(SLOW, data)) for _ in range(2)]
+        await until_sync(lambda: pool.in_flight == 2)
+        await asyncio.wait_for(asyncio.gather(*both), 60)
 
-        # Both workers are already up now, so this is no longer racing anyone's spawn time.
-        pid1, pid2 = await asyncio.gather(
-            asyncio.wrap_future(pool._pool.schedule(_get_pid, timeout=10)),
-            asyncio.wrap_future(pool._pool.schedule(_get_pid, timeout=10)),
-        )
+        # Two worker *processes*, read from the OS rather than inferred. The previous version scheduled
+        # two `os.getpid()` jobs and asserted the pids differed, which is a race: both jobs are
+        # instantaneous, so pebble can serve the second from the same worker that just finished the first
+        # (observed: one run in twelve came back with one pid twice).
+        workers = [child for child in multiprocessing.active_children()
+                   if child.name == "pebble_pool_worker"]
+        pids = {child.pid for child in workers}
+
+        solo_pid = await asyncio.wrap_future(pool._pool.schedule(_get_pid, timeout=10))
     finally:
         pool.close()
 
-    # Two renders serialised through one worker would take roughly 2x the solo time; run concurrently on
-    # two workers they should take closer to 1x. Generous margin to avoid flakiness on a loaded machine.
-    assert concurrent_elapsed < solo_elapsed * 1.6
-    assert pid1 != pid2
-    assert pid1 != os.getpid()
-    assert pid2 != os.getpid()
+    assert len(pids) == 2, f"size=2 produced {len(pids)} worker process(es)"
+    assert solo_pid in pids and solo_pid != os.getpid()  # rendering really happens in one of them
+
 
 
 async def test_close_stops_the_worker_process():
@@ -240,3 +240,31 @@ async def test_close_does_not_hang_while_a_job_is_running():
     task.cancel()
     with pytest.raises((asyncio.CancelledError, Exception)):
         await task
+
+
+async def test_a_caller_waits_for_a_slot_instead_of_piling_up_behind_the_pool(tmp_path):
+    """The queue in front of the pool is bounded by `size`: while both slots are held, a third caller is
+    still waiting *here*, inside its own node's deadline, rather than sitting in pebble's queue."""
+    pool = RenderPool(size=2, timeout=30, memory_limit_mb=None)
+    try:
+        # Through the public call, so both slots are genuinely taken: `_render` would bypass the very
+        # semaphore this test is about.
+        held = [asyncio.create_task(pool(SLOW, {"start": {"rows": list(range(3_000))}}))
+                for _ in range(2)]
+        await asyncio.sleep(0.2)
+        assert pool.in_flight == 2
+
+        third = asyncio.create_task(pool(FIELDS, {"start": {"topic": "AI"}}))
+        await asyncio.sleep(0.2)
+        # `not third.done()` would prove nothing: a call queued inside pebble is also unfinished. The
+        # difference is whether it was *scheduled* at all — `in_flight` counts scheduled-and-unfinished
+        # renders, so a third one showing up here means the wait moved back into pebble, where no node
+        # deadline can see it.
+        assert pool.in_flight == 2, "the third caller was handed to pebble instead of waiting for a slot"
+        assert not third.done()
+
+        await asyncio.wait_for(asyncio.gather(*held), 60)
+        assert await asyncio.wait_for(third, 60) == {"prompt": "AI 요약"}
+        assert pool.in_flight == 0
+    finally:
+        await asyncio.to_thread(pool.close)

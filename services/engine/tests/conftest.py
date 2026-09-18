@@ -12,16 +12,17 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-APP_TABLES = ("run_events", "node_runs", "runs", "workflow_versions", "workflows")
+APP_TABLES = ("run_events", "node_runs", "runs", "workflow_versions", "workflows", "secrets")
 CHECKPOINT_TABLES = ("checkpoint_blobs", "checkpoint_writes", "checkpoints")  # not checkpoint_migrations
 
 
-def pytest_asyncio_loop_factories(config, item):
-    """psycopg's async connections refuse Windows' default ProactorEventLoop, so development on Windows
-    runs tests on the selector loop. Deployment is Linux, where None leaves the default alone."""
-    if sys.platform == "win32":
+if sys.platform == "win32":
+    # psycopg's async connections refuse Windows' default ProactorEventLoop, so development on Windows
+    # runs tests on the selector loop. The hook is only defined there: pytest-asyncio demands a non-empty
+    # mapping from every registered implementation, so a version that returns None to mean "no opinion"
+    # fails collection everywhere else. Not registering it at all is what leaves the default alone.
+    def pytest_asyncio_loop_factories(config, item):
         return {"selector": asyncio.SelectorEventLoop}
-    return None
 
 
 def pytest_collection_modifyitems(items):
@@ -33,17 +34,35 @@ def pytest_collection_modifyitems(items):
 
 @pytest.fixture(scope="session")
 def db_url() -> Iterator[str]:
+    # An already-running server, when one is named, so the suite can be run where Docker is not available
+    # (CI without a socket, a remote sandbox). The database it points at is truncated between tests like
+    # any other, so it must be a throwaway.
+    existing = os.getenv("ENGINE_TEST_DATABASE_URL")
+    if existing:
+        os.environ["ENGINE_DATABASE_URL"] = existing
+        os.environ.setdefault("LANGGRAPH_AES_KEY", "0" * 32)
+        os.environ.setdefault("ENGINE_SECRET_KEY", "1" * 32)
+        os.environ.setdefault("ENGINE_API_TOKEN", "dev-token-0123456789")
+        yield existing
+        return
     from testcontainers.postgres import PostgresContainer
 
     with PostgresContainer("postgres:17-alpine", driver=None) as container:
         url = container.get_connection_url()
         os.environ["ENGINE_DATABASE_URL"] = url
         os.environ.setdefault("LANGGRAPH_AES_KEY", "0" * 32)
+        os.environ.setdefault("ENGINE_SECRET_KEY", "1" * 32)
+        os.environ.setdefault("ENGINE_API_TOKEN", "dev-token-0123456789")
         yield url
 
 
 @pytest.fixture(scope="session")
 def redis_url() -> Iterator[str]:
+    existing = os.getenv("ENGINE_TEST_REDIS_URL")  # as above
+    if existing:
+        os.environ["ENGINE_REDIS_URL"] = existing
+        yield existing
+        return
     from testcontainers.redis import RedisContainer
 
     with RedisContainer("redis:7-alpine") as container:
@@ -61,6 +80,10 @@ async def pool(db_url: str) -> AsyncIterator[AsyncConnectionPool]:
                                    kwargs={"row_factory": dict_row, "autocommit": True}) as p:
         await p.open(wait=True)
         async with p.connection() as conn:
+            # TRUNCATE needs ACCESS EXCLUSIVE and waits for it forever by default, so a connection left
+            # behind by an earlier run (a killed pytest, a psql session) hangs the entire suite here with
+            # no output at all. Fail loudly instead -- plan convention 5: bound every wait.
+            await conn.execute("SET lock_timeout = '15s'")
             await conn.execute(f"TRUNCATE {', '.join(APP_TABLES)} CASCADE")
             await conn.execute(f"TRUNCATE {', '.join(CHECKPOINT_TABLES)} CASCADE")
         yield p
@@ -122,11 +145,15 @@ async def worker_factory(pool, redis, db_url):
 
     started: list = []
 
-    async def make(llm, *, owner: str = "worker-1", **overrides):
+    async def make(llm, *, owner: str = "worker-1", http=None, secrets=None, **overrides):
         import dataclasses
 
-        config = dataclasses.replace(load_config(), claim_poll_sec=0.2, heartbeat_sec=0.2, **overrides)
-        worker = Worker(config, pool, redis, owner=owner, llm=llm)
+        # Defaults a test can override: spelling one of these in `overrides` used to be a TypeError
+        # ("multiple values for keyword argument"), which is exactly what a test tuning the heartbeat
+        # wants to do.
+        fast = {"claim_poll_sec": 0.2, "heartbeat_sec": 0.2}
+        config = dataclasses.replace(load_config(), **{**fast, **overrides})
+        worker = Worker(config, pool, redis, owner=owner, llm=llm, http=http, secrets=secrets)
         await worker.start()
         started.append(worker)
         return worker
@@ -134,3 +161,50 @@ async def worker_factory(pool, redis, db_url):
     yield make
     for worker in started:
         await worker.stop()
+
+
+@pytest.fixture
+def http_server():
+    """A real HTTP server on 127.0.0.1, so the guarded client makes a real connection.
+
+    It echoes the Authorization header back in the body — which is what makes "a secret the server returns
+    never reaches storage" testable — and records every one it was sent, which is what makes the other
+    half testable: that the real credential, not the marker standing in for it, actually went on the wire.
+    """
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    received: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's own naming
+            authorization = self.headers.get("Authorization", "")
+            received.append(authorization)
+            body = json.dumps({"title": "이슈 제목", "seen": authorization})
+            payload = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Set-Cookie", "session=should-not-be-stored")
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):  # keep pytest output clean
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    class Server(str):
+        """The base URL, so existing uses read unchanged, with what it saw hanging off it."""
+
+        authorizations = received
+
+    try:
+        yield Server(f"http://127.0.0.1:{server.server_port}")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

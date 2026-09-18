@@ -245,6 +245,7 @@ async def create_run(workflow_id: str, request: Request) -> dict[str, Any]:
                 conn, workflow_id=workflow_id, version_id=str(version["id"]),
                 workspace_id=str(workflow["workspace_id"]), inputs=inputs, idempotency_key=key,
                 store_run_data=analysis.dsl.settings.storeRunData,
+                key=request.app.state.config.secret_key,
             )
             event = await append_event(conn.cursor(), str(run["id"]), "run_queued",
                                        payload={"versionNo": version["version_no"]})
@@ -288,7 +289,7 @@ async def get_run(run_id: str, request: Request) -> dict[str, Any]:
         if row["status"] == "waiting" and row["waiting_node_id"]:
             waiting = await run_db.waiting_payload(conn, run_id, row["waiting_node_id"],
                                                    row["waiting_exec_index"])
-    return _run_view(row, waiting)
+    return _run_view(run_db.decode_run(row, request.app.state.config.secret_key), waiting)
 
 
 @router.get("/runs/{run_id}/nodes")
@@ -368,11 +369,11 @@ async def resume_run(run_id: str, request: Request) -> dict[str, Any]:
 
 @router.post("/runs/{run_id}/retry", status_code=202)
 async def retry_run(run_id: str, request: Request) -> dict[str, Any]:
-    """Requeue a failed run from its last checkpoint (design 5.9). The run resumes over SSE only on
-    reconnect: Task 14's stream ends the moment it reads the terminal `run_failed` event, so a client that
-    is still attached when this appends `run_queued` right after it will not see that event on the same
-    connection -- it has to open a new one, the same as any other post-terminal stream read. That is the
-    intended contract (see the Task 14 post-review note); nothing about the stream changes here."""
+    """Requeue a failed run from its last checkpoint (design 5.9). A client that is still attached sees the
+    run continue on the same connection: the stream re-reads `runs.status` when it meets a terminal event
+    and only ends if the run is really over (2b design §8.3), so the `run_queued` appended here keeps it
+    open. (Until Plan 2b's Task 13 the stream ended at the terminal event and the client had to
+    reconnect.)"""
     run_id = _run_id(run_id)  # same guard as every other route: a non-UUID id must 404, not 500 (A1)
     async with request.app.state.pool.connection() as conn, conn.transaction():
         run = await run_db.lock_run(conn, run_id)

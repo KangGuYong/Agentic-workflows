@@ -2,6 +2,7 @@ import asyncio
 
 from psycopg.types.json import Jsonb
 
+from engine.config import load_config
 from engine.db import runs as run_db
 from engine.llm.scripted import ScriptedLLM
 from engine.worker.reaper import Reaper
@@ -29,7 +30,10 @@ async def _claimed(pool, *, recovery_count: int = 0, cancel: bool = False, store
 
 async def _row(pool, run_id):
     async with pool.connection() as conn:
-        return await run_db.get_run(conn, run_id)
+        row = await run_db.get_run(conn, run_id)
+    # inputs/outputs are bytea (2b design §9): decode like every production reader, so the assertions
+    # below stay about values. `inputs is None` still means the reaper cleared the column.
+    return run_db.decode_run(row, load_config().secret_key)
 
 
 async def _events(pool, run_id):
