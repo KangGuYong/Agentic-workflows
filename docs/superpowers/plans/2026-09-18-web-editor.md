@@ -363,23 +363,23 @@ Write that last point as a test before implementing it; getting the direction ba
 
 ## Task 7: Palette and canvas
 
-- [ ] Server component fetches `/node-types` through the proxy and passes it down.
-- [ ] 시각 디자인 절과 `.claude/skills/frontend-design/SKILL.md`를 먼저 읽는다. 팔레트·노드 렌더는 Task 1에서 정한 토큰만 쓴다.
-- [ ] Palette groups by `category` in a fixed order: `IO`, `AI`, `Logic`, `Action`, `Human`. An unknown category goes last under "기타" rather than disappearing.
-- [ ] Drag from the palette onto the canvas → `addNode` at the drop position.
-- [ ] React Flow renders nodes from the document: label, type icon, id in small grey text, handles from the node's `handles` (from the validation slice; falls back to `["out"]` before the first analysis).
-- [ ] Connecting two handles calls `connect`; React Flow's own `onConnect` never mutates its internal state directly.
-- [ ] Delete key removes the selection through `removeNode`/`removeEdge`.
-- [ ] Node drag end calls `setPosition` with a merge key of `position:<nodeId>`.
+- [x] Server component fetches `/node-types` through the proxy and passes it down.
+- [x] 시각 디자인 절과 `.claude/skills/frontend-design/SKILL.md`를 먼저 읽는다. 팔레트·노드 렌더는 Task 1에서 정한 토큰만 쓴다.
+- [x] Palette groups by `category` in a fixed order: `IO`, `AI`, `Logic`, `Action`, `Human`. An unknown category goes last under "기타" rather than disappearing.
+- [x] Drag from the palette onto the canvas → `addNode` at the drop position.
+- [x] React Flow renders nodes from the document: label, type icon, id in small grey text, handles from the node's `handles` (from the validation slice; falls back to `["out"]` before the first analysis).
+- [x] Connecting two handles calls `connect`; React Flow's own `onConnect` never mutates its internal state directly.
+- [x] Delete key removes the selection through `removeNode`/`removeEdge`.
+- [x] Node drag end calls `setPosition` with a merge key of `position:<nodeId>`.
 
 **Component tests**
-- [ ] The palette renders five groups in order with nine node types total.
-- [ ] Dropping a `llm` on an empty canvas produces a document with `llm_1`.
-- [ ] Deleting a node with two edges leaves zero edges.
+- [x] The palette renders five groups in order with nine node types total.
+- [x] Dropping a `llm` on an empty canvas produces a document with `llm_1`.
+- [x] Deleting a node with two edges leaves zero edges.
 
 **Verification**
-- [ ] `pnpm test`, `pnpm typecheck` pass.
-- [ ] Commit: `feat(web): canvas with a node palette and edge editing`
+- [x] `pnpm test`, `pnpm typecheck` pass.
+- [x] Commit: `feat(web): canvas with a node palette and edge editing`
 
 ---
 
@@ -1113,3 +1113,63 @@ the drag, not to an intermediate frame`)만 깨진다. 다른 114개는 전부 �
 | 키가 달라도 병합 | 6 |
 
 **검증**: `pnpm test` 115 passed (9 files), `typecheck`·`lint` clean.
+
+### Task 7 — palette and canvas
+
+`lib/palette.ts`(그룹핑), `lib/dsl/flow.ts`(문서 → React Flow 매핑), `store/graph.ts`(Zustand),
+`components/canvas/{Palette,WorkflowNode,Canvas}.tsx`, 그리고 서버 컴포넌트용 `lib/engine/client.ts`.
+
+**테스트 가능한 것을 컴포넌트 밖으로 뺐다.** 계획은 컴포넌트 테스트로 "드롭하면 `llm_1`이 생긴다",
+"엣지 두 개짜리 노드를 지우면 엣지가 0이 된다"를 확인하라고 했다. 그 동작은 사실 **스토어**의 것이고,
+jsdom에서 React Flow를 드라이브하는 것보다 스토어를 직접 부르는 쪽이 훨씬 촘촘히 검사된다. 그래서
+`store/graph.test.ts`가 그 계약을 지고, 컴포넌트 테스트는 팔레트 렌더링만 맡는다. 캔버스 자체는
+**실제 브라우저에서 드래그 앤 드롭**으로 확인했다(아래).
+
+**매핑의 비대칭 하나가 핵심이다.** DSL은 `sourceHandle: "out"`을 **생략**한다 — 의미가 같은 두 문서가
+같은 `dsl_hash`를 갖게 하려고. React Flow에는 그런 규칙이 없어서, `sourceHandle`이 undefined인 엣지는
+id가 `"out"`인 Handle에 붙지 않고 **노드 중앙에서 선이 나간다.** 렌더링 버그처럼 보이지 불일치로는 안
+보인다. `toFlowEdges`가 기본값을 명시적으로 채우고, 그 이유를 테스트가 문장으로 들고 있다.
+
+**계획에 없던 스토어 결정 넷.**
+
+- **`addNodeAt`은 예외를 던지지 않고 `lastError`에 담는다.** 드롭 핸들러는 드래그 이벤트로 예외를 흘려보낼
+  수 없는데, 사용자는 왜 아무것도 안 나타났는지 알아야 한다(두 번째 `start`가 그 경우).
+- **`removeSelected`는 선택 전체를 한 커맨드로 처리한다.** 노드마다 따로 지우면 undo가 "몇 번 눌러야
+  하나" 게임이 된다.
+- **드래그 병합 키는 움직이는 노드 *집합*이다** (`position:a,b`). 다중 선택 드래그가 한 단계이고, 다른
+  노드를 집으면 새 단계가 시작된다.
+- **`deleteKeyCode={null}`.** React Flow 자체 삭제는 문서 뒤에서 내부 상태를 바꾼다. Delete 키를 직접
+  받아 `removeSelected`로 보낸다.
+
+**내 테스트의 전제가 틀린 것 하나.** "아무것도 선택되지 않았을 때 아무 일도 안 한다" 테스트가 3개 노드를
+기대했는데 2개가 나왔다. 원인은 코드가 아니라 전제였다 — **`addNodeAt`이 방금 놓은 노드를 선택**하므로
+"선택 없음" 상태가 아니었다. 그건 캔버스로서 올바른 동작이고(놓자마자 설정 패널이 그 노드에 열린다),
+그래서 테스트가 선택을 명시적으로 비우도록 고치고 그 동작 자체를 별도 테스트로 못 박았다.
+
+**테스트 설정 결함 하나.** 팔레트 컴포넌트 테스트가 헤딩 10개를 봤다(5개여야 함). Testing Library의
+자동 cleanup은 프레임워크 전역이 주입될 때만 등록되는데 이 프로젝트는 `globals: true`가 아니다.
+`vitest.setup.ts`에 `afterEach(cleanup)`을 넣었다. **이게 없으면 모든 렌더가 이전 것 위에 쌓이고
+`getAllBy*`가 지난 테스트의 DOM까지 조용히 돌려준다** — 지금 잡지 않았으면 이후 모든 컴포넌트 테스트가
+거짓 양성/음성을 냈을 것이다.
+
+**실제 브라우저 확인, 그리고 거기서 나온 것.** Playwright로 떠 있는 엔진에 붙여 팔레트에서 노드 4개를
+끌어다 놓았다. 드래그 앤 드롭 동작, 한글 라벨, 계기판 토큰 모두 정상. 그런데 스크린샷이 결함을 하나
+드러냈다: **`HTTP 요청`이 `동작`이 아니라 `기타` 그룹에 있었다.**
+
+코드 버그가 아니라 **이미지 드리프트**였다. 배포 스택이 07:00에 빌드된 `engine:local`을 돌고 있어서
+Task 4의 `"action"` → `"Action"` 수정이 컨테이너에 없었다. 소스는 `"Action"`, 컨테이너는 `"action"`.
+부수적으로 `기타` 폴백이 의도대로 동작한다는 것도 확인됐다 — 모르는 category의 노드가 사라지지 않고
+배치 가능한 상태로 남았다.
+
+이미지를 다시 빌드하려니 **샌드박스 프록시 CA 때문에 pypi.org에서 `invalid peer certificate:
+UnknownIssuer`** 가 났다. Plan 2b Task 16이 겪은 것과 같은 문제다. 임시 `Dockerfile.sandbox`로 CA를
+build 스테이지에 주입해 빌드하고, 파일은 삭제했다(**커밋하지 않는다** — 샌드박스 전용 우회다).
+재기동 후 `/node-types`가 `Action`을 돌려주고, 다시 찍은 스크린샷에서 `HTTP 요청`이 `동작` 아래에 있다.
+팔레트 순서도 `CATEGORY_ORDER` 그대로: 입출력 / 모델 / 흐름 / 동작 / 사람.
+
+**계획서의 "no cards, no boxes"에 대하여.** `WorkflowNode`는 경계가 있는 판이다. 「시각 디자인」 절이
+적어둔 대로 그 규칙은 스크롤 마케팅 페이지용이고, 경계 없는 노드는 검증 배지도 실행 상태도 이고 갈 수
+없으며 격자 캔버스 위에서는 떠 있는 텍스트로 읽힌다.
+
+**검증**: `pnpm test` 152 passed (12 files), `typecheck`·`lint` clean, `build` 성공, 실제 브라우저에서
+드래그 앤 드롭 확인.

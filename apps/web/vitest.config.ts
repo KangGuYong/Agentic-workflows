@@ -15,7 +15,7 @@ export default defineConfig({
   test: {
     projects: [
       {
-        test: { name: "lib", environment: "node", include: ["lib/**/*.test.ts"] },
+        test: { name: "lib", environment: "node", include: ["lib/**/*.test.ts", "store/**/*.test.ts"] },
       },
       {
         // Route handlers are Web-API code, not React: node, no DOM, no setup file.
