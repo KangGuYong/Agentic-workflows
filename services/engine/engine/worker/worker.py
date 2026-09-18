@@ -24,6 +24,7 @@ from engine.nodes.registry import NodeRegistry, default_registry
 from engine.runtime.deps import RunDeps
 from engine.runtime.guard import FlagGuard
 from engine.runtime.runner import ResumeRejected, RunOutcome, execute_run
+from engine.secrets.markers import nonce_for
 from engine.worker.reaper import Reaper
 
 log = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ class Worker:
 
     def __init__(self, config: EngineConfig, pool: AsyncConnectionPool, redis: Any, *, llm: LLMClient,
                  owner: str | None = None, registry: NodeRegistry | None = None,
-                 render: Any = None) -> None:
+                 render: Any = None, http: Any = None, secrets: Any = None) -> None:
         self._config = config
         self._pool = pool
         self._redis = redis
@@ -45,6 +46,8 @@ class Worker:
         # One registry and one checkpointer per process: CompiledWorkflow is cached by dsl_hash alone.
         self._registry = registry or default_registry()
         self._render = render
+        self._http = http
+        self._secrets = secrets
         self._publisher = RedisPublisher(redis)
         self._reaper = Reaper(config, pool, redis)  # every worker has one; an advisory lock picks the sweeper
         self._checkpointer = make_checkpointer(pool, config)  # encrypted unless dev-insecure (design 5.3)
@@ -74,6 +77,14 @@ class Worker:
         await asyncio.gather(*tasks, return_exceptions=True)
         if self._listen is not None:
             await self._listen.close()
+
+    def _nonce(self, run_id: str) -> str | None:
+        """The per-run secret marker nonce, or None when no key is configured (ENGINE_DEV_INSECURE).
+
+        Derived rather than random so a replay after a restart renders exactly what the first run did.
+        """
+        key = self._config.secret_key
+        return None if key is None else nonce_for(run_id, key)
 
     def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
@@ -247,7 +258,9 @@ class Worker:
 
                 recorder = PostgresRecorder(self._pool, run_id, publisher=self._publisher,
                                             store_run_data=row["store_run_data"])
-                deps = RunDeps(run_id=run_id, llm=self._llm, recorder=recorder, guard=guard, render=self._render)
+                deps = RunDeps(run_id=run_id, llm=self._llm, recorder=recorder, guard=guard,
+                               render=self._render, secret_nonce=self._nonce(run_id),
+                               http=self._http, secrets=self._secrets)
                 outcome = await execute_run(compiled, deps=deps, inputs=row["inputs"] or {},
                                             resume=row["resume_payload"])
             finally:

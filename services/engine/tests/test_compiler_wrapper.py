@@ -336,22 +336,28 @@ async def test_classifier_on_error_default_routes_through_its_default_handle():
 
 async def test_rendering_goes_through_the_deps_hook_when_one_is_set():
     seen: list[dict] = []
+    nonces: list[str | None] = []
 
-    async def render(fields, outputs):
+    async def render(fields, outputs, secret_nonce):
         seen.append({field.path: field.source for field in fields})
+        nonces.append(secret_nonce)
         return {field.path: "치환됨" for field in fields}
 
     deps, _, _ = _deps(ScriptedLLM(["답"]))
     deps.render = render
+    deps.secret_nonce = "0123456789abcdef"
 
     result = await _run(_plan(LLMNode(), LLM_CONFIG, policy=LLMNode.default_policy), deps)
 
     assert seen and outputs_of(result)["n"] == {"text": "답"}
+    # The off-loop path is where the nonce can silently go missing: without it the pool renders with no
+    # `secret` binding at all and every http_request template fails instead of producing a marker.
+    assert nonces == ["0123456789abcdef"]
     assert deps.llm.calls[0]["messages"][-1].content == "치환됨"
 
 
 async def test_a_render_deadline_fails_the_node_without_retrying():
-    async def render(fields, outputs):
+    async def render(fields, outputs, secret_nonce):
         raise TimeoutError("render deadline")
 
     deps, recorder, _ = _deps(ScriptedLLM(["답"]))
@@ -366,7 +372,7 @@ async def test_a_render_deadline_fails_the_node_without_retrying():
 
 
 async def test_a_render_hook_exception_becomes_a_non_retryable_node_error():
-    async def render(fields, outputs):
+    async def render(fields, outputs, secret_nonce):
         raise RuntimeError("pool is gone")
 
     deps, recorder, _ = _deps(ScriptedLLM(["답"]))
@@ -382,7 +388,7 @@ async def test_a_render_hook_exception_becomes_a_non_retryable_node_error():
 
 
 async def test_a_render_abort_escapes_the_run_instead_of_failing_the_node():
-    async def render(fields, outputs):
+    async def render(fields, outputs, secret_nonce):
         raise EngineFault("render pool is not active")
 
     deps, recorder, _ = _deps(ScriptedLLM(["답"]))
@@ -393,3 +399,29 @@ async def test_a_render_abort_escapes_the_run_instead_of_failing_the_node():
         await _run(plan, deps)
 
     assert recorder.records == []  # infrastructure failures belong to crash recovery, not to the run
+
+
+async def test_a_secret_renders_as_a_marker_not_a_value():
+    from engine.secrets.markers import marker_for
+
+    deps, recorder, _ = _deps(ScriptedLLM(["답"]))
+    deps.secret_nonce = "0123456789abcdef"
+    plan = _plan(LLMNode(), {"model": "m", "prompt": "key={{ secret.API_TOKEN }}"},
+                 policy=LLMNode.default_policy)
+
+    await _run(plan, deps)
+
+    assert marker_for("API_TOKEN", "0123456789abcdef") in str(recorder.records)
+
+
+async def test_without_a_nonce_a_secret_reference_fails_the_node():
+    """Defence in depth: every node except http_request renders with secret_nonce=None, and the
+    validator already refuses `secret` anywhere else."""
+    deps, _, _ = _deps(ScriptedLLM(["답"]))
+    plan = _plan(LLMNode(), {"model": "m", "prompt": "key={{ secret.API_TOKEN }}"},
+                 policy=LLMNode.default_policy)
+
+    with pytest.raises(NodeFailedError) as exc:
+        await _run(plan, deps)
+
+    assert exc.value.error.code == ErrorCode.TEMPLATE_ERROR

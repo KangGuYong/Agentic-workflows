@@ -21,6 +21,7 @@ from engine.errors import EngineFault, ErrorCode, NodeError, NodeFailedError, Ru
 from engine.jsondata import check_storable, clip
 from engine.nodes.base import NodeContext, NodeResult, NodeSpec, TemplateField
 from engine.runtime.deps import RunDeps
+from engine.secrets.markers import SecretMarkers
 from engine.templates.render import TemplateRenderError, render_template
 
 MAX_OUTPUT_BYTES = 1_000_000
@@ -47,17 +48,24 @@ def backoff_delay(retry: RetrySpec, failed_tries: int) -> float:
     return min(retry.initialDelaySec * 2 ** (failed_tries - 1), 60.0)
 
 
-def render_fields(fields: list[TemplateField], outputs: dict[str, Any]) -> dict[str, Any]:
-    """Pure rendering: runs inline or, through RunDeps.render, in the worker's render pool (engine/worker/render.py)."""
-    return {f.path: render_template(f.source, outputs, f.target) for f in fields}
+def render_fields(fields: list[TemplateField], outputs: dict[str, Any],
+                  secret_nonce: str | None = None) -> dict[str, Any]:
+    """Pure rendering: runs inline or, through RunDeps.render, in the worker's render pool (engine/worker/render.py).
+
+    With a nonce the context gains `secret`, which answers with markers rather than values (2b design
+    §4.3). Without one there is no `secret` binding at all, so `{{ secret.X }}` fails — every node except
+    http_request renders that way.
+    """
+    context = outputs if secret_nonce is None else {**outputs, "secret": SecretMarkers(secret_nonce)}
+    return {f.path: render_template(f.source, context, f.target) for f in fields}
 
 
 async def _rendered(deps: RunDeps, fields: list[TemplateField], outputs: dict[str, Any]) -> dict[str, Any]:
     if deps.render is None:
-        rendered = render_fields(fields, outputs)
+        rendered = render_fields(fields, outputs, deps.secret_nonce)
     else:
         try:
-            rendered = await deps.render(fields, outputs)
+            rendered = await deps.render(fields, outputs, deps.secret_nonce)
         except TimeoutError as exc:
             raise NodeError(
                 ErrorCode.TEMPLATE_ERROR, "템플릿 렌더링이 제한 시간을 초과했습니다", retryable=False
@@ -130,6 +138,7 @@ def _context(
     exec_index: int,
     attempt: int,
     resumed: bool,
+    timeout: float,
 ) -> NodeContext:
     node_id = plan.node.id
     lost_tokens = 0
@@ -162,6 +171,11 @@ def _context(
         llm=deps.llm,
         on_token=on_token,
         interrupt=wait_for_human,
+        http=deps.http,
+        secrets=deps.secrets,
+        secret_nonce=deps.secret_nonce,
+        # The node's own share of the attempt deadline: http_request needs it to bound one request.
+        timeout_sec=timeout,
     )
 
 
@@ -227,7 +241,7 @@ def make_node_fn(plan: NodePlan):
                 started = True
             if error is None:
                 try:
-                    ctx = _context(plan, deps, state, outputs, exec_index, attempt, resumed)
+                    ctx = _context(plan, deps, state, outputs, exec_index, attempt, resumed, timeout)
                     async with asyncio.timeout(timeout):
                         result = await plan.spec.execute(ctx, plan.config, rendered)
                     _check_output(result.output)

@@ -59,8 +59,9 @@ def _init(memory_limit_mb: int | None) -> None:
         log.info("render pool worker: memory limit set to %s MB", memory_limit_mb)
 
 
-def _job(fields: list[TemplateField], outputs: dict[str, Any]) -> dict[str, Any]:
-    return render_fields(fields, outputs)
+def _job(fields: list[TemplateField], outputs: dict[str, Any],
+         secret_nonce: str | None = None) -> dict[str, Any]:
+    return render_fields(fields, outputs, secret_nonce)
 
 
 def _fork_safe_context() -> ModuleType | None:
@@ -97,9 +98,10 @@ class RenderPool:
         self._closed = False
         self._futures: set[ProcessFuture] = set()
 
-    async def __call__(self, fields: list[TemplateField], outputs: dict[str, Any]) -> dict[str, Any]:
+    async def __call__(self, fields: list[TemplateField], outputs: dict[str, Any],
+                       secret_nonce: str | None = None) -> dict[str, Any]:
         try:
-            future = self._pool.schedule(_job, args=(fields, outputs), timeout=self._timeout)
+            future = self._pool.schedule(_job, args=(fields, outputs, secret_nonce), timeout=self._timeout)
         except RuntimeError as exc:
             # The pool is CLOSED/STOPPED/ERROR (e.g. its manager threads died, or it raced close()):
             # this is our infrastructure failing, never the tenant's template, so it must not become a

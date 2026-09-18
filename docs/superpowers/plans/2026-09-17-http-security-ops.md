@@ -1728,7 +1728,7 @@ git commit -m "feat(engine): add the write-only secrets API" -m "Co-Authored-By:
 - Modify: `services/engine/engine/compiler/wrapper.py`, `services/engine/engine/runtime/deps.py`, `services/engine/engine/nodes/base.py`, `services/engine/engine/worker/render.py`, `services/engine/engine/worker/worker.py`
 - Test: `services/engine/tests/test_secrets_markers.py`, `services/engine/tests/test_compiler_wrapper.py` (append)
 
-- [ ]  **Step 1: Write the failing tests**
+- [x]  **Step 1: Write the failing tests**
 
 Create `services/engine/tests/test_secrets_markers.py`:
 
@@ -1832,12 +1832,12 @@ async def test_without_a_nonce_a_secret_reference_fails_the_node():
     assert exc.value.error.code == ErrorCode.TEMPLATE_ERROR
 ```
 
-- [ ]  **Step 2: Run them to see them fail**
+- [x]  **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/test_secrets_markers.py -q`
 Expected: FAIL — `ModuleNotFoundError: No module named 'engine.secrets.markers'`.
 
-- [ ]  **Step 3: Implement the markers**
+- [x]  **Step 3: Implement the markers**
 
 Create `services/engine/engine/secrets/markers.py`:
 
@@ -1927,7 +1927,7 @@ def _walk(value: Any, ordered: list[str]) -> Any:
     return value
 ```
 
-- [ ]  **Step 4: Thread the nonce through the render path**
+- [x]  **Step 4: Thread the nonce through the render path**
 
 In `services/engine/engine/compiler/wrapper.py`, add `from engine.secrets.markers import SecretMarkers` and replace the two functions:
 
@@ -1986,7 +1986,7 @@ def _job(fields: list[TemplateField], outputs: dict[str, Any],
 
 and in `RenderPool.__call__`, take `secret_nonce: str | None = None` as a third parameter and schedule with `args=(fields, outputs, secret_nonce)`.
 
-- [ ]  **Step 5: Add the ports and the context fields**
+- [x]  **Step 5: Add the ports and the context fields**
 
 In `services/engine/engine/nodes/base.py`, add `Protocol` to the `typing` import, import the response type
 the client already defines — `from engine.http.client import HttpResponse` — and, above `NodeContext`:
@@ -2030,7 +2030,7 @@ def _context(plan, deps, state, outputs, exec_index, attempt, resumed, timeout):
 
 and at the call site inside `node_fn`: `ctx = _context(plan, deps, state, outputs, exec_index, attempt, resumed, timeout)`.
 
-- [ ]  **Step 6: Give the worker the nonce and the two ports**
+- [x]  **Step 6: Give the worker the nonce and the two ports**
 
 In `services/engine/engine/worker/worker.py`, add `from engine.secrets.markers import nonce_for`, accept `http=None, secrets=None` in `__init__` and store them, add:
 
@@ -2047,12 +2047,12 @@ and extend the `RunDeps(...)` construction in `_run`:
                        secret_nonce=self._nonce(run_id), http=self._http, secrets=self._secrets)
 ```
 
-- [ ]  **Step 7: Run the tests**
+- [x]  **Step 7: Run the tests**
 
 Run: `uv run pytest tests/test_secrets_markers.py tests/test_compiler_wrapper.py tests/test_worker_render.py -q`
 Expected: PASS.
 
-- [ ]  **Step 8: Run everything and commit**
+- [x]  **Step 8: Run everything and commit**
 
 Run: `uv run pytest -q` → all pass; existing `render_fields`/`RenderPool` callers keep working because the new argument has a default.
 Run: `uv run ruff check .` → `All checks passed!`

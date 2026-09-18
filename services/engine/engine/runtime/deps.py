@@ -10,9 +10,9 @@ from engine.runtime.guard import NoopGuard, RunGuard
 from engine.runtime.recorder import Recorder
 
 if TYPE_CHECKING:  # avoids importing the node layer into the runtime ports
-    from engine.nodes.base import TemplateField
+    from engine.nodes.base import HttpClient, SecretResolver, TemplateField
 
-RenderFn = Callable[[list["TemplateField"], dict[str, Any]], Awaitable[dict[str, Any]]]
+RenderFn = Callable[[list["TemplateField"], dict[str, Any], str | None], Awaitable[dict[str, Any]]]
 
 
 @dataclass
@@ -33,3 +33,8 @@ class RunDeps:
     The implementation must raise TimeoutError when it gives up, and may raise the template errors the
     inline path raises; anything else becomes a non-retryable node error.
     """
+
+    secret_nonce: str | None = None
+    """Per-run marker nonce (engine.secrets.markers). None disables the `secret` binding entirely."""
+    http: "HttpClient | None" = None
+    secrets: "SecretResolver | None" = None
