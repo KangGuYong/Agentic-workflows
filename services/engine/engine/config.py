@@ -16,6 +16,7 @@ class EngineConfig:
     database_url: str
     redis_url: str
     api_token: str | None
+    secret_key: bytes | None
     encrypt_checkpoints: bool
     ollama_base_url: str
     ollama_num_parallel: int
@@ -64,6 +65,14 @@ def load_config() -> EngineConfig:
         # Checkpoints hold every node output. Adding encryption later cannot read existing checkpoints,
         # so refuse to start rather than write them in the clear.
         raise ConfigError("LANGGRAPH_AES_KEY is required (set ENGINE_DEV_INSECURE=1 only for development)")
+    secret_key_text = os.getenv("ENGINE_SECRET_KEY")
+    if not secret_key_text and not dev_insecure:
+        # Without it no secret can be sealed or opened, so an http_request node that needs one would fail
+        # per request instead of at startup where an operator would see it.
+        raise ConfigError("ENGINE_SECRET_KEY is required (set ENGINE_DEV_INSECURE=1 only for development)")
+    secret_key = secret_key_text.encode("utf-8") if secret_key_text else None
+    if secret_key is not None and len(secret_key) not in (16, 24, 32):
+        raise ConfigError("ENGINE_SECRET_KEY must be 16, 24 or 32 bytes")
     try:
         allowlist = parse_allowlist(os.getenv("HTTP_ALLOWLIST") or "")
     except PolicyError as exc:
@@ -74,6 +83,7 @@ def load_config() -> EngineConfig:
         database_url=database_url,
         redis_url=os.getenv("ENGINE_REDIS_URL") or "redis://localhost:6379/0",
         api_token=os.getenv("ENGINE_API_TOKEN") or None,
+        secret_key=secret_key,
         encrypt_checkpoints=bool(os.getenv("LANGGRAPH_AES_KEY")),
         ollama_base_url=os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434",
         ollama_num_parallel=_int("OLLAMA_NUM_PARALLEL", 1),

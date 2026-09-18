@@ -3,6 +3,13 @@ import pytest
 from engine.config import ConfigError, load_config
 
 
+@pytest.fixture(autouse=True)
+def _secret_key(monkeypatch):
+    """Every valid config needs ENGINE_SECRET_KEY, so it is supplied here and each test below stays about
+    the one setting its name mentions. The two tests that are about this key override it themselves."""
+    monkeypatch.setenv("ENGINE_SECRET_KEY", "1" * 32)
+
+
 def test_config_reads_the_environment(monkeypatch):
     monkeypatch.setenv("ENGINE_DATABASE_URL", "postgresql://u:p@h/db")
     monkeypatch.setenv("ENGINE_REDIS_URL", "redis://h:6379/0")
@@ -28,6 +35,37 @@ def test_missing_encryption_key_is_refused_unless_dev_insecure(monkeypatch):
 
     monkeypatch.setenv("ENGINE_DEV_INSECURE", "1")
     assert load_config().encrypt_checkpoints is False
+
+
+def test_a_missing_secret_key_is_refused_unless_dev_insecure(monkeypatch):
+    monkeypatch.setenv("ENGINE_DATABASE_URL", "postgresql://x/y")
+    monkeypatch.setenv("LANGGRAPH_AES_KEY", "0" * 32)
+    monkeypatch.delenv("ENGINE_SECRET_KEY", raising=False)
+
+    with pytest.raises(ConfigError):
+        load_config()
+
+    monkeypatch.setenv("ENGINE_DEV_INSECURE", "1")
+    assert load_config().secret_key is None
+
+
+@pytest.mark.parametrize("value", ["too-short", "0" * 31, "0" * 33])
+def test_a_secret_key_of_the_wrong_length_is_refused(monkeypatch, value):
+    monkeypatch.setenv("ENGINE_DATABASE_URL", "postgresql://x/y")
+    monkeypatch.setenv("LANGGRAPH_AES_KEY", "0" * 32)
+    monkeypatch.setenv("ENGINE_SECRET_KEY", value)
+
+    with pytest.raises(ConfigError):
+        load_config()
+
+
+@pytest.mark.parametrize("length", [16, 24, 32])
+def test_every_aes_key_length_is_accepted(monkeypatch, length):
+    monkeypatch.setenv("ENGINE_DATABASE_URL", "postgresql://x/y")
+    monkeypatch.setenv("LANGGRAPH_AES_KEY", "0" * 32)
+    monkeypatch.setenv("ENGINE_SECRET_KEY", "0" * length)
+
+    assert load_config().secret_key == b"0" * length
 
 
 def test_a_missing_database_url_is_an_error(monkeypatch):

@@ -44,7 +44,8 @@ def _import_main(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     """
     if "ENGINE_DATABASE_URL" not in os.environ:
         monkeypatch.setenv("ENGINE_DATABASE_URL", "postgresql://fake/db")
-    if not os.environ.get("LANGGRAPH_AES_KEY") and os.environ.get("ENGINE_DEV_INSECURE") != "1":
+    missing_a_key = not os.environ.get("LANGGRAPH_AES_KEY") or not os.environ.get("ENGINE_SECRET_KEY")
+    if missing_a_key and os.environ.get("ENGINE_DEV_INSECURE") != "1":
         monkeypatch.setenv("ENGINE_DEV_INSECURE", "1")
     import engine.api.main as main
 
