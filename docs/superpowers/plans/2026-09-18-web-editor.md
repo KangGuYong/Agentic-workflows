@@ -176,16 +176,16 @@ The only place `ENGINE_API_TOKEN` is used. Get this wrong and either the editor 
 
 **Tests first** (`lib/engine/paths.test.ts`, `app/api/engine/route.test.ts`):
 
-- [ ] `isAllowed("/workflows")`, `/workflows/<uuid>`, `/workflows/<uuid>/runs`, `/runs/<uuid>/events`, `/node-types`, `/secrets`, `/healthz` → true.
-- [ ] `isAllowed("/openapi.json")`, `/docs`, `/redoc`, `/` → false. A blocked path gets 404, not 403 — do not confirm what exists.
-- [ ] Path traversal: `/workflows/../openapi.json` and its percent-encoded forms are rejected. Assert on the **normalised** path, and write a test for `%2e%2e%2f` specifically.
-- [ ] The proxy adds `Authorization: Bearer <token>` — asserted by inspecting the upstream `fetch` call, not by hitting a real engine.
-- [ ] An engine 409 with an error envelope comes back **byte-identical** with status 409. Assert on the parsed body: `details.currentRevision` survives.
-- [ ] `Last-Event-ID: 42` on the incoming request appears on the upstream request.
-- [ ] `Idempotency-Key` is forwarded.
-- [ ] Hop-by-hop and dangerous request headers are **not** forwarded: `host`, `connection`, `content-length`, and any client-supplied `authorization` (a caller must not be able to override the token).
-- [ ] A streaming response's `body` is passed through without being read.
-- [ ] `request.signal` is passed to the upstream fetch (Task 0's question 4).
+- [x] `isAllowed("/workflows")`, `/workflows/<uuid>`, `/workflows/<uuid>/runs`, `/runs/<uuid>/events`, `/node-types`, `/secrets`, `/healthz` → true.
+- [x] `isAllowed("/openapi.json")`, `/docs`, `/redoc`, `/` → false. A blocked path gets 404, not 403 — do not confirm what exists.
+- [x] Path traversal: `/workflows/../openapi.json` and its percent-encoded forms are rejected. Assert on the **normalised** path, and write a test for `%2e%2e%2f` specifically.
+- [x] The proxy adds `Authorization: Bearer <token>` — asserted by inspecting the upstream `fetch` call, not by hitting a real engine.
+- [x] An engine 409 with an error envelope comes back **byte-identical** with status 409. Assert on the parsed body: `details.currentRevision` survives.
+- [x] `Last-Event-ID: 42` on the incoming request appears on the upstream request.
+- [x] `Idempotency-Key` is forwarded.
+- [x] Hop-by-hop and dangerous request headers are **not** forwarded: `host`, `connection`, `content-length`, and any client-supplied `authorization` (a caller must not be able to override the token).
+- [x] A streaming response's `body` is passed through without being read.
+- [x] `request.signal` is passed to the upstream fetch (Task 0's question 4).
 
 **Implementation**
 
@@ -225,17 +225,17 @@ async function proxy(request: Request, path: string[]) {
 }
 ```
 
-- [ ] `responseHeaders` copies `content-type`, `cache-control`, and drops `content-encoding`/`transfer-encoding` (fetch already decoded the body; re-advertising the encoding corrupts it).
-- [ ] `isAllowed` works on a **normalised** path. Reject any segment equal to `.` or `..` after decoding, and reject a path that is not one of the seven prefixes.
-- [ ] Env validation at module load: if `ENGINE_API_URL` or `ENGINE_API_TOKEN` is missing, throw with a message naming the variable. Failing at startup beats 401s nobody can explain.
+- [x] `responseHeaders` copies `content-type`, `cache-control`, and drops `content-encoding`/`transfer-encoding` (fetch already decoded the body; re-advertising the encoding corrupts it).
+- [x] `isAllowed` works on a **normalised** path. Reject any segment equal to `.` or `..` after decoding, and reject a path that is not one of the seven prefixes.
+- [x] Env validation at module load: if `ENGINE_API_URL` or `ENGINE_API_TOKEN` is missing, throw with a message naming the variable. Failing at startup beats 401s nobody can explain.
 
 **The token-leak test** — this is the one that earns its keep:
 
-- [ ] After `pnpm build`, grep `.next/static/**/*.js` for the token value used in the build. Assert zero matches. Run it as part of `pnpm test` behind a flag, or as a separate `pnpm test:bundle` invoked by Task 22's final verification.
+- [x] After `pnpm build`, grep `.next/static/**/*.js` for the token value used in the build. Assert zero matches. Run it as part of `pnpm test` behind a flag, or as a separate `pnpm test:bundle` invoked by Task 22's final verification.
 
 **Verification**
-- [ ] All proxy tests pass; the traversal test fails first for the right reason.
-- [ ] Commit: `feat(web): proxy engine requests server-side with the shared token`
+- [x] All proxy tests pass; the traversal test fails first for the right reason.
+- [x] Commit: `feat(web): proxy engine requests server-side with the shared token`
 
 ---
 
@@ -827,3 +827,98 @@ test is not optional.**
 
 **검증**: `pnpm test` 31 passed (3 files), `pnpm typecheck` clean, `pnpm lint` clean, `pnpm build` 성공,
 preload 3개. 다크·라이트 두 테마를 Playwright로 실제 렌더해 눈으로 확인했다.
+
+### Task 2 — the BFF proxy
+
+**요약**: 프록시는 동작하고, 실제 엔진을 상대로 확인했다. 배운 것의 대부분은 **토큰 유출 테스트의 대조군이
+내 전제를 두 번 틀렸다고 알려준 데서** 나왔다.
+
+**경로 허용 목록은 접두사 검사다.** 첫 세그먼트를 엔진의 공개 접두사 5개로 제한한다. 전체 라우트 표는
+`engine/api/routers/*`와 계속 맞춰야 하고 엔진이 라우트를 추가할 때마다 프록시가 먼저 막는다. 실제로 막아야
+할 것은 FastAPI가 라우터 **밖에** 등록하는 `/openapi.json`·`/docs`·`/redoc`뿐이고, Plan 2b의
+`TokenAuthMiddleware` docstring이 적어둔 대로 앱 레벨 `dependencies`는 그 경로들을 덮지 못한다. 차단은 403이
+아니라 **404** — 어떤 라우트가 실재하는지 알려주지 않기 위해서다.
+
+세그먼트는 **원문과 1회 디코드 양쪽**에서 검사한다. 1회로 충분한 이유는 받는 쪽도 1회만 디코드하고 원문을
+함께 보기 때문이다: `%252e%252e`는 1회 디코드하면 `%2e%2e`가 되는데 그건 1회 디코드하는 누구에게도 탈출이
+아니고, 그 형태로 다시 오면 그때 검사된다. 잘못된 이스케이프(`%zz`)는 디코드가 던지므로 거부한다 — 받는 쪽이
+우리와 다르게 해석할 값을 추측으로 넘기지 않는다.
+
+**토큰 유출 테스트 — 대조군이 두 번 걸렸고, 두 번 다 내가 틀렸다**
+
+계획은 "빌드 후 `.next/static`에서 토큰을 grep하고 0건이면 통과"를 요구했다. 그대로 짜고 대조군
+("같은 grep이 **서버** 청크에서는 토큰을 찾아야 한다")을 붙였더니 **대조군이 실패했다.** 이유가 중요하다:
+
+> **Next는 서버 쪽 `process.env.X`를 아예 인라인하지 않는다.** 빌드 시점에 치환되는 것은 `NEXT_PUBLIC_*`
+> 뿐이고, 그것도 코드가 실제로 읽는 자리에서만 그렇다. 나머지는 런타임 조회로 남는다.
+
+즉 토큰은 **어떤 빌드 산출물에도 나타나지 않는다.** `server-only`를 지우고 클라이언트 컴포넌트에서 토큰을
+읽어도 이 grep은 똑같이 통과한다 — 번들에 들어가는 건 *값*이 아니라 그걸 런타임에 읽는 *코드*이기 때문이다.
+계획이 시킨 대로만 했으면 아무것도 증명하지 못하는 테스트를 초록색으로 달고 21개 Task를 갔을 것이다.
+
+다시 짠 뒤 **두 번째 대조군도 실패했다**: `server-only`가 클라이언트 임포트를 막는지 보려고 프로브 페이지를
+`app/_server_only_probe/`에 두었는데 빌드가 그냥 성공했다. 원인은 보안 문제가 아니라
+**`_`로 시작하는 폴더는 App Router의 private folder라 라우팅되지 않는다**는 것 — 프로브가 애초에 빌드되지
+않았다. 폴더 이름에서 `_`를 떼자 빌드가 제대로 거부했다.
+
+최종본은 각각 **반드시 발화해야 하는 대조군**을 가진 검사 두 개다.
+
+| 검사 | 대조군 | 결과 |
+|---|---|---|
+| 클라이언트 청크에 토큰 0건 | `NEXT_PUBLIC_` 센티넬을 읽는 클라이언트 페이지를 만들어, 같은 grep이 그것을 **찾아야** 한다 | 대조군 1개 청크에서 발견 ✓ / 토큰 0건 ✓ |
+| `server-only`가 문다 | 같은 페이지를 `lib/engine/env` 임포트로 바꾸면 빌드가 **실패해야** 한다 | 빌드 거부 ✓ |
+
+교훈 한 줄: **비어 있는 검색 결과는, 같은 검색이 무언가를 찾는 것을 보여주기 전까지 증거가 아니다.**
+
+**`server-only` vs vitest.** `server-only`는 RSC 빌드 밖에서 임포트되면 던지므로 vitest에서 서버 모듈을
+불러올 수 없다. `vitest.config.ts`에서 빈 스텁으로 alias했다. 보장이 약해지지 않는 이유는 위 표의 두 번째
+검사가 진짜 Next 빌드로 그 가드를 직접 시험하기 때문이다.
+
+**기동 시 환경 변수 검증** (`instrumentation.ts`). 측정한 동작:
+
+- 환경 변수 **없이 `next build`**: 성공한다. 이미지는 비밀 없이 빌드된다 — 의도한 대로.
+- 환경 변수 **없이 `next start`**: `Failed to prepare server Error: ... ENGINE_API_URL이(가) 설정되지
+  않았습니다`를 찍고 모든 요청이 500이 된다. 401이 아니라는 게 요점이다 — 401은 운영자의 토큰이 틀린 것처럼
+  읽히고, 컨테이너가 토큰을 애초에 못 받은 것과 구별되지 않는다.
+- 주의: Next는 그 실패 **전에** `✓ Ready`를 먼저 찍는다. 로그 맨 윗줄만 보면 정상 기동으로 보인다.
+  Task 20의 healthcheck가 500을 받아 컨테이너를 unhealthy로 표시하는 것이 실질적인 방어선이다.
+
+**실제 엔진을 상대로 확인** (떠 있는 compose 스택):
+
+| 호출 | 결과 |
+|---|---|
+| `/api/engine/workflows`, `/node-types`, `/healthz` (**토큰 없이**) | 200 |
+| `/api/engine/openapi.json`, `/docs` | 404 |
+| 실행 이벤트 SSE | `id:`·`event:` 온전, `run_queued`→`run_failed`까지 |
+| `Last-Event-ID: 5`로 재연결 | **6번부터** 재개 |
+
+SSE 쪽은 이미 끝난 실행을 재생한 것이라 *실시간* 흐름을 증명하지는 않는다 — 그건 Task 0의 1초 간격 스파이크가
+증명했다. 여기서 증명한 것은 헤더 전달과 프레이밍이 실제 엔진을 상대로 온전하다는 것이다.
+
+**Mutation 8/8 잡힘**
+
+| 변형 | 잡은 테스트 수 |
+|---|---|
+| `signal: request.signal` 제거 | 1 |
+| 호출자의 `authorization`을 그대로 전달 | 1 |
+| 차단 응답 404 → 403 | 1 |
+| `redirect: "manual"` 제거 | 1 |
+| 본문을 `await upstream.text()`로 버퍼링 | 1 |
+| `last-event-id` 전달 제거 | 1 |
+| 질의 문자열 버리기 | 1 |
+| 경로 탈출 검사 제거 | 10 |
+
+**계획이 틀렸거나 비어 있던 것**
+
+- 토큰 유출 테스트의 전제 (위). 계획서 Task 2의 해당 항목은 이 노트대로 다시 읽어야 한다.
+- Next 16에는 라우트 핸들러용 `RouteContext` 전역 타입이 **없다.** 생성되는 것은 `PageProps`와
+  `LayoutProps`뿐이라 `{ params: Promise<{ path: string[] }> }`를 직접 쓴다.
+- `ENGINE_API_URL`에 경로가 붙으면 `new URL("/workflows", base)`가 그것을 **버린다.** 계획서 스케치는 이걸
+  다루지 않았다. `engineEnv()`가 경로·질의·프래그먼트가 붙은 base를 거부한다.
+- 토큰 최소 길이 16자를 프록시에서도 검사한다(`engine/config.py::MIN_API_TOKEN_LEN`). 더 짧으면 엔진의
+  토큰일 수 없으므로 매 요청이 401이 될 값을 보내게 된다.
+- `pnpm test:bundle`이 프로브를 지운 뒤 `.next/types/validator.ts`에 없는 페이지 참조가 남아 다음
+  `pnpm typecheck`가 TS2307로 깨졌다. 스크립트가 마지막에 빌드를 한 번 더 돌려 타입을 재생성한다 —
+  검사 스크립트가 다음 명령을 깨진 상태로 남기면 안 된다.
+
+**검증**: `pnpm test` 75 passed (6 files), `typecheck`·`lint` clean, `build` 성공, `test:bundle` 통과.
