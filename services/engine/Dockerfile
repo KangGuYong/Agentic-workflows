@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1
-FROM ghcr.io/astral-sh/uv:0.8-python3.12-bookworm-slim AS build
+# astral's own image, from Docker Hub rather than ghcr.io: identical contents, and Docker Hub is
+# what registry mirrors cover, so this builds in networks where ghcr's blob storage is not reachable.
+FROM astral/uv:0.8-python3.12-bookworm-slim AS build
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 # Dependencies first: they change far less often than the source, so this layer stays cached.
