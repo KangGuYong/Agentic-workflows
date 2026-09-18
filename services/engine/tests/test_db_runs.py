@@ -1,12 +1,16 @@
 import asyncio
 
+from engine.config import load_config
 from engine.db import runs as run_db
 from tests.factories import make_run
 
 
 async def _row(pool, run_id: str) -> dict:
     async with pool.connection() as conn:
-        return await (await conn.execute("SELECT * FROM runs WHERE id=%s", (run_id,))).fetchone()
+        row = await (await conn.execute("SELECT * FROM runs WHERE id=%s", (run_id,))).fetchone()
+    # inputs/outputs are bytea (2b design §9); decode like every production reader so the assertions
+    # below stay about values rather than ciphertext.
+    return run_db.decode_run(row, load_config().secret_key)
 
 
 async def test_claiming_moves_one_queued_run_to_running(pool):
@@ -56,8 +60,8 @@ async def test_only_the_lease_owner_can_finish_a_run(pool):
     async with pool.connection() as conn:
         await run_db.claim_next(conn, owner="worker-1", lease_sec=30)
 
-        assert await run_db.finish(conn, run_id=run_id, owner="worker-2", status="succeeded") is False
-        assert await run_db.finish(conn, run_id=run_id, owner="worker-1", status="succeeded",
+        assert await run_db.finish(conn, run_id=run_id, owner="worker-2", status="succeeded", key=load_config().secret_key) is False
+        assert await run_db.finish(conn, run_id=run_id, owner="worker-1", status="succeeded", key=load_config().secret_key,
                                    outputs={"final": "x"}) is True
 
     row = await _row(pool, run_id)
@@ -69,7 +73,7 @@ async def test_finishing_can_drop_the_inputs_when_run_data_is_not_stored(pool):
     run_id = await make_run(pool, status="queued", store_run_data=False, inputs={"topic": "비밀"})
     async with pool.connection() as conn:
         await run_db.claim_next(conn, owner="worker-1", lease_sec=30)
-        await run_db.finish(conn, run_id=run_id, owner="worker-1", status="succeeded", clear_inputs=True)
+        await run_db.finish(conn, run_id=run_id, owner="worker-1", status="succeeded", key=load_config().secret_key, clear_inputs=True)
 
     assert (await _row(pool, run_id))["inputs"] is None
 

@@ -2732,7 +2732,7 @@ git commit -m "feat(engine): add the http_request node with secret substitution"
 - Modify: `services/engine/engine/db/runs.py`, `services/engine/engine/api/routers/runs.py`, `services/engine/engine/worker/worker.py`
 - Test: `services/engine/tests/test_db_crypto.py`, `services/engine/tests/test_api_runs.py` (append)
 
-- [ ]  **Step 1: Write the failing tests**
+- [x]  **Step 1: Write the failing tests**
 
 Create `services/engine/tests/test_db_crypto.py`:
 
@@ -2825,12 +2825,12 @@ async def test_inputs_and_outputs_come_back_decrypted_and_redacted(api, pool, wo
     assert run["outputs"] == {"result": "요약본"}
 ```
 
-- [ ]  **Step 2: Run them to see them fail**
+- [x]  **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/test_db_crypto.py -q`
 Expected: FAIL — `insert_queued()` got an unexpected keyword argument `key`.
 
-- [ ]  **Step 3: Write the migration**
+- [x]  **Step 3: Write the migration**
 
 Create `services/engine/engine/db/migrations/versions/0003_encrypt_run_payloads.py`:
 
@@ -2877,7 +2877,7 @@ def downgrade() -> None:
     op.execute(DOWN)
 ```
 
-- [ ]  **Step 4: Add the payload codec**
+- [x]  **Step 4: Add the payload codec**
 
 Create `services/engine/engine/db/crypto.py`:
 
@@ -2919,7 +2919,7 @@ def open_payload(key: bytes | None, column: str, stored: bytes | memoryview | No
         return None
 ```
 
-- [ ]  **Step 5: Use it in the queries**
+- [x]  **Step 5: Use it in the queries**
 
 In `services/engine/engine/db/runs.py`:
 
@@ -2945,12 +2945,12 @@ def decode_run(row: dict[str, Any] | None, key: bytes | None) -> dict[str, Any] 
 
 Run: `grep -rn "\"inputs\"\]\|\[.outputs.\]" services/engine/engine` and make sure every read goes through `decode_run` or `open_payload`.
 
-- [ ]  **Step 6: Run the tests**
+- [x]  **Step 6: Run the tests**
 
 Run: `uv run pytest tests/test_db_crypto.py tests/test_api_runs.py tests/test_worker_run.py -q`
 Expected: PASS.
 
-- [ ]  **Step 7: Run everything and commit**
+- [x]  **Step 7: Run everything and commit**
 
 Run: `uv run pytest -q` → all pass.
 Run: `uv run ruff check .` → `All checks passed!`
@@ -4898,3 +4898,53 @@ unconfirmed, since the evidence is gone by the time it is noticed. `tests/confte
 `lock_timeout = '15s'` before the truncate, so the next occurrence fails loudly with a lock error instead
 of hanging the whole suite silently (plan convention 5: bound every wait). If a stall happens again
 *without* a lock error, the cause is something else and this note is wrong.
+
+### Task 10 — post-review note
+
+**The plan missed every test that reads the two columns.** Step 5 lists the production readers, and those
+were right, but `runs.inputs`/`runs.outputs` are now `bytea` for everyone: `tests/factories.py` wrote
+`Jsonb(inputs)` straight into the column (a `DatatypeMismatch` that broke 17 tests at once), and four test
+helpers — `_status` in `test_worker_run.py`, `_row` in `test_worker_reaper.py` and in `test_db_runs.py`,
+and the direct-from-Postgres assertion in `test_api_runs.py` — compared ciphertext against dicts. They now
+seal and decode exactly as production does, which is the point: a helper that bypassed the codec would be
+testing a storage format the engine never uses. The `test_api_runs.py` assertion was strengthened rather
+than translated, and now proves both halves at once — the bytes in the column do not contain the secret,
+*and* what they decode to was already redacted before storage.
+
+**Tests beyond the plan's:** `{}` must not collapse to NULL (a run with empty inputs and a run with no
+inputs are different states, and the caller cannot tell them apart afterwards); a row written under a
+rotated key reads as unreadable rather than raising; a dev-mode plain-JSON row does not silently decode
+once a key is configured; and a full row decodes back through `decode_run`, which is the path the worker
+actually uses.
+
+---
+
+### The intermittent whole-suite hang — found, located, bounded
+
+Recorded here because it stalled this task three times and would have kept stalling the next one.
+
+**Symptom.** `uv run pytest -q` occasionally never finishes — no output, no failure, no timeout. Killing it
+and re-running usually passes, which is why the first two occurrences were written off as unreproducible.
+
+**Reproducer.** `tests/test_worker_reaper.py::test_a_workers_own_reaper_requeues_and_reruns_an_abandoned_run`
+hangs roughly one run in six. `-o faulthandler_timeout=60` gives a stack dump; `--setup-show` names the
+fixture. The test itself passes: the hang is in `worker_factory`'s teardown, i.e. `Worker.stop()`.
+
+**Where.** `stop()` had three unbounded awaits, and the warning that now fires names the guilty one:
+`self._reaper.stop()`, which cancels the sweep task and awaits it. `Reaper.exclusive()` releases its
+advisory lock with an `await` inside a `finally` — cleanup that runs in an already-cancelled task, on a
+pooled connection that is being returned at the same moment. Occasionally that cleanup never completes and
+the await never returns. The exact asyncio/psycopg interaction is **not** pinned down; making the sweep's
+cleanup cancellation-safe is the real fix and belongs with the other hardening work.
+
+**What changed here.** `Worker.stop()` now bounds every step (`STOP_TIMEOUT_SEC`, 10s) and logs what it
+gave up on. This is not only a test fix: a shutdown that can wait forever turns a deploy into a SIGKILL.
+Abandoning a run task is safe by design rather than merely tolerable — the run keeps its lease, the lease
+expires, and the reaper recovers it, which is the same path a worker that died outright takes (design 6.2).
+`tests/conftest.py` also sets `lock_timeout = '15s'` before its `TRUNCATE`, so a leftover backend holding
+a lock fails loudly instead of hanging collection.
+
+**Evidence.** Before: 1 hang in 6 runs of that test, and three stalled full-suite runs. After: 24/24 runs
+of that test clean, two consecutive full suites at 1,322 passed. One of the 24 took 11.1s instead of 1.2s
+— the underlying condition still happening, with the bound catching it. That is the honest state: the
+symptom is contained and observable, the cause is not yet fixed.

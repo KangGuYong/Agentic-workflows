@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import time
 
 from engine.db import runs as run_db
@@ -331,3 +332,42 @@ async def _stays_expired(pool, run_id, *, span_sec: float, interval: float = 0.0
         row = await _expired_row(pool, run_id)
         assert row is not None, "lease_expires_at was pushed back out after the infra failure"
     return row
+
+
+async def test_stop_gives_up_on_a_task_that_will_not_cancel(pool, redis, worker_factory, caplog):
+    """A shutdown step that can wait forever turns a deploy into a SIGKILL — and, in the suite, into a
+    hang with no output at all. The run is not lost: it keeps its lease, the lease expires, and the
+    reaper recovers it, which is what happens when a worker dies outright anyway (design 6.2)."""
+    import asyncio
+    import logging
+
+    from engine.worker import worker as worker_module
+
+    worker = await worker_factory(ScriptedLLM([]))
+    ignored_one_cancel = asyncio.Event()
+
+    async def slow_to_cancel():
+        """Swallows the first cancel, the way a task stuck in an uninterruptible cleanup does, then
+        exits on the second — a task that never dies would hang the event loop's own shutdown, which is
+        the failure this test exists to prevent, not to cause."""
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            ignored_one_cancel.set()
+            await asyncio.sleep(3600)
+
+    stuck = worker._spawn(slow_to_cancel())
+    original = worker_module.STOP_TIMEOUT_SEC
+    worker_module.STOP_TIMEOUT_SEC = 0.2
+    try:
+        with caplog.at_level(logging.WARNING):
+            async with asyncio.timeout(10):  # the point of the test: stop() returns at all
+                await worker.stop()
+    finally:
+        worker_module.STOP_TIMEOUT_SEC = original
+        stuck.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stuck
+
+    assert ignored_one_cancel.is_set()
+    assert "did not stop" in caplog.text

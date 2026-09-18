@@ -64,6 +64,9 @@ async def _status(pool, run_id: str):
     async def check():
         async with pool.connection() as conn:
             row = await run_db.get_run(conn, run_id)
+        # inputs/outputs are bytea (2b design §9); decode as every production reader does, so these
+        # tests keep asserting on values rather than on ciphertext.
+        row = run_db.decode_run(row, load_config().secret_key)
         return row if row["status"] in ("succeeded", "failed", "cancelled", "waiting") else None
 
     return await until(check)

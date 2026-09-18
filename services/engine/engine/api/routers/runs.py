@@ -245,6 +245,7 @@ async def create_run(workflow_id: str, request: Request) -> dict[str, Any]:
                 conn, workflow_id=workflow_id, version_id=str(version["id"]),
                 workspace_id=str(workflow["workspace_id"]), inputs=inputs, idempotency_key=key,
                 store_run_data=analysis.dsl.settings.storeRunData,
+                key=request.app.state.config.secret_key,
             )
             event = await append_event(conn.cursor(), str(run["id"]), "run_queued",
                                        payload={"versionNo": version["version_no"]})
@@ -288,7 +289,7 @@ async def get_run(run_id: str, request: Request) -> dict[str, Any]:
         if row["status"] == "waiting" and row["waiting_node_id"]:
             waiting = await run_db.waiting_payload(conn, run_id, row["waiting_node_id"],
                                                    row["waiting_exec_index"])
-    return _run_view(row, waiting)
+    return _run_view(run_db.decode_run(row, request.app.state.config.secret_key), waiting)
 
 
 @router.get("/runs/{run_id}/nodes")

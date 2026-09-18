@@ -9,6 +9,8 @@ from psycopg.types.json import Jsonb
 
 import engine.api.routers.runs as runs_router
 import engine.db.runs as run_db
+from engine.config import load_config
+from engine.db.crypto import open_payload
 from engine.llm.scripted import ScriptedLLM
 from engine.validator import analyze as real_analyze
 from tests.conftest import until
@@ -149,7 +151,10 @@ async def test_run_inputs_and_outputs_are_redacted_on_get_run(api, pool, worker_
     async with pool.connection() as conn:
         row = await (await conn.execute(
             "SELECT outputs FROM runs WHERE id=%s", (created["runId"],))).fetchone()
-    assert row["outputs"] == {"apiKey": "[REDACTED]"}  # redacted before it ever reached storage
+    # Two properties in one row: the column is ciphertext (2b design §9), and what it decodes to was
+    # already redacted before it ever reached storage.
+    assert b"sk-live-secret" not in bytes(row["outputs"])
+    assert open_payload(load_config().secret_key, "outputs", row["outputs"]) == {"apiKey": "[REDACTED]"}
 
 
 async def test_a_run_is_picked_up_and_its_nodes_readable(api, pool, worker_factory):
@@ -565,3 +570,38 @@ async def test_analysis_does_not_hold_the_workflow_lock(api, monkeypatch):
     assert create_response.status_code == 409
     error = create_response.json()["error"]
     assert error["code"] == "REVISION_CONFLICT" and error["details"]["currentRevision"] == 3
+
+
+async def test_inputs_and_outputs_come_back_decrypted_and_redacted(api, pool, worker_factory):
+    from engine.llm.scripted import ScriptedLLM
+    from tests.conftest import until
+
+    workflow_id = await _saved(api)
+    await worker_factory(ScriptedLLM(["요약본"]))
+    created = (await api.post(f"/workflows/{workflow_id}/runs",
+                              json={"inputs": {"topic": "AI", "password": "hunter2-secret"},
+                                    "revision": 2})).json()
+
+    async def done():
+        run = (await api.get(f"/runs/{created['runId']}")).json()
+        return run if run["status"] == "succeeded" else None
+
+    run = await until(done)
+
+    assert run["inputs"]["topic"] == "AI"
+    assert run["inputs"]["password"] == "[REDACTED]"  # key-name redaction on the read path
+    assert run["outputs"] == {"result": "요약본"}
+
+
+async def test_the_stored_input_is_ciphertext_while_the_api_still_reads_it(api, pool):
+    """The two halves of the property in one test: unreadable in the table, readable through the API."""
+    workflow_id = await _saved(api)
+    created = (await api.post(f"/workflows/{workflow_id}/runs",
+                              json={"inputs": {"topic": "훔쳐갈-값"}, "revision": 2})).json()
+
+    async with pool.connection() as conn:
+        raw = await (await conn.execute("SELECT inputs FROM runs WHERE id=%s",
+                                        (created["runId"],))).fetchone()
+
+    assert "훔쳐갈-값".encode() not in bytes(raw["inputs"])
+    assert (await api.get(f"/runs/{created['runId']}")).json()["inputs"]["topic"] == "훔쳐갈-값"

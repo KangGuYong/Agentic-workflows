@@ -29,6 +29,9 @@ from engine.worker.reaper import Reaper
 
 log = logging.getLogger(__name__)
 
+# How long stop() waits for any one shutdown step before giving up on it and logging.
+STOP_TIMEOUT_SEC = 10.0
+
 MAX_COMPILED_CACHE = 32  # lru_cache-level cap (design 8.4); a plain FIFO eviction is enough here
 
 
@@ -69,14 +72,34 @@ class Worker:
         await self._reaper.start()
 
     async def stop(self) -> None:
+        """Shut the worker down. Every step is bounded: a task that will not come back must not turn a
+        deploy into a SIGKILL, and it must not hang a test suite either.
+
+        Abandoning a run task is safe by design rather than merely tolerable: the run keeps its lease,
+        the lease expires, and the reaper recovers it (design 6.2) — which is the same path a worker that
+        died outright takes.
+        """
         self._running = False
-        await self._reaper.stop()  # before our own tasks: its task is not tracked in self._tasks
+        # Before our own tasks: the reaper's task is not tracked in self._tasks.
+        await self._bounded(self._reaper.stop(), "reaper")
         tasks = list(self._tasks)
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=STOP_TIMEOUT_SEC)
+            if pending:
+                log.warning("worker %s: %s task(s) did not stop within %ss; abandoning them",
+                            self.owner, len(pending), STOP_TIMEOUT_SEC)
         if self._listen is not None:
-            await self._listen.close()
+            await self._bounded(self._listen.close(), "listen connection")
+
+    async def _bounded(self, awaitable, what: str) -> None:
+        try:
+            await asyncio.wait_for(awaitable, STOP_TIMEOUT_SEC)
+        except TimeoutError:
+            log.warning("worker %s: %s did not stop within %ss", self.owner, what, STOP_TIMEOUT_SEC)
+        except Exception:  # shutdown is best-effort: nothing here is worth failing the caller over
+            log.warning("worker %s: %s failed to stop", self.owner, what, exc_info=True)
 
     def _nonce(self, run_id: str) -> str | None:
         """The per-run secret marker nonce, or None when no key is configured (ENGINE_DEV_INSECURE).
@@ -101,6 +124,9 @@ class Worker:
                 while self._running and len(in_flight) < self._config.worker_max_runs:
                     async with self._pool.connection() as conn:
                         row = await run_db.claim_next(conn, owner=self.owner, lease_sec=self._config.lease_sec)
+                    # inputs/outputs come back as ciphertext (2b design §9); the graph starts from the
+                    # decoded value, so decode before anything touches the row.
+                    row = run_db.decode_run(row, self._config.secret_key)
                     if row is None:
                         break
                     task = self._spawn(self._execute(row))
@@ -327,7 +353,8 @@ class Worker:
                         error: dict[str, Any] | None = None, clear_inputs: bool = False) -> None:
         async with self._pool.connection() as conn, conn.transaction():
             owned = await run_db.finish(conn, run_id=run_id, owner=self.owner, status=status,
-                                        outputs=outputs, error=error, clear_inputs=clear_inputs)
+                                        key=self._config.secret_key, outputs=outputs, error=error,
+                                        clear_inputs=clear_inputs)
             if not owned:  # someone else owns the run now: write nothing at all
                 return
             closed = await run_db.close_open_node_runs(conn, run_id, "cancelled" if status == "cancelled" else "failed")
