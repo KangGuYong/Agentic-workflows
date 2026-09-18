@@ -2072,7 +2072,7 @@ git commit -m "feat(engine): render secrets as per-run markers" -m "Co-Authored-
 - Modify: `services/engine/engine/validator/refs.py`
 - Test: `services/engine/tests/test_validator_refs.py` (append)
 
-- [ ]  **Step 1: Write the failing tests**
+- [x]  **Step 1: Write the failing tests**
 
 Append to `services/engine/tests/test_validator_refs.py`, reusing whatever helper the file already uses to run `analyze` on a DSL dict (do not invent a new one):
 
@@ -2125,12 +2125,12 @@ def test_a_bare_secret_reference_is_refused_even_in_http_request():
 
 Add `import copy` at the top if it is not already there.
 
-- [ ]  **Step 2: Run them to see them fail**
+- [x]  **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/test_validator_refs.py -q`
 Expected: FAIL. The two `http_request` cases also report an unknown node type until Task 9 registers it — mark exactly those two `@pytest.mark.xfail(reason="http_request lands in Task 9", strict=True)` and remove the marker in Task 9. Do not weaken the assertions.
 
-- [ ]  **Step 3: Open the one door**
+- [x]  **Step 3: Open the one door**
 
 In `services/engine/engine/validator/refs.py`, replace the `secret` branch inside `_check_ref`:
 
@@ -2146,12 +2146,12 @@ In `services/engine/engine/validator/refs.py`, replace the `secret` branch insid
                       "시크릿은 HTTP 요청 노드의 url·headers·body에서만 참조할 수 있습니다", **where)]
 ```
 
-- [ ]  **Step 4: Run the tests**
+- [x]  **Step 4: Run the tests**
 
 Run: `uv run pytest tests/test_validator_refs.py -q`
 Expected: PASS (with the two xfail markers).
 
-- [ ]  **Step 5: Run everything and commit**
+- [x]  **Step 5: Run everything and commit**
 
 Run: `uv run pytest -q` → all pass.
 Run: `uv run ruff check .` → `All checks passed!`
@@ -4814,3 +4814,28 @@ property that matters is the same name under a foreign nonce: text carried over 
 tenant text that guessed a name, must not be filled with this run's value. Both `substitute` and
 `find_names` now have that case, and all eight mutants are killed. The plan's version of this test was
 the §10 pattern again: a test that passes whether or not the thing it names is there.
+
+### Task 7 — post-review note
+
+**Step 2's xfail instruction was wrong in two ways, and both hid a vacuous test.** It named only the two
+"allowed" cases, but `analyze` stops at `UNKNOWN_NODE_TYPE` before reference checking ever runs, so *all
+four* `http_request` cases are blocked until Task 9 — including the two that assert a secret is refused.
+Worse, the two "allowed" assertions as written (`"SECRET_NOT_ALLOWED" not in codes`) are *vacuously true*
+today for exactly that reason: no reference check ran, so of course nothing was reported. Marked
+`strict=True` they fail as XPASS, which is how this surfaced. They now assert `UNKNOWN_NODE_TYPE` is
+absent as well, so they fail today for the stated reason and can only pass once the node exists and the
+door is genuinely open. A fifth case was added for `{{ secret.A.B }}`, which the `len(ref.path) == 1`
+rule refuses and the plan's tests never covered.
+
+**Two mutants survive, and both are equivalent given today's node set — not test debt to pay now.**
+Dropping the field rule (`field_ok = True`) and dropping the node-type rule both leave every test green,
+because the two halves of the condition are only separable when a node exists that satisfies one and not
+the other. No node type currently produces a `url`, `body` or `headers.*` template field — the `end`
+node's paths are `outputs.{key}`, never a bare `body` — and until Task 9 no node is `http_request`. The
+rules are each other's only witness.
+
+**What Task 9 owes because of this.** Removing the strict xfail markers makes the node-type rule
+observable. The field rule still will not be, unless Task 9 adds a case for an `http_request` template
+field that is *not* `url`/`body`/`headers.*` — if the node has one. If it has no such field, say so in
+its note rather than leaving the gap unrecorded: a rule with no possible witness is a rule no test
+protects, and the next person to add a `body` field to some other node type will never hear about it.
