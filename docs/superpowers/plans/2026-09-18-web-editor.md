@@ -34,6 +34,30 @@ git commit -m "<subject>" -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.c
 10. **Korean user-facing text.** Every string a user reads is Korean, like the engine. Comments, identifiers and test names are English.
 11. **Never put a secret, a run payload or a URL query string in a log.** The BFF logs method, path and status — nothing else. The browser console logs nothing about request bodies.
 12. **The plan's code is a starting point, not something to copy.** Where it disagrees with what the real library does, the library wins; record the difference in the task's post-review note.
+13. **Visual design goes through `.claude/skills/frontend-design/SKILL.md`**, installed in this repo at the user's request. Read it before Tasks 7, 9, 16, 17 and 19 — the tasks that produce something a person looks at. **Scope it deliberately** (see 시각 디자인 below): its aesthetic-direction rules apply everywhere; its scroll-driven-website rules do not apply to this product at all.
+
+---
+
+## 시각 디자인 — 스킬을 어디에 적용하는가
+
+`.claude/skills/frontend-design/SKILL.md`은 두 층으로 읽는다. 둘을 구분하지 않고 적용하면 워크플로 에디터가 못 쓰는 물건이 된다.
+
+**적용한다 — "Design Thinking"과 "Frontend Aesthetics Guidelines"**
+
+- 하나의 미학 방향을 정하고 끝까지 밀어붙인다. 색은 CSS 변수로 통일하고, 지배색 하나에 날카로운 강조색을 쓴다.
+- **Inter·Roboto·Arial·시스템 폰트 금지.** 흰 배경 위 보라색 그라데이션 같은 뻔한 조합 금지. 표시용 서체와 본문용 서체를 짝지어 고른다. 한국어가 1급 언어이므로 **한글 글꼴이 실제로 존재하는 조합**이어야 한다 — 라틴 전용 표시 서체를 고르고 한글을 폴백에 맡기면 화면 절반이 다른 서체로 렌더된다. 이건 원본 스킬이 다루지 않는 제약이고, 여기서 이긴다.
+- 배경은 단색으로 때우지 않는다. 캔버스 격자, 미묘한 노이즈, 깊이감 있는 그림자처럼 맥락에 맞는 질감을 쓴다.
+- 페이지 로드와 패널 전환에 의도된 모션을 쓴다. CSS 우선.
+
+**적용하지 않는다 — "Scroll-Driven Website Design Guidelines"**
+
+이 절 전체(6rem 히어로 제목, 10–15vw 마키 텍스트, 카드·컨테이너 금지, 섹션마다 다른 진입 애니메이션, 핀 고정 스크롤, GSAP 카운트업)는 **스크롤로 읽는 마케팅 사이트를 위한 규칙**이다. Plan 3이 만드는 것은 노드 캔버스와 조밀한 설정 패널을 가진 **도구 UI**다. 이 제품에는 스크롤로 읽는 화면이 하나도 없다.
+
+특히 **"NEVER use cards or containers"는 여기서 뒤집힌다.** 노드 패널, 실행 기록 행, 승인 대화상자는 경계가 분명해야 읽힌다. 스킬의 규칙을 그대로 따르면 검증 배지가 어느 노드 것인지 알 수 없게 된다. 도구 UI에서 밀도와 가독성은 미학보다 우선한다 — 그것 자체가 이 맥락의 미학이다.
+
+나중에 랜딩 페이지나 소개 화면이 생긴다면 그때는 이 절을 그대로 적용한다. 지금은 해당 화면이 없다.
+
+**Task 1에서 정할 것**: 미학 방향 한 줄, 서체 짝(한글 포함), 색 토큰(`--bg`, `--fg`, `--accent`, 상태색 4종: 대기·실행·성공·실패). 이후 모든 Task는 그 토큰만 쓴다. Task 19가 워크플로 목록·시크릿 화면으로 그 방향이 실제로 보이는 첫 화면이다.
 
 ---
 
@@ -136,6 +160,7 @@ export async function GET() {
 - [ ] Add scripts: `dev`, `build`, `start`, `test`, `test:watch`, `lint`, `typecheck`, `e2e`.
 - [ ] Write one trivial test in `lib/` and one component test, so both projects are proven to run.
 - [ ] Add `apps/web` to the repo `.gitignore` exceptions as needed (`node_modules`, `.next`).
+- [ ] **미학 방향과 토큰을 정한다** (시각 디자인 절): 방향 한 줄, 서체 짝(한글 글꼴 포함, Inter·Roboto·Arial 금지), 색 토큰과 상태색 4종을 `app/globals.css`의 `:root`에 쓴다. 이후 Task는 이 토큰만 참조한다.
 
 **Verification**
 - [ ] `pnpm test` passes with two tests.
@@ -339,6 +364,7 @@ Write that last point as a test before implementing it; getting the direction ba
 ## Task 7: Palette and canvas
 
 - [ ] Server component fetches `/node-types` through the proxy and passes it down.
+- [ ] 시각 디자인 절과 `.claude/skills/frontend-design/SKILL.md`를 먼저 읽는다. 팔레트·노드 렌더는 Task 1에서 정한 토큰만 쓴다.
 - [ ] Palette groups by `category` in a fixed order: `IO`, `AI`, `Logic`, `Action`, `Human`. An unknown category goes last under "기타" rather than disappearing.
 - [ ] Drag from the palette onto the canvas → `addNode` at the drop position.
 - [ ] React Flow renders nodes from the document: label, type icon, id in small grey text, handles from the node's `handles` (from the validation slice; falls back to `["out"]` before the first analysis).
@@ -556,6 +582,7 @@ The hardest UI in this plan. 3 설계 §6.
 
 ## Task 19: The workflow list and shell
 
+- [ ] 이 화면이 제품의 미학 방향이 처음 드러나는 곳이다. 시각 디자인 절을 다시 읽고 Task 1의 방향을 여기서 완성한다.
 - [ ] `/` lists workflows (`GET /workflows`) with name, revision, updated time; 새 워크플로 creates one and navigates to it.
 - [ ] Rename in place (`PUT` with `name`).
 - [ ] Delete with a confirmation; 409 `WORKFLOW_HAS_ACTIVE_RUNS` → 실행 중인 워크플로는 삭제할 수 없습니다.
