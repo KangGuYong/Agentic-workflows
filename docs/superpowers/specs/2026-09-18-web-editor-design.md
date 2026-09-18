@@ -136,8 +136,9 @@ Plan 3은 원칙적으로 프런트엔드 작업이지만, 에디터가 없으�
 - `outputSchema`: `compute_schemas(graph)`의 결과. `{{ llm_1.text }}`까지 제안하고 타입 불일치를 인라인 표시하는 근거다.
 - `handles`: `spec.handles(config)`. 분기 노드의 출력 핸들 이름은 **설정에 따라 달라지므로**(classifier는 카테고리 id들, condition은 `true`/`false`, human_approval은 `approve`/`reject`) `/node-types`로는 알 수 없다.
 - `nodes`는 **phase 1·2를 통과했을 때만** 채워진다. `analyze()`가 오류가 난 단계에서 멈추므로 `Analysis.graph`가 `None`이면 `"nodes": {}`를 돌려준다. 에디터는 그럴 때 **마지막으로 성공한 분석 결과**를 계속 쓴다 — 구조가 깨진 순간에 자동완성이 통째로 사라지면 고치기가 더 어렵다.
+- 반대로 **phase 3(참조·타입) 오류는 `nodes`를 비우지 않는다.** 참조를 반쯤 타이핑한 상태가 바로 자동완성이 가장 필요한 순간이므로, 이건 다행한 성질이다. 비는 것은 구조·그래프 오류일 때뿐이다.
 
-응답 크기는 `outputSchema` 때문에 커질 수 있다. 노드 15,000개 한도를 생각하면 상한이 필요하다: `nodes`는 `MAX_ISSUES`와 같은 이유로 **노드 200개까지만** 채우고, 넘으면 `"nodesTruncated": true`를 붙인다. 그보다 큰 워크플로를 캔버스에서 편집하는 일은 없다.
+**응답 크기에 별도 상한을 두지 않는다.** 이 문서의 초안은 "노드 200개까지만 채우고 넘으면 `nodesTruncated`"를 요구했는데, `structure.MAX_NODES`가 **100개**에서 이미 워크플로를 `LIMIT_EXCEEDED` **오류**로 막는다 — 그러면 graph가 `None`이 되어 `nodes`는 어차피 비어 있다. 200개 상한은 어떤 draft로도 도달할 수 없는 분기였다(Task 3 노트).
 
 ### 4.2 `http_request` category 정규화
 

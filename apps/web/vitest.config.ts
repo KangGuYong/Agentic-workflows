@@ -8,11 +8,18 @@ import { defineConfig } from "vitest/config"
 // Projects inherit this file's `plugins` and `resolve`, so neither is repeated below; Vitest 5 warns
 // when they are. `@/` comes from tsconfig's paths via Vite's own resolution, not a plugin.
 export default defineConfig({
-  resolve: { tsconfigPaths: true },
+  resolve: {
+    tsconfigPaths: true,
+    alias: { "server-only": new URL("./test/server-only-stub.ts", import.meta.url).pathname },
+  },
   test: {
     projects: [
       {
         test: { name: "lib", environment: "node", include: ["lib/**/*.test.ts"] },
+      },
+      {
+        // Route handlers are Web-API code, not React: node, no DOM, no setup file.
+        test: { name: "routes", environment: "node", include: ["app/api/**/*.test.ts"] },
       },
       {
         plugins: [react()],

@@ -15,7 +15,8 @@ from engine.validator.issues import Issue, bounded, error, has_errors
 from engine.validator.refs import check_refs, compute_before, compute_schemas
 from engine.validator.structure import check_structure, pydantic_issues
 
-__all__ = ["Analysis", "Issue", "analyze", "has_errors", "validate"]
+__all__ = ["Analysis", "Issue", "analyze", "compute_before", "compute_schemas", "has_errors",
+           "validate"]
 
 MAX_DSL_BYTES = 512 * 1024  # spec 11.1; also bounds template parsing work in phase 3
 

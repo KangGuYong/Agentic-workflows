@@ -12,7 +12,7 @@ from engine.api.body import field, read_json, require_object
 from engine.api.errors import ApiError
 from engine.db import workflows as workflow_db
 from engine.jsondata import safe_text
-from engine.validator import MAX_DSL_BYTES, analyze
+from engine.validator import MAX_DSL_BYTES, Analysis, analyze, compute_before, compute_schemas
 from engine.validator.issues import Issue, error
 
 router = APIRouter()
@@ -80,6 +80,40 @@ def _check_size(dsl: dict[str, Any]) -> None:
     issue = _oversized_issue(dsl)
     if issue is not None:
         raise ApiError(422, issue.code, issue.message)
+
+
+def _node_analysis(analysis: Analysis) -> dict[str, Any]:
+    """Per-node facts the editor cannot work out for itself (3 설계 §4.1).
+
+    `variables` is the guaranteed set: the nodes that have certainly run by the time this one does, which
+    is what autocomplete may offer without a `default()`. `outputSchema` is what a reference into that
+    node can address. `handles` are a branch node's outputs, which depend on its *config* -- a
+    classifier's handles are whatever categories the tenant typed -- so `/node-types` cannot carry them.
+
+    No explicit size cap: `structure.MAX_NODES` (100) already rejects a larger workflow in phase 1, as a
+    LIMIT_EXCEEDED *error*, which leaves `graph` unset and this mapping empty. A second bound here would
+    be unreachable code with an untestable branch.
+
+    Empty when phases 1-2 did not pass: `analyze` stops at the first phase with errors and leaves
+    `graph` unset, so there is nothing to walk. The editor keeps its previous result in that case rather
+    than losing autocomplete the moment a draft is momentarily broken.
+    """
+    graph = analysis.graph
+    if graph is None:
+        return {}
+    before = compute_before(graph)
+    schemas = compute_schemas(graph)
+    return {
+        node_id: {
+            # sorted, because `compute_before` returns frozensets and their iteration order is not
+            # stable between processes: an unsorted list would reshuffle the editor's suggestions on
+            # every revalidation and make two responses impossible to compare.
+            "variables": sorted(before[node_id]),
+            "outputSchema": schemas[node_id],
+            "handles": list(graph.nodes[node_id].spec.handles(graph.nodes[node_id].config)),
+        }
+        for node_id in graph.order
+    }
 
 
 async def _require(conn, workflow_id: str) -> dict[str, Any]:
@@ -179,4 +213,6 @@ async def validate_workflow(workflow_id: str, request: Request) -> dict[str, Any
     if oversized is not None:
         return {"issues": [oversized.to_dict()]}
     analysis = await _analysis(request, draft)
-    return {"issues": [issue.to_dict() for issue in analysis.issues]}
+    # Deliberately not a second `analyze`: these are cheap re-walks of the graph it already built, and
+    # /validate is the editor's hottest endpoint (one call per debounced keystroke burst).
+    return {"issues": [issue.to_dict() for issue in analysis.issues], "nodes": _node_analysis(analysis)}
