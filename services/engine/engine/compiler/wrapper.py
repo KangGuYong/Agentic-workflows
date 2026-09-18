@@ -15,12 +15,13 @@ from langgraph.types import interrupt
 from pydantic import BaseModel
 
 from engine.compiler.routing import RouteDecision, resolve_route
-from engine.compiler.state import RunState
+from engine.compiler.state import OUT_PREFIX, outputs_of
 from engine.dsl.models import Edge, Node, Policy, RetrySpec
 from engine.errors import EngineFault, ErrorCode, NodeError, NodeFailedError, RunCancelled
 from engine.jsondata import check_storable, clip
 from engine.nodes.base import NodeContext, NodeResult, NodeSpec, TemplateField
 from engine.runtime.deps import RunDeps
+from engine.secrets.markers import SecretMarkers
 from engine.templates.render import TemplateRenderError, render_template
 
 MAX_OUTPUT_BYTES = 1_000_000
@@ -47,10 +48,30 @@ def backoff_delay(retry: RetrySpec, failed_tries: int) -> float:
     return min(retry.initialDelaySec * 2 ** (failed_tries - 1), 60.0)
 
 
-def _render(fields: list[TemplateField], outputs: dict[str, Any]) -> dict[str, Any]:
-    rendered = {f.path: render_template(f.source, outputs, f.target) for f in fields}
+def render_fields(fields: list[TemplateField], outputs: dict[str, Any],
+                  secret_nonce: str | None = None) -> dict[str, Any]:
+    """Pure rendering: runs inline or, through RunDeps.render, in the worker's render pool (engine/worker/render.py).
+
+    With a nonce the context gains `secret`, which answers with markers rather than values (2b design
+    §4.3). Without one there is no `secret` binding at all, so `{{ secret.X }}` fails — every node except
+    http_request renders that way.
+    """
+    context = outputs if secret_nonce is None else {**outputs, "secret": SecretMarkers(secret_nonce)}
+    return {f.path: render_template(f.source, context, f.target) for f in fields}
+
+
+async def _rendered(deps: RunDeps, fields: list[TemplateField], outputs: dict[str, Any]) -> dict[str, Any]:
+    if deps.render is None:
+        rendered = render_fields(fields, outputs, deps.secret_nonce)
+    else:
+        try:
+            rendered = await deps.render(fields, outputs, deps.secret_nonce)
+        except TimeoutError as exc:
+            raise NodeError(
+                ErrorCode.TEMPLATE_ERROR, "템플릿 렌더링이 제한 시간을 초과했습니다", retryable=False
+            ) from exc
     try:
-        check_storable(rendered)  # recorded as the attempt's input (jsonb) and passed on to outputs and payloads
+        check_storable(rendered)  # recorded as the attempt's input (jsonb) and passed on to outputs
     except ValueError as exc:
         raise NodeError(ErrorCode.TEMPLATE_ERROR, f"템플릿 결과를 사용할 수 없습니다: {exc}", retryable=False) from exc
     return rendered
@@ -110,7 +131,14 @@ async def _recorded(call: Awaitable[T]) -> T:
 
 
 def _context(
-    plan: NodePlan, deps: RunDeps, state: RunState, exec_index: int, attempt: int, resumed: bool
+    plan: NodePlan,
+    deps: RunDeps,
+    state: dict[str, Any],
+    outputs: dict[str, Any],
+    exec_index: int,
+    attempt: int,
+    resumed: bool,
+    timeout: float,
 ) -> NodeContext:
     node_id = plan.node.id
     lost_tokens = 0
@@ -138,11 +166,16 @@ def _context(
         exec_index=exec_index,
         attempt=attempt,
         inputs=state.get("inputs", {}),
-        outputs=state.get("outputs", {}),
+        outputs=outputs,
         pred_ids=list(plan.pred_ids),
         llm=deps.llm,
         on_token=on_token,
         interrupt=wait_for_human,
+        http=deps.http,
+        secrets=deps.secrets,
+        secret_nonce=deps.secret_nonce,
+        # The node's own share of the attempt deadline: http_request needs it to bound one request.
+        timeout_sec=timeout,
     )
 
 
@@ -157,7 +190,7 @@ async def _succeed(
     defaulted: bool,
 ) -> dict[str, Any]:
     node_id = plan.node.id
-    write: dict[str, Any] = {"outputs": {node_id: result.output}, "exec_counts": {node_id: exec_index}}
+    write: dict[str, Any] = {OUT_PREFIX + node_id: result.output, "exec_counts": {node_id: exec_index}}
     meta: dict[str, Any] = {}
     if decision is not None:
         write["routes"] = {node_id: decision.targets}
@@ -176,12 +209,15 @@ def make_node_fn(plan: NodePlan):
     max_attempts = plan.policy.retry.maxAttempts if plan.policy else 1
     timeout = plan.policy.timeoutSec if plan.policy else None
 
-    async def node_fn(state: RunState, runtime: Runtime[RunDeps]) -> dict[str, Any]:
+    async def node_fn(state: dict[str, Any], runtime: Runtime[RunDeps]) -> dict[str, Any]:
+        # `state` is annotated as a plain dict, not the per-workflow TypedDict: LangGraph infers a
+        # node's input_schema from its first parameter's type hint when it names a TypedDict, and would
+        # then pass only that TypedDict's own fields, hiding every node's out_<id> channel from node_fn.
         deps = runtime.context
         recorder = deps.recorder
         deps.guard.check()
         exec_index = state.get("exec_counts", {}).get(node_id, 0) + 1
-        outputs = state.get("outputs", {})
+        outputs = outputs_of(state)
         loop_counters = state.get("loop_counters", {})
         waited = await _recorded(recorder.find_waiting(node_id, exec_index))
         # An execution that already waited is being resumed (or replayed after a crash) for this whole call:
@@ -194,8 +230,15 @@ def make_node_fn(plan: NodePlan):
 
         for tries in range(1, max_attempts + 1):
             error = None
+            # One deadline for the whole attempt, not one per stage: rendering is tenant-controlled CPU
+            # work and waiting for a free render worker is queueing, so both belong inside the node's
+            # policy budget (2b design §8.4). `timeout_at(None)` is simply no deadline.
+            deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
             try:
-                rendered = _render(fields, outputs)
+                async with asyncio.timeout_at(deadline):
+                    rendered = await _rendered(deps, fields, outputs)
+            except CONTROL_FLOW:  # a dead render pool is the worker's problem, not this attempt's
+                raise
             except Exception as exc:  # noqa: BLE001 - a template failure is this attempt's node error
                 rendered, error = None, _as_node_error(exc, timeout)
             if not started:
@@ -203,8 +246,8 @@ def make_node_fn(plan: NodePlan):
                 started = True
             if error is None:
                 try:
-                    ctx = _context(plan, deps, state, exec_index, attempt, resumed)
-                    async with asyncio.timeout(timeout):
+                    ctx = _context(plan, deps, state, outputs, exec_index, attempt, resumed, timeout)
+                    async with asyncio.timeout_at(deadline):
                         result = await plan.spec.execute(ctx, plan.config, rendered)
                     _check_output(result.output)
                     decision = _decide(plan, result.output, loop_counters)

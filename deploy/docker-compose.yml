@@ -1,0 +1,68 @@
+name: engine
+
+x-engine: &engine
+  build:
+    context: ../services/engine
+  image: engine:local
+  environment:
+    ENGINE_DATABASE_URL: postgresql://engine:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/engine
+    ENGINE_REDIS_URL: redis://redis:6379/0
+    ENGINE_API_TOKEN: ${ENGINE_API_TOKEN:?set ENGINE_API_TOKEN}
+    LANGGRAPH_AES_KEY: ${LANGGRAPH_AES_KEY:?set LANGGRAPH_AES_KEY}
+    ENGINE_SECRET_KEY: ${ENGINE_SECRET_KEY:?set ENGINE_SECRET_KEY}
+    OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:?set OLLAMA_BASE_URL}
+    HTTP_ALLOWLIST: ${HTTP_ALLOWLIST:-}
+    RUN_DATA_RETENTION_DAYS: ${RUN_DATA_RETENTION_DAYS:-30}
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: engine
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: engine
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U engine"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    # Redis holds only live event fan-out and control messages, all of which are rebuilt from Postgres,
+    # so persistence is turned off deliberately.
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    <<: *engine
+    command: ["python", "-m", "engine.api.main"]
+    ports: ["${ENGINE_API_PORT:-8000}:8000"]
+    healthcheck:
+      # /healthz sits behind the token like every other route, so the check has to carry it.
+      test: ["CMD-SHELL", "python -c \"import os,urllib.request as u; r=u.Request('http://localhost:8000/healthz', headers={'Authorization': 'Bearer '+os.environ['ENGINE_API_TOKEN']}); u.urlopen(r, timeout=3)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  worker:
+    <<: *engine
+    command: ["python", "-m", "engine.worker.main"]
+    # Safe to scale: leases, fencing and the reaper's advisory lock were built for more than one.
+    deploy:
+      replicas: ${WORKER_REPLICAS:-1}
+
+volumes:
+  pgdata:

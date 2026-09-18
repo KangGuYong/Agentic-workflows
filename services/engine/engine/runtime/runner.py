@@ -7,7 +7,7 @@ from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 
 from engine.compiler.build import CompiledWorkflow
-from engine.compiler.state import initial_state
+from engine.compiler.state import initial_state, outputs_of
 from engine.errors import ErrorCode, LeaseLost, NodeError, NodeFailedError, RunCancelled
 from engine.jsondata import check_storable
 from engine.nodes.human_approval import resume_output
@@ -96,7 +96,7 @@ async def execute_run(
             "failed",
             error={"code": str(ErrorCode.NODE_FAILED), "message": f"실행이 끝나지 않았습니다: {', '.join(snapshot.next)}"},
         )
-    return RunOutcome("succeeded", outputs=snapshot.values.get("outputs", {}).get("end", {}))
+    return RunOutcome("succeeded", outputs=outputs_of(snapshot.values).get("end", {}))
 
 
 def _resume_target(resume: Any) -> tuple[str, int]:

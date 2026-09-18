@@ -112,7 +112,10 @@ def _check_id(node: Node) -> list[Issue]:
 def _effective_policy(
     node: Node, spec: NodeSpec, config: BaseModel, budget: StepBudget
 ) -> tuple[Policy | None, list[Issue]]:
-    if spec.default_policy is None:
+    # policy_for, not default_policy: http_request drops to one attempt for POST/PATCH, and the
+    # validator is what decides the policy the run actually executes with.
+    default = spec.policy_for(config)
+    if default is None:
         if node.policy:  # an empty policy object means no override, as in merge_policy
             return None, [
                 error("POLICY_NOT_SUPPORTED", f"'{spec.label}' 노드는 실행 정책을 지원하지 않습니다",
@@ -120,7 +123,7 @@ def _effective_policy(
             ]
         return None, []
     try:
-        policy = merge_policy(spec.default_policy, node.policy)
+        policy = merge_policy(default, node.policy)
     except ValidationError as exc:
         return None, pydantic_issues(exc, "INVALID_POLICY", "policy.", nodeId=node.id)
     # A copy, so the node type's default policy is never shared; defaultOutput is replaced by a checked copy below.
