@@ -8,8 +8,18 @@ from engine.events.publish import RedisPublisher, run_channel, run_events
 from engine.events.stream import PING, TERMINAL, _put_dropping_oldest, event_stream, format_event
 from engine.events.writer import append_event
 from engine.llm.scripted import ScriptedLLM
+from tests.conftest import until
 from tests.factories import make_run
 from tests.test_api_runs import _saved
+
+
+async def _finish(conn, run_id: str, type_: str = "run_succeeded", **kwargs):
+    """Append a terminal event *and* move the run to the matching status, in one transaction — exactly
+    what `Worker._terminal` does. The stream re-reads `runs.status` when it meets a terminal event
+    (2b design §8.3), so a terminal event sitting on a row still marked `running` is a shape the engine
+    cannot produce, and a test that builds one is not testing the engine."""
+    await conn.execute("UPDATE runs SET status=%s WHERE id=%s", (type_.removeprefix("run_"), run_id))
+    return await append_event(conn.cursor(), run_id, type_, **kwargs)
 
 
 class _FakePubSub:
@@ -124,7 +134,7 @@ async def test_a_dropped_publish_is_filled_in_from_postgres(api, pool, redis):
         for index in range(1, 4):
             await append_event(conn.cursor(), run_id, "node_started", node_id=f"n{index}",
                                exec_index=1, attempt=1)
-        last = await append_event(conn.cursor(), run_id, "run_succeeded")
+        last = await _finish(conn, run_id, "run_succeeded")
 
     async def publish_last_only():
         await asyncio.sleep(0.3)
@@ -146,7 +156,7 @@ async def test_token_events_carry_no_id(api, pool, redis):
         await publisher.publish(run_id, {"runId": run_id, "type": "node_token", "nodeId": "llm_1",
                                          "payload": {"text": "안"}})
         async with pool.connection() as conn, conn.transaction():
-            event = await append_event(conn.cursor(), run_id, "run_succeeded")
+            event = await _finish(conn, run_id, "run_succeeded")
         await publisher.publish(run_id, event)
 
     task = asyncio.create_task(publish())
@@ -237,7 +247,7 @@ async def test_event_stream_does_not_read_postgres_before_the_subscription_is_co
     whole time (Task 14 item 1 / B1)."""
     run_id = await make_run(pool, status="running")
     async with pool.connection() as conn, conn.transaction():
-        await append_event(conn.cursor(), run_id, "run_succeeded")
+        await _finish(conn, run_id, "run_succeeded")
 
     pubsub = _FakePubSub()
     agen = event_stream(pool, _FakeRedis(pubsub), run_id, after=0, ping_sec=5).__aiter__()
@@ -261,7 +271,7 @@ async def test_a_publish_racing_the_subscription_is_not_lost(api, pool, redis):
 
     async def publish_immediately():
         async with pool.connection() as conn, conn.transaction():
-            event = await append_event(conn.cursor(), run_id, "run_succeeded")
+            event = await _finish(conn, run_id, "run_succeeded")
         await RedisPublisher(redis).publish(run_id, event)
 
     task = asyncio.create_task(publish_immediately())
@@ -300,7 +310,7 @@ async def test_overflowing_the_queue_drops_the_oldest_but_gap_filling_recovers_i
         for _ in range(total - 1):
             events.append(await append_event(conn.cursor(), run_id, "node_started", node_id="n",
                                              exec_index=1, attempt=1))
-        events.append(await append_event(conn.cursor(), run_id, "run_succeeded"))
+        events.append(await _finish(conn, run_id, "run_succeeded"))
 
     publisher = RedisPublisher(redis)
     for event in events:
@@ -360,7 +370,7 @@ async def test_the_stream_ends_exactly_once_at_the_terminal_event(pool, redis):
     yield anything else (Task 14 item 5)."""
     run_id = await make_run(pool, status="running")
     async with pool.connection() as conn, conn.transaction():
-        await append_event(conn.cursor(), run_id, "run_succeeded")
+        await _finish(conn, run_id, "run_succeeded")
 
     agen = event_stream(pool, redis, run_id, after=0, ping_sec=5).__aiter__()
     first = await asyncio.wait_for(agen.__anext__(), 5)
@@ -391,7 +401,7 @@ async def test_gap_fill_range_excludes_the_event_that_triggered_it(pool, redis):
                                       exec_index=1, attempt=1) for i in range(1, 4)]
         fourth = await append_event(conn.cursor(), run_id, "node_started", node_id="n4",
                                     exec_index=1, attempt=1)
-        fifth = await append_event(conn.cursor(), run_id, "run_succeeded")
+        fifth = await _finish(conn, run_id, "run_succeeded")
     assert [event["seq"] for event in skipped] == [1, 2, 3]
 
     publisher = RedisPublisher(redis)
@@ -524,7 +534,7 @@ async def test_replay_and_gap_fill_both_page_through_more_events_than_one_page(p
     async with pool.connection() as conn, conn.transaction():
         for i in range(1, 10):
             await append_event(conn.cursor(), run_id, "node_started", node_id=f"g{i}", exec_index=1, attempt=1)
-        terminal = await append_event(conn.cursor(), run_id, "run_succeeded")  # seq 17
+        terminal = await _finish(conn, run_id, "run_succeeded")  # seq 17
 
     await RedisPublisher(redis).publish(run_id, terminal)
 
@@ -574,7 +584,7 @@ async def test_a_terminal_event_only_in_postgres_ends_the_stream(pool, redis):
     assert first == PING  # subscribed; nothing stored or published yet
 
     async with pool.connection() as conn, conn.transaction():
-        await append_event(conn.cursor(), run_id, "run_succeeded")  # committed, but never published
+        await _finish(conn, run_id, "run_succeeded")  # committed, but never published
 
     chunk = await asyncio.wait_for(agen.__anext__(), 2)  # within a ping interval or two, not "forever"
     assert "run_succeeded" in chunk
@@ -583,29 +593,49 @@ async def test_a_terminal_event_only_in_postgres_ends_the_stream(pool, redis):
         await asyncio.wait_for(agen.__anext__(), 2)
 
 
-async def test_a_dead_pump_ends_the_stream_instead_of_pinging_forever(pool):
-    """A pump whose Redis connection dies mid-stream (proven here with a fake pubsub whose `listen()`
-    raises) must be noticed and end the stream -- not just get flagged at `aclose()` time while pings keep
-    going out forever in between (Task 14 item 1 / A2 / B5)."""
+async def test_a_dead_pump_keeps_serving_from_postgres_instead_of_ending(pool):
+    """Task 13 reverses this test's original contract, on purpose.
+
+    It used to assert that a pump whose Redis connection died mid-stream ended the stream, so the client
+    would reconnect. Every event is durably in `run_events`, so the stream can simply read from there
+    instead: a Redis outage should make the editor slower, not disconnect it (2b design §8.2). What still
+    must not happen is the old bug this test was written for — pinging forever while silently delivering
+    nothing.
+    """
     pubsub = _FakePubSub()
     run_id = await make_run(pool, status="running")
     agen = event_stream(pool, _FakeRedis(pubsub), run_id, after=0, ping_sec=0.05).__aiter__()
     getter = asyncio.ensure_future(agen.__anext__())
     await asyncio.sleep(0.05)
     await pubsub.confirm_subscribed()
-    first = await asyncio.wait_for(getter, 5)
-    assert first == PING
+    assert await asyncio.wait_for(getter, 5) == PING
 
     await pubsub.die(ConnectionError("boom"))
 
     try:
-        for _ in range(6):  # a couple of ping intervals is plenty once the pump has actually died
+        # Written while there is no subscription at all: only the Postgres path can deliver it.
+        async with pool.connection() as conn, conn.transaction():
+            await append_event(conn.cursor(), run_id, "node_started", node_id="n1", exec_index=1,
+                               attempt=1)
+        delivered = None
+        for _ in range(20):
+            chunk = await asyncio.wait_for(agen.__anext__(), 2)
+            if "node_started" in chunk:
+                delivered = chunk
+                break
+        assert delivered is not None, "the stream pinged on without delivering what Postgres had"
+
+        async with pool.connection() as conn, conn.transaction():
+            await _finish(conn, run_id, "run_succeeded")
+        for _ in range(20):
             try:
-                await asyncio.wait_for(agen.__anext__(), 2)
+                chunk = await asyncio.wait_for(agen.__anext__(), 2)
             except StopAsyncIteration:
                 break
+            if "run_succeeded" in chunk:
+                continue
         else:
-            pytest.fail("the stream kept pinging after its pump died instead of ending")
+            pytest.fail("the degraded stream never ended once the run finished")
     finally:
         with contextlib.suppress(Exception):
             await agen.aclose()
@@ -659,7 +689,7 @@ async def test_a_malformed_message_on_the_channel_does_not_kill_the_stream(pool,
     assert fourth == PING
 
     async with pool.connection() as conn, conn.transaction():
-        event = await append_event(conn.cursor(), run_id, "run_succeeded")
+        event = await _finish(conn, run_id, "run_succeeded")
     await RedisPublisher(redis).publish(run_id, event)
 
     chunk = await asyncio.wait_for(agen.__anext__(), 5)
@@ -682,3 +712,211 @@ def test_format_event_sanitizes_a_lone_surrogate_instead_of_crashing_the_encoder
     chunk.encode("utf-8")  # must not raise UnicodeEncodeError
     assert "\ud800" not in chunk
     assert "�" in chunk
+
+
+async def test_the_stream_keeps_delivering_from_postgres_when_redis_is_gone(pool):
+    """Every event is durably in Postgres; a Redis outage must degrade the stream, not end it."""
+
+    class DeadRedis:
+        def pubsub(self):
+            raise ConnectionError("redis is down")
+
+    run_id = await make_run(pool, status="running")
+    stream = event_stream(pool, DeadRedis(), run_id, ping_sec=0.1)
+    collected: list[str] = []
+
+    async def pump():
+        async for chunk in stream:
+            collected.append(chunk)
+
+    task = asyncio.create_task(pump())
+    try:
+        async with pool.connection() as conn, conn.transaction():
+            await append_event(conn.cursor(), run_id, "node_started", node_id="n1", exec_index=1, attempt=1)
+
+        async def seen():
+            return any("node_started" in chunk for chunk in collected)
+
+        await until(seen, timeout=10)
+
+        async with pool.connection() as conn:
+            await conn.execute("UPDATE runs SET status='succeeded' WHERE id=%s", (run_id,))
+        async with pool.connection() as conn, conn.transaction():
+            await append_event(conn.cursor(), run_id, "run_succeeded")
+
+        async with asyncio.timeout(10):
+            await task
+    finally:
+        task.cancel()
+
+    assert any("run_succeeded" in chunk for chunk in collected)
+
+
+async def test_a_redis_outage_mid_stream_falls_back_to_polling(pool, redis):
+    """The subscription can die *after* the stream is up, which is the common shape of an outage: the
+    pump raises, and everything after that has to come from Postgres."""
+    run_id = await make_run(pool, status="running")
+    collected: list[str] = []
+
+    async def pump():
+        async for chunk in event_stream(pool, redis, run_id, ping_sec=0.1):
+            collected.append(chunk)
+
+    task = asyncio.create_task(pump())
+    try:
+        async def subscribed():
+            return any(chunk == PING for chunk in collected)
+
+        await until(subscribed, timeout=10)
+        await redis.aclose()  # the subscription is gone from here on
+
+        async with pool.connection() as conn:
+            await conn.execute("UPDATE runs SET status='succeeded' WHERE id=%s", (run_id,))
+        async with pool.connection() as conn, conn.transaction():
+            await append_event(conn.cursor(), run_id, "run_succeeded")
+
+        async with asyncio.timeout(15):
+            await task
+    finally:
+        task.cancel()
+
+    assert any("run_succeeded" in chunk for chunk in collected)
+
+
+async def test_a_retried_run_keeps_one_stream_open(pool, redis):
+    """Task 15 appends run_queued after run_failed; the stream must not stop at the stale terminal event."""
+    run_id = await make_run(pool, status="failed")
+    async with pool.connection() as conn, conn.transaction():
+        await append_event(conn.cursor(), run_id, "run_failed")
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE runs SET status='queued' WHERE id=%s", (run_id,))
+
+    collected: list[str] = []
+
+    async def pump():
+        async for chunk in event_stream(pool, redis, run_id, ping_sec=0.1):
+            collected.append(chunk)
+
+    task = asyncio.create_task(pump())
+    try:
+        async def replayed():
+            return any("run_failed" in chunk for chunk in collected)
+
+        await until(replayed, timeout=10)
+
+        async with pool.connection() as conn, conn.transaction():
+            await append_event(conn.cursor(), run_id, "run_started")
+        async with pool.connection() as conn:
+            await conn.execute("UPDATE runs SET status='succeeded' WHERE id=%s", (run_id,))
+        async with pool.connection() as conn, conn.transaction():
+            await append_event(conn.cursor(), run_id, "run_succeeded")
+
+        async with asyncio.timeout(10):
+            await task
+    finally:
+        task.cancel()
+
+    text = "".join(collected)
+    assert "run_started" in text and text.rindex("run_succeeded") > text.index("run_failed")
+
+
+async def test_a_terminal_event_on_a_genuinely_finished_run_still_ends_the_stream(pool, redis):
+    """The other half of the re-read: it must not turn every stream into one that never closes."""
+    run_id = await make_run(pool, status="running")
+    collected: list[str] = []
+
+    async def pump():
+        async for chunk in event_stream(pool, redis, run_id, ping_sec=0.1):
+            collected.append(chunk)
+
+    task = asyncio.create_task(pump())
+    try:
+        async with pool.connection() as conn:
+            await conn.execute("UPDATE runs SET status='failed' WHERE id=%s", (run_id,))
+        async with pool.connection() as conn, conn.transaction():
+            await append_event(conn.cursor(), run_id, "run_failed")
+
+        async with asyncio.timeout(10):
+            await task
+    finally:
+        task.cancel()
+
+    assert any("run_failed" in chunk for chunk in collected)
+
+
+async def test_a_stale_terminal_event_found_by_gap_fill_does_not_end_a_requeued_run(pool, redis):
+    """The retry case again, but through the idle path rather than the initial replay: the terminal event
+    is committed and never published, so it is the ping tick's gap-fill that meets it. Both paths have to
+    re-read the status, and only a test that reaches this one proves the second does."""
+    run_id = await make_run(pool, status="running")
+    collected: list[str] = []
+
+    async def pump():
+        async for chunk in event_stream(pool, redis, run_id, ping_sec=0.05):
+            collected.append(chunk)
+
+    task = asyncio.create_task(pump())
+    try:
+        async def subscribed():
+            return any(chunk == PING for chunk in collected)
+
+        await until(subscribed, timeout=10)
+
+        # Committed, never published: only the gap-fill on an idle tick can find it. The run is already
+        # back to `queued`, the way /retry leaves it.
+        async with pool.connection() as conn, conn.transaction():
+            await append_event(conn.cursor(), run_id, "run_failed")
+        async with pool.connection() as conn:
+            await conn.execute("UPDATE runs SET status='queued' WHERE id=%s", (run_id,))
+
+        async def saw_failure():
+            return any("run_failed" in chunk for chunk in collected)
+
+        await until(saw_failure, timeout=10)
+        await asyncio.sleep(0.3)  # several ping intervals: a stream that ended here would stop growing
+        assert not task.done(), "the stream ended on a terminal event of a run that was requeued"
+
+        async with pool.connection() as conn, conn.transaction():
+            await _finish(conn, run_id, "run_succeeded")
+        async with asyncio.timeout(10):
+            await task
+    finally:
+        task.cancel()
+
+    assert any("run_succeeded" in chunk for chunk in collected)
+
+
+async def test_a_lost_subscription_is_retried_rather_than_abandoned_for_good(pool):
+    """Polling Postgres keeps the client served, but it is a fallback, not a destination: a blip must not
+    cost live delivery for the rest of the run. Counted through `pubsub()` calls, since a resubscribe is
+    not otherwise observable — polling delivers the same bytes."""
+
+    class _CountingRedis:
+        def __init__(self, pubsub):
+            self._pubsub = pubsub
+            self.subscriptions = 0
+
+        def pubsub(self):
+            self.subscriptions += 1
+            return self._pubsub
+
+    pubsub = _FakePubSub()
+    fake = _CountingRedis(pubsub)
+    run_id = await make_run(pool, status="running")
+    agen = event_stream(pool, fake, run_id, after=0, ping_sec=0.05).__aiter__()
+    getter = asyncio.ensure_future(agen.__anext__())
+    await asyncio.sleep(0.05)
+    await pubsub.confirm_subscribed()
+    assert await asyncio.wait_for(getter, 5) == PING
+    assert fake.subscriptions == 1
+
+    await pubsub.die(ConnectionError("boom"))
+    try:
+        for _ in range(6):
+            await asyncio.wait_for(agen.__anext__(), 2)
+            if fake.subscriptions > 1:
+                break
+        assert fake.subscriptions > 1, "the stream never tried to get its subscription back"
+    finally:
+        with contextlib.suppress(Exception):
+            await agen.aclose()

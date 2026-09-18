@@ -3493,7 +3493,7 @@ git commit -m "fix(engine): keep the heartbeat off the shared pool" -m "Co-Autho
 - Modify: `services/engine/engine/events/stream.py`
 - Test: `services/engine/tests/test_api_events.py` (append)
 
-- [ ]  **Step 1: Write the failing tests**
+- [x]  **Step 1: Write the failing tests**
 
 Append to `services/engine/tests/test_api_events.py`:
 
@@ -3579,12 +3579,12 @@ async def test_a_retried_run_keeps_one_stream_open(pool, redis):
 
 The second test needs the run's status to be non-terminal at the moment `run_failed` is read and terminal at the moment `run_succeeded` is read. If `run_db.finish` is awkward to call directly, set the status with plain SQL — the point is what the stream does, not which helper sets the column.
 
-- [ ]  **Step 2: Run them to see them fail**
+- [x]  **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/test_api_events.py -q`
 Expected: FAIL — the first stream ends as soon as the pump dies; the second stops at `run_failed`.
 
-- [ ]  **Step 3: Implement both**
+- [x]  **Step 3: Implement both**
 
 In `services/engine/engine/events/stream.py`:
 
@@ -3633,7 +3633,7 @@ async def _is_terminal(pool: AsyncConnectionPool, run_id: str) -> bool:
 TERMINAL_STATUS = {"succeeded", "failed", "cancelled"}
 ```
 
-- [ ]  **Step 4: Correct the contract that is now out of date**
+- [x]  **Step 4: Correct the contract that is now out of date**
 
 `retry_run` in `services/engine/engine/api/routers/runs.py` carries a docstring saying the client has to
 reconnect to see a retried run — that was true until this task and is now wrong. Replace that paragraph
@@ -3649,12 +3649,12 @@ with:
 Run: `grep -rn "reconnect" services/engine/engine` and fix any other comment that promises the old
 behaviour.
 
-- [ ]  **Step 5: Run the tests**
+- [x]  **Step 5: Run the tests**
 
 Run: `uv run pytest tests/test_api_events.py tests/test_api_runs.py -q`
 Expected: PASS, run twice.
 
-- [ ]  **Step 6: Run everything and commit**
+- [x]  **Step 6: Run everything and commit**
 
 Run: `uv run pytest -q` → all pass.
 Run: `uv run ruff check .` → `All checks passed!`
@@ -5018,3 +5018,41 @@ that separates the two behaviours. Four mutants, all killed.
 The dedicated connection is a single point of failure by construction — that is the price of keeping it off
 the pool — so the one thing that must not happen is a drop silently costing every run this worker holds its
 lease. `_beat_connection()` already handled it; nothing proved it did.
+
+### Task 13 — post-review note
+
+**The plan's snippets no longer matched the file.** `_stored_all` became an async generator in Plan 2a's
+own review (paging, so a full replay cannot read 10^5 rows before yielding a byte), but Step 3 still
+writes `for missed in await _stored_all(...)`. Written as given it would have failed on the first idle
+tick.
+
+**The plan missed the half of the outage that matters most.** Its degraded-polling change is in the *ping*
+branch, which only runs once the stream is already up. But `event_stream` also awaited the pump at
+startup — "surface why instead of streaming blind" — so a Redis that was already down made the whole
+request raise, which is exactly the case the plan's own first test builds. Both paths now degrade: a
+subscription that never comes up is logged once and the stream serves from Postgres, same as one that
+dies later.
+
+**Six existing tests broke, and they were the unrealistic ones.** They appended a terminal event to a run
+whose `runs.status` was still `running` — a state the engine cannot produce, since `Worker._terminal`
+writes the status and the `run_{status}` event in **one transaction** and publishes only after it commits.
+Making the status re-read the end condition exposed that. They now go through a `_finish` helper that
+mirrors the worker, so the setup matches what the engine actually writes.
+
+**One test asserted the contract this task reverses.** `test_a_dead_pump_ends_the_stream_instead_of_
+pinging_forever` was correct for Plan 2a and is wrong now, so it was rewritten rather than deleted: it
+keeps the bug it was written for (pinging forever while delivering nothing) and asserts the new behaviour
+around it — the degraded stream delivers what Postgres has, and ends when the run really ends.
+
+**Two mutants survived the first pass.**
+
+- The status re-read could be deleted from the **ping-branch gap-fill** with everything still green: the
+  retry test reaches the *initial replay* path only. The new test commits a terminal event without
+  publishing it, so only an idle tick's gap-fill can find it.
+- `MAX_RESUBSCRIBES` could be set to zero unnoticed — polling delivers the same bytes, so a stream that
+  never tries to get its subscription back is invisible from the outside. Counting `pubsub()` calls makes
+  it observable. This matters beyond tidiness: polling is a fallback, not a destination, and without the
+  retry a one-second blip would cost live delivery for the rest of the run.
+
+Five mutants, all killed. `retry_run`'s docstring promised the old reconnect contract and now describes
+the new one.

@@ -44,6 +44,8 @@ from engine.jsondata import safe_text
 log = logging.getLogger(__name__)
 
 TERMINAL = {"run_succeeded", "run_failed", "run_cancelled"}
+TERMINAL_STATUS = {"succeeded", "failed", "cancelled"}
+MAX_RESUBSCRIBES = 5  # then stay on polling: a Redis outage lasting longer than this is not a blip
 PING = ": ping\n\n"
 QUEUE_MAXSIZE = 1000  # bound a stalled client's backlog; see the module docstring for why dropping is safe
 STORED_PAGE_SIZE = 500  # bound each `_stored` round trip; see `_stored_all` for why this must be paged
@@ -116,6 +118,16 @@ async def _stored_all(pool: AsyncConnectionPool, run_id: str, after: int, before
             return
 
 
+async def _is_terminal(pool: AsyncConnectionPool, run_id: str) -> bool:
+    """A terminal *event* is not the end of the stream if the run has since been retried (2b design §8.3):
+    /retry appends `run_queued` after `run_failed`, and a client that had to reconnect to see it would
+    need code the editor should not have to write. A missing row means the run is gone, which ends the
+    stream too."""
+    async with pool.connection() as conn:
+        row = await (await conn.execute("SELECT status FROM runs WHERE id=%s", (run_id,))).fetchone()
+    return row is None or row["status"] in TERMINAL_STATUS
+
+
 def _put_dropping_oldest(queue: asyncio.Queue[dict[str, Any]], event: dict[str, Any]) -> None:
     """Enqueue `event`, discarding the oldest pending one first if the queue is already full. Never
     blocks: the pump below is the queue's only producer, so nothing else can run between the `full()`
@@ -130,42 +142,70 @@ async def event_stream(pool: AsyncConnectionPool, redis: Any, run_id: str, *, af
                        ping_sec: float = 15.0, queue_maxsize: int = QUEUE_MAXSIZE,
                        page_size: int = STORED_PAGE_SIZE) -> AsyncIterator[str]:
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=queue_maxsize)
-    ready = asyncio.Event()
 
-    async def pump() -> None:
+    async def pump(ready: asyncio.Event) -> None:
         try:
             async for event in run_events(redis, run_id, ready=ready):
                 _put_dropping_oldest(queue, event)
         finally:
             # Unblock the waiter below even if the subscription never came up (a Redis error, or this
             # task being cancelled before it got that far) -- otherwise a failed subscribe would hang the
-            # stream forever instead of surfacing the error.
+            # stream forever instead of waiting on a subscription that will never exist.
             ready.set()
 
-    subscriber = asyncio.create_task(pump())
-    consumed_subscriber_result = False
-    try:
-        await ready.wait()
-        if subscriber.done():
-            consumed_subscriber_result = True
-            await subscriber  # the pump ended before subscribing; surface why instead of streaming blind
+    async def subscribe(wait_sec: float | None = None) -> asyncio.Task:
+        """Start a pump and wait (briefly) for its subscription to be confirmed."""
+        ready = asyncio.Event()
+        task = asyncio.create_task(pump(ready))
+        if wait_sec is None:
+            await ready.wait()
+        else:
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(wait_sec):
+                    await ready.wait()
+        return task
 
+    def discard(task: asyncio.Task, *, warn: bool) -> None:
+        """Retrieve a finished pump's exception so it is neither lost nor reported as un-retrieved."""
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None and warn:
+            # Once, on the first failure: a Redis outage that lasts produces one of these per ping
+            # otherwise, and the stream is still serving the client from Postgres throughout.
+            log.warning("event pump failed for run %s; serving from Postgres", run_id, exc_info=error)
+
+    subscriber = await subscribe()
+    degraded = subscriber.done()
+    if degraded:
+        # No subscription, but every event is durably in Postgres: serve from there rather than failing
+        # the request. A Redis outage should slow the editor down, not break it (2b design §8.2).
+        discard(subscriber, warn=True)
+    resubscribes = 0
+    try:
         last = after
         async for event in _stored_all(pool, run_id, after, page_size=page_size):
             yield format_event(event)
             last = event["seq"]
-            if event["type"] in TERMINAL:
+            if event["type"] in TERMINAL and await _is_terminal(pool, run_id):
                 return
         while True:
             try:
                 event = await asyncio.wait_for(queue.get(), ping_sec)
             except TimeoutError:
                 if subscriber.done():
-                    return  # the subscription is gone; end the stream so the client reconnects
+                    discard(subscriber, warn=not degraded)
+                    degraded = True
+                    if resubscribes < MAX_RESUBSCRIBES:
+                        resubscribes += 1
+                        subscriber = await subscribe(wait_sec=1.0)
+                        degraded = subscriber.done()
+                        if degraded:
+                            discard(subscriber, warn=False)
                 async for missed in _stored_all(pool, run_id, last, page_size=page_size):
                     yield format_event(missed)
                     last = missed["seq"]
-                    if missed["type"] in TERMINAL:
+                    if missed["type"] in TERMINAL and await _is_terminal(pool, run_id):
                         return
                 yield PING
                 continue
@@ -179,20 +219,21 @@ async def event_stream(pool: AsyncConnectionPool, redis: Any, run_id: str, *, af
                 async for missed in _stored_all(pool, run_id, last, seq, page_size=page_size):
                     yield format_event(missed)
                     last = missed["seq"]
+                    if missed["type"] in TERMINAL and await _is_terminal(pool, run_id):
+                        return
             yield format_event(event)
             last = seq
-            if event["type"] in TERMINAL:
+            if event["type"] in TERMINAL and await _is_terminal(pool, run_id):
                 return
     finally:
         if not subscriber.done():
             subscriber.cancel()
-        if not consumed_subscriber_result:
-            try:
-                await subscriber
-            except asyncio.CancelledError:
-                pass
-            except Exception:  # noqa: BLE001
-                # The pump failed (e.g. the Redis connection died mid-stream). The loop above already
-                # ended the response for the client; re-raising here would only turn a clean close into
-                # an unhandled ASGI exception out of `aclose()` -- log it instead (Task 14 review A2).
-                log.warning("event pump failed for run %s", run_id, exc_info=True)
+        try:
+            await subscriber
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001
+            # The pump failed (e.g. the Redis connection died mid-stream). The loop above already
+            # ended the response for the client; re-raising here would only turn a clean close into
+            # an unhandled ASGI exception out of `aclose()` -- log it instead (Task 14 review A2).
+            log.warning("event pump failed for run %s", run_id, exc_info=True)
