@@ -2242,7 +2242,7 @@ git commit -m "feat(engine): redact credential headers by name" -m "Co-Authored-
 - Modify: `services/engine/engine/errors.py`, `services/engine/engine/nodes/registry.py`, `services/engine/tests/test_validator_refs.py` (remove the xfail markers)
 - Test: `services/engine/tests/test_nodes_http_request.py`
 
-- [ ]  **Step 1: Add the error codes**
+- [x]  **Step 1: Add the error codes**
 
 In `services/engine/engine/errors.py`, add to `ErrorCode` (MVP design 8.2 already names the first three):
 
@@ -2254,7 +2254,7 @@ In `services/engine/engine/errors.py`, add to `ErrorCode` (MVP design 8.2 alread
     SECRET_NOT_FOUND = "SECRET_NOT_FOUND"
 ```
 
-- [ ]  **Step 2: Write the failing tests**
+- [x]  **Step 2: Write the failing tests**
 
 Create `services/engine/tests/test_nodes_http_request.py`:
 
@@ -2493,12 +2493,12 @@ def test_non_idempotent_methods_are_tried_once(method):
     assert policy.retry.maxAttempts == 1
 ```
 
-- [ ]  **Step 3: Run them to see them fail**
+- [x]  **Step 3: Run them to see them fail**
 
 Run: `uv run pytest tests/test_nodes_http_request.py -q`
 Expected: FAIL — `ModuleNotFoundError: No module named 'engine.nodes.http_request'`.
 
-- [ ]  **Step 4: Implement the node**
+- [x]  **Step 4: Implement the node**
 
 Create `services/engine/engine/nodes/http_request.py`:
 
@@ -2682,7 +2682,7 @@ def _retryable(status: int) -> bool:
     return status == 429 or 500 <= status < 600
 ```
 
-- [ ]  **Step 5: Register the node and honour `policy_for`**
+- [x]  **Step 5: Register the node and honour `policy_for`**
 
 In `services/engine/engine/nodes/registry.py`, import `HttpRequestNode` and add `HttpRequestNode(),` to `default_registry()`.
 
@@ -2699,11 +2699,11 @@ and find where the validator resolves a node's effective policy (`engine/validat
 Run: `grep -rn "default_policy" services/engine/engine`
 and update every place that reads `spec.default_policy` to decide a node's *effective* policy. The `/node-types` route keeps using `default_policy` — it describes the palette, not one configured node.
 
-- [ ]  **Step 6: Un-xfail the validator tests**
+- [x]  **Step 6: Un-xfail the validator tests**
 
 Remove the two `@pytest.mark.xfail` markers added in Task 7.
 
-- [ ]  **Step 7: Run the tests**
+- [x]  **Step 7: Run the tests**
 
 Run: `uv run pytest tests/test_nodes_http_request.py tests/test_validator_refs.py -q`
 Expected: PASS.
@@ -2711,7 +2711,7 @@ Expected: PASS.
 Run: `uv run pytest tests/test_api_basics.py -q`
 Expected: PASS — `/node-types` now returns nine types. Update the expected set in `test_node_types_describe_the_registry` to include `http_request`.
 
-- [ ]  **Step 8: Run everything and commit**
+- [x]  **Step 8: Run everything and commit**
 
 Run: `uv run pytest -q` → all pass.
 Run: `uv run ruff check .` → `All checks passed!`
@@ -4852,3 +4852,49 @@ one header collapsing to a single redacted entry. Four mutants, all killed.
 The substring case is the one worth keeping in mind: blanket matching looks safer and is not. It hides
 ordinary fields from whoever is debugging a failed run, which is the cost that makes people turn
 redaction off.
+
+### Task 9 — post-review note
+
+**One real gap, found by mutation: nothing checked that the *validator* honours `policy_for`.** Step 5
+changes `structure.py` to resolve a node's effective policy through `spec.policy_for(config)`, but the
+plan's tests only call `HttpRequestNode().policy_for(...)` directly. Reverting `structure.py` to
+`spec.default_policy` left all 1,303 tests green — and that revert is precisely the bug `policy_for`
+exists to prevent: a POST would validate and execute with three attempts, so a retry can double a
+payment (MVP design 5.4). `tests/test_validator_refs.py` now resolves the policy through `analyze` for
+all six methods, and checks that an explicit `policy` on the node still overrides the per-method default.
+
+**Task 7's two equivalent mutants are still equivalent, and now provably so.** `http_request`'s template
+fields are exactly `url`, `headers.*` and `body` — all three are on the allowed list — so there is no
+`http_request` field that witnesses the field rule, which is what Task 7's note asked this task to check.
+No other node type produces a `url`/`body`/`headers.*` field either, so the node-type rule has no witness
+of its own. The two halves of that condition remain each other's only evidence, by construction rather
+than by oversight. Anyone adding a `body` or `url` template field to another node type breaks that
+assumption silently: the node-type check is what would then be doing the work, and no test would notice
+if it were removed.
+
+**Added beyond the plan.** The plan's tests cover the happy path of redaction; the cases that actually
+leak are on the failure paths and the boundaries:
+
+- a 5xx body quoting the credential it just rejected (the node raises before returning output, so the
+  *message* is what must not carry it);
+- a secret reflected into a response header that is not a known credential name (`x-echo`), which
+  header-name redaction does not cover;
+- a foreign-nonce marker in the rendered text, which must not make the node resolve a secret at all;
+- a missing secret stopping the request from being sent, rather than putting the marker on the wire;
+- the idempotency key differing between runs as well as between execution points;
+- a secret containing CRLF, against the **real** `GuardedClient`. This one pins an ordering that spans
+  two modules: the node substitutes before calling the client, so the true value meets the client's
+  RFC 7230 value check and is refused as `EgressBlocked("header")`. Substituting after that check would
+  smuggle a second header line onto the wire, and no single-module test would see it. The assertion names
+  the category, because an allowlist or DNS refusal is also `HTTP_BLOCKED` and would otherwise let the
+  test pass with the header check deleted.
+
+**14 mutants, 12 killed, 2 equivalent as above.**
+
+**One unexplained stall.** The full suite hung once at the start of this task (>500s against a usual 80s)
+and could not be reproduced on the next four runs. Both stalls so far followed a pytest run that had been
+killed mid-flight, which fits a leftover backend holding a lock that `TRUNCATE` then waits for forever —
+unconfirmed, since the evidence is gone by the time it is noticed. `tests/conftest.py` now sets
+`lock_timeout = '15s'` before the truncate, so the next occurrence fails loudly with a lock error instead
+of hanging the whole suite silently (plan convention 5: bound every wait). If a stall happens again
+*without* a lock error, the cause is something else and this note is wrong.

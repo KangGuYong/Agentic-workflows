@@ -75,6 +75,10 @@ class NodeSpec(ABC):
     category: ClassVar[str]
     Config: ClassVar[type[BaseModel]]
     default_policy: ClassVar[Policy | None] = None  # None: the node does not accept a policy
+
+    def policy_for(self, config: BaseModel) -> Policy | None:
+        """Effective default policy for this config. Only http_request varies it (by method)."""
+        return self.default_policy
     side_effects: ClassVar[bool] = False
     is_branch: ClassVar[bool] = False
 

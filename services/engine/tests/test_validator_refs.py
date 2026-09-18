@@ -342,11 +342,10 @@ def test_multibyte_text_counts_in_bytes():
 
 # --- secret references (2b design §4.4): one door, opened in Task 7 ----------------------------------
 #
-# Every case below needs the `http_request` node type, which lands in Task 9. Until then `analyze` stops
-# at UNKNOWN_NODE_TYPE and never reaches reference checking, so all four are xfail(strict=True) and the
-# markers come off in Task 9. The "allowed" pair asserts UNKNOWN_NODE_TYPE is absent too: without that
-# they would pass today for the wrong reason — no reference check ran, so of course no SECRET_NOT_ALLOWED
-# was reported — and strict xfail would flag them as XPASS rather than guard anything.
+# The "allowed" pair asserts UNKNOWN_NODE_TYPE is absent as well as SECRET_NOT_ALLOWED. That is not
+# redundant: while `http_request` did not exist (Tasks 7-8), `analyze` stopped at UNKNOWN_NODE_TYPE and
+# never reached reference checking, so the SECRET_NOT_ALLOWED assertion alone passed for the wrong
+# reason. Keeping both means the pair still fails if the node type ever stops resolving.
 
 HTTP_DSL = {
     "version": "1",
@@ -360,19 +359,14 @@ HTTP_DSL = {
               {"id": "e2", "source": "http_1", "target": "end"}],
 }
 
-TASK_9 = pytest.mark.xfail(reason="http_request lands in Task 9", strict=True)
-
-
 def _codes_of(dsl: dict) -> set[str]:
     return {issue.code for issue in analyze(dsl).issues}
 
 
-@TASK_9
 def test_a_secret_is_allowed_in_an_http_request_url():
     assert not _codes_of(HTTP_DSL) & {"SECRET_NOT_ALLOWED", "UNKNOWN_NODE_TYPE"}
 
 
-@TASK_9
 def test_a_secret_is_allowed_in_an_http_request_header_and_body():
     dsl = copy.deepcopy(HTTP_DSL)
     dsl["nodes"][1]["config"] = {
@@ -395,7 +389,6 @@ def test_a_secret_in_an_llm_prompt_is_still_refused():
     assert "SECRET_NOT_ALLOWED" in _codes_of(dsl)
 
 
-@TASK_9
 def test_a_bare_secret_reference_is_refused_even_in_http_request():
     dsl = copy.deepcopy(HTTP_DSL)
     dsl["nodes"][1]["config"]["url"] = "https://api.example.com/{{ secret }}"
@@ -403,10 +396,34 @@ def test_a_bare_secret_reference_is_refused_even_in_http_request():
     assert "SECRET_NOT_ALLOWED" in _codes_of(dsl)
 
 
-@TASK_9
 def test_a_nested_secret_reference_is_refused_even_in_http_request():
     """`secret.A.B` would resolve the marker string's own attribute, not a secret: exactly one label."""
     dsl = copy.deepcopy(HTTP_DSL)
     dsl["nodes"][1]["config"]["url"] = "https://api.example.com/{{ secret.API_TOKEN.upper }}"
 
     assert "SECRET_NOT_ALLOWED" in _codes_of(dsl)
+
+
+def _http_dsl(method: str, **config) -> dict:
+    dsl = copy.deepcopy(HTTP_DSL)
+    dsl["nodes"][1]["config"] = {"method": method, "url": "https://api.example.com/x",
+                                 "headers": {}, **config}
+    return dsl
+
+
+@pytest.mark.parametrize(("method", "attempts"), [("GET", 3), ("PUT", 3), ("DELETE", 3), ("HEAD", 3),
+                                                  ("POST", 1), ("PATCH", 1)])
+def test_the_resolved_policy_comes_from_policy_for_not_the_class_default(method, attempts):
+    """The node's own `policy_for` is not enough: the validator is what decides the policy a run
+    executes with, and reading `default_policy` there would give a POST three attempts — which is how a
+    retry doubles a payment (MVP design 5.4)."""
+    node = analyze(_http_dsl(method)).graph.nodes["http_1"]
+
+    assert node.policy.retry.maxAttempts == attempts
+
+
+def test_an_explicit_policy_still_overrides_the_per_method_default():
+    dsl = _http_dsl("POST")
+    dsl["nodes"][1]["policy"] = {"retry": {"maxAttempts": 2}}
+
+    assert analyze(dsl).graph.nodes["http_1"].policy.retry.maxAttempts == 2

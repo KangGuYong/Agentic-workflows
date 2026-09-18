@@ -78,6 +78,10 @@ async def pool(db_url: str) -> AsyncIterator[AsyncConnectionPool]:
                                    kwargs={"row_factory": dict_row, "autocommit": True}) as p:
         await p.open(wait=True)
         async with p.connection() as conn:
+            # TRUNCATE needs ACCESS EXCLUSIVE and waits for it forever by default, so a connection left
+            # behind by an earlier run (a killed pytest, a psql session) hangs the entire suite here with
+            # no output at all. Fail loudly instead -- plan convention 5: bound every wait.
+            await conn.execute("SET lock_timeout = '15s'")
             await conn.execute(f"TRUNCATE {', '.join(APP_TABLES)} CASCADE")
             await conn.execute(f"TRUNCATE {', '.join(CHECKPOINT_TABLES)} CASCADE")
         yield p
