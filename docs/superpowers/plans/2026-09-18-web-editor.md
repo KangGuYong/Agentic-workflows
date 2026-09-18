@@ -6,7 +6,7 @@
 
 **Architecture:** A Next.js App Router app whose **server** holds `ENGINE_API_TOKEN` and proxies every engine call at `/api/engine/*`. The browser never sees the token and never talks to the engine directly — it cannot, because `EventSource` has no way to send an `Authorization` header and the engine has no CORS middleware. The editor's source of truth is a plain DSL document; React Flow renders a view derived from it, and every edit goes through a pure command so undo/redo and autosave are one mechanism, not three.
 
-**Tech Stack:** Node 22, pnpm, Next.js 15 (App Router), React 19, TypeScript strict, Zustand, `@xyflow/react`, ELKjs, `@rjsf/core` + `@rjsf/validator-ajv8`, CodeMirror 6, vitest + `@testing-library/react`, Playwright.
+**Tech Stack:** Node 22, pnpm, Next.js 16 (App Router), React 19, TypeScript strict, Zustand, `@xyflow/react`, ELKjs, `@rjsf/core` + `@rjsf/validator-ajv8`, CodeMirror 6, vitest + `@testing-library/react`, Playwright.
 
 **Design:** `docs/superpowers/specs/2026-09-18-web-editor-design.md` (이하 **3 설계**)
 **선행:** Plan 1 엔진 코어(PR #1), Plan 2a 런타임 코어(PR #2), Plan 2b HTTP·보안·운영(PR #4)
@@ -87,10 +87,10 @@ git commit -m "<subject>" -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.c
 
 This is a spike: throwaway code, kept only long enough to answer the question, then deleted. Record the answer in the post-review note.
 
-- [ ] Create a scratch Next.js app (or `apps/web` itself, before Task 1's tests exist).
-- [ ] Add a route handler that returns a `ReadableStream` emitting `data: <n>\n\n` once per second for ten seconds, with `Content-Type: text/event-stream`.
-- [ ] Add a second route handler that **proxies** the first through `fetch`, passing `response.body` straight to the `Response` constructor.
-- [ ] Measure arrival times with `curl -N` against both, in `next dev` **and** in `next build && next start`. Production is the one that matters; dev has different buffering.
+- [x] Create a scratch Next.js app (or `apps/web` itself, before Task 1's tests exist).
+- [x] Add a route handler that returns a `ReadableStream` emitting `data: <n>\n\n` once per second for ten seconds, with `Content-Type: text/event-stream`.
+- [x] Add a second route handler that **proxies** the first through `fetch`, passing `response.body` straight to the `Response` constructor.
+- [x] Measure arrival times with `curl -N` against both, in `next dev` **and** in `next build && next start`. Production is the one that matters; dev has different buffering.
 
 ```ts
 // app/api/spike/route.ts
@@ -114,17 +114,17 @@ export async function GET() {
 }
 ```
 
-- [ ] **Answer these four questions in writing:**
+- [x] **Answer these four questions in writing:**
   1. Do chunks arrive one per second, or all at once at the end? In dev and in prod?
   2. Does proxying through `fetch` preserve that, or does the proxy buffer?
   3. Is `Last-Event-ID` visible in the proxied request's headers?
   4. When the client disconnects, does the upstream `fetch` get aborted? (If not, a closed browser tab leaves an engine SSE connection — and its Redis pubsub connection — open forever. That is a resource leak the engine cannot defend against.)
-- [ ] For (4), if `AbortSignal` is not wired automatically, prove that passing `request.signal` into the upstream `fetch` does it.
-- [ ] Delete the spike code. Write the post-review note with the measured numbers.
+- [x] For (4), if `AbortSignal` is not wired automatically, prove that passing `request.signal` into the upstream `fetch` does it.
+- [x] Delete the spike code. Write the post-review note with the measured numbers.
 
 **If chunks do not stream:** try `export const runtime = "nodejs"` (should already be set), removing any `compress` middleware, and check whether a reverse proxy in the way is buffering. If Next.js itself buffers in production, the fallback in 3 설계 §12 applies: a separate tiny proxy process. Do not proceed to Task 2 until this is answered.
 
-- [ ] Commit the note only (no code).
+- [x] Commit the note only (no code).
 
 ---
 
@@ -647,3 +647,82 @@ Against the real stack (3 설계 §11). `playwright.config.ts` has `webServer` d
 ## Post-review notes
 
 각 Task를 끝낸 뒤, 계획이 틀렸던 점·mutation 결과·측정값을 여기에 적는다. Plan 2b와 같은 규칙이다: **계획서의 코드는 출발점이지 베낄 것이 아니다.**
+
+### Task 0 — spike: does SSE stream through a Next.js Route Handler?
+
+**Answer: yes, in dev and in production, and the proxy preserves it — but only if `request.signal` is
+passed to the upstream `fetch`.** Measured on Next.js **16.3.5** (the current `latest`; the plan had
+guessed 15) with Node 22.22.2, two route handlers (`/api/spike` producing ten events one second apart,
+`/api/proxy` forwarding it) and `curl -N`.
+
+**Q1 — do chunks arrive one per second, or all at once?** One per second, both modes.
+
+| | arrival gaps |
+|---|---|
+| dev, direct | 1.000, 1.001, 1.001, 1.001, 1.002, 1.001, 1.002, 1.001, 1.001 s |
+| prod, direct | 0.996, 1.002, 1.002, 1.002, 1.002, 1.002, 1.002, 1.002, 1.002 s |
+| dev, proxied | 0.994, 1.000, 1.000, 1.000, 1.001, 1.001, 0.999, 1.002, 1.000 s |
+| prod, proxied | 0.994, 1.000, 1.001, 1.001, 1.000, 1.000, 1.001, 1.000, 1.001 s |
+
+No `next.config` streaming option was needed. `export const runtime = "nodejs"` and
+`export const dynamic = "force-dynamic"` were set from the start and not ablated, so they stay in the
+Task 2 code as written; whether they are strictly required is unknown and not worth a cycle to find out.
+
+**A measurement trap, recorded because it cost a run and would fool anyone repeating this:** the first
+attempt piped curl through `grep -v '^$'` before timestamping, and every event appeared to arrive within
+62 ms — the classic "Next.js buffers SSE" symptom. It was `grep`'s own block buffering on a pipe, not
+Next.js. Timestamp the lines in the same shell loop that reads them, or use `grep --line-buffered`. A
+spike that "proves" buffering with a buffering tool in the pipeline proves nothing.
+
+**Q2 — does proxying through `fetch` preserve it?** Yes. `new Response(upstream.body, …)` hands the
+body through without reading it; the gaps above are unchanged through the proxy.
+
+**Q3 — is `Last-Event-ID` visible upstream?** Yes. `curl -H 'Last-Event-ID: 42'` on the proxy produced
+`{"n":0,"lastEventId":"42"}` from the upstream, in dev and prod. It is an ordinary request header; the
+proxy has to copy it deliberately (it is not in any default forward set), which is what the Task 2 test
+pins.
+
+**Q4 — does a client disconnect abort the upstream? Only with `request.signal`.** This is the one that
+changes the code, and the control case is what makes it convincing. `curl` was killed at 3 s of a 10 s
+stream; the upstream handler logged whether its `ReadableStream.cancel` ran.
+
+| case | upstream outcome |
+|---|---|
+| proxy **with** `signal: request.signal` (prod) | `upstream cancelled reason=ResponseAborted` at +2.995 s |
+| proxy **without** the signal (prod) | no cancel; ran to completion, `upstream done` at +10.004 s |
+| direct, no proxy (prod) | `upstream cancelled reason=ResponseAborted` at +2.991 s |
+
+Dev behaved identically (cancelled at +2.986 s with the signal, never without it).
+
+So the abort chain is browser → Next (which does propagate a disconnect into a route handler's
+`ReadableStream.cancel`) → `request.signal` → upstream `fetch` → engine. Drop the signal and the chain
+breaks at the proxy.
+
+**Why the control case matters more than it looks.** The spike's stream is finite, so the no-signal case
+still ended — after ten seconds. The engine's stream for a live run is not finite: it ends at the
+terminal event. A closed tab on a `waiting` run would hold an engine SSE connection, and with it one
+Redis pubsub connection and the Postgres connection it borrows while paging, for as long as the run
+waits — up to the 30-day waiting limit (MVP 문서 11.1). `engine/events/stream.py`'s own docstring says
+nothing in that module caps how many streams can be open at once, so nothing on the engine side would
+have caught it. **Task 2's `signal: request.signal` is a resource-leak fix, not a tidiness one, and its
+test is not optional.**
+
+**Bonus, outside the four questions but it de-risks Task 2's central snippet.** The same spike proxied a
+`POST` with `body: request.body` and `duplex: "half"`:
+
+- It works on Node 22 / undici. The `@ts-expect-error` on `duplex` is still needed — the DOM types have
+  not caught up.
+- The upstream's **409 passed through as 409** and the JSON body arrived intact.
+- A client-supplied `Authorization: Bearer ATTACKER` was **dropped** and the upstream saw
+  `Bearer spike-token`: the header allowlist in the Task 2 sketch does what it claims.
+- `Idempotency-Key: abc-123` was forwarded.
+
+**Plan changes from this task**
+
+- Tech Stack: Next.js 15 → **16** (16.3.5 is `latest`; React 19 peer range is unchanged, so nothing else
+  in the plan moves). 3 설계 §3.1 updated to match.
+- No fallback from 3 설계 §12 is needed. The "separate lightweight proxy process" contingency is dead —
+  delete it from consideration rather than carrying it as a live risk.
+
+**Cost:** one throwaway app, 447 MB of `node_modules`, deleted. Nothing was committed but this note.
+

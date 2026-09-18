@@ -72,7 +72,7 @@ services/engine/           §2의 엔진 변경 2건
      엔진 API (services/engine)
 ```
 
-- **Next.js 15 App Router**, React 19, TypeScript strict, pnpm, Node 22.
+- **Next.js 16 App Router**, React 19, TypeScript strict, pnpm, Node 22.
 - 에디터 화면은 클라이언트 컴포넌트다. 캔버스 상태가 전부 클라이언트에 있으므로 서버 컴포넌트로 쪼갤 이득이 없다. 서버 컴포넌트는 첫 로드의 워크플로 목록·상세에만 쓴다.
 - 상태는 **Zustand** 한 스토어의 슬라이스 네 개: `graph`(DSL 문서·선택·undo 스택), `validation`(마지막 분석 결과), `save`(revision·저장 상태), `run`(실행 상태·노드 상태·이벤트).
 
@@ -307,7 +307,7 @@ E2E에서 LLM은 문제다. 온프렘 Ollama를 CI에 둘 수 없다. **해결**
 
 | 위험 | 대응 |
 |---|---|
-| **Next.js Route Handler가 SSE를 버퍼링한다** — 실행 화면이 통째로 동작하지 않는다 | Task 0 스파이크로 먼저 증명. 실패 시 대안: Node 런타임 강제(`export const runtime = "nodejs"`)와 `dynamic = "force-dynamic"`, 그래도 안 되면 프록시를 별도 경량 서버로 분리 |
+| ~~**Next.js Route Handler가 SSE를 버퍼링한다**~~ — **해소됨(Task 0)**. Next 16.3.5에서 dev·prod 모두 1초 간격 그대로 흘렀고 프록시도 보존했다. 대신 **`request.signal`을 상류 `fetch`에 넘기지 않으면 클라이언트가 끊겨도 엔진 스트림이 살아남는다** — 탭을 닫을 때마다 Redis pubsub 연결이 새는 실제 결함 | Task 2에서 `signal`을 넘기고 그 동작을 테스트로 고정한다 |
 | CodeMirror 6 + 한국어 IME + 칩 데코레이션이 충돌한다 | Task 10에서 IME 입력을 명시적으로 테스트한다. 실패 시 칩 렌더링을 포기하고 구문 강조만 남긴다 — 자동완성이 칩보다 중요하다 |
 | `/validate` 응답의 `outputSchema`가 커서 자동 저장 주기마다 수백 KB가 오간다 | 노드 200개 상한(§4.1)과 디바운스 공유. 그래도 크면 `outputSchema`를 요청 파라미터로 선택적으로 만든다 |
 | RJSF의 번들 크기 | 에디터 화면에서만 동적 import 한다 |
