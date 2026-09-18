@@ -4778,3 +4778,14 @@ the retention sweep's real query, via `EXPLAIN` against a populated `runs` table
 ignores costs write throughput and misleads every future reader. The review lens assigned to this reported
 "cannot verify without populated runs table" instead of populating one, and presented static analysis as
 if it were verification — the finding is real but unproven either way.
+
+**Update (2026-09-18).** A parallel session unblocked this: `3679c48` added `ENGINE_TEST_DATABASE_URL` /
+`ENGINE_TEST_REDIS_URL`, so the integration tests run against an already-running server where Docker is
+not available. Running them found that
+`test_a_secret_name_longer_than_the_api_allows_is_refused` **had never executed** — it used
+`async with pool.connection() as conn, pytest.raises(CheckViolation):`, and `pytest.raises` is a plain
+context manager, so it cannot be the second item of an `async with`. Fixed in the same commit. That is the
+predicted failure arriving exactly as predicted: a test written while the only harness that could run it
+was unavailable, asserted to be green on the strength of `-m "not integration"`.
+
+The `EXPLAIN` check on `runs_retention_idx` is **still owed** — nothing has run it yet.
