@@ -13,5 +13,9 @@ def make_pool(url: str, *, min_size: int = 1, max_size: int = 10) -> AsyncConnec
     """
     return AsyncConnectionPool(
         url, min_size=min_size, max_size=max_size, open=False,
+        # Shorter than WORKER_LEASE_SEC on purpose (2b design §8.1). psycopg's default is 30s, which
+        # equals the default lease: a caller queued behind a full pool can wait out the very lease it is
+        # trying to extend and never learn it lost it. A checkout that fails and says so is better.
+        timeout=5.0,
         kwargs={"row_factory": dict_row, "autocommit": True},
     )

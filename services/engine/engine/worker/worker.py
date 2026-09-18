@@ -9,6 +9,7 @@ import uuid
 from typing import Any
 
 from psycopg import AsyncConnection
+from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from engine.compiler.build import CompiledWorkflow, WorkflowInvalid, compile_workflow
@@ -60,6 +61,10 @@ class Worker:
         self._cancelled: set[str] = set()  # run ids the heartbeat cancelled for an authoritative cancel
         self._tasks: set[asyncio.Task] = set()
         self._listen: AsyncConnection | None = None
+        # The heartbeat never queues behind the shared pool: losing a healthy run's lease to pool
+        # starvation is the one failure this connection exists to prevent (2b design §8.1).
+        self._beat_conn: AsyncConnection | None = None
+        self._beat_lock = asyncio.Lock()
         self._running = False
 
     # ------------------------------------------------------------------ lifecycle
@@ -67,6 +72,7 @@ class Worker:
     async def start(self) -> None:
         self._running = True
         await self._reconnect_listen()
+        self._beat_conn = await self._connect()
         self._spawn(self._claim_loop())
         self._spawn(self._control_loop())
         await self._reaper.start()
@@ -92,6 +98,8 @@ class Worker:
                             self.owner, len(pending), STOP_TIMEOUT_SEC)
         if self._listen is not None:
             await self._bounded(self._listen.close(), "listen connection")
+        if self._beat_conn is not None:
+            await self._bounded(self._beat_conn.close(), "heartbeat connection")
 
     async def _bounded(self, awaitable, what: str) -> None:
         try:
@@ -100,6 +108,18 @@ class Worker:
             log.warning("worker %s: %s did not stop within %ss", self.owner, what, STOP_TIMEOUT_SEC)
         except Exception:  # shutdown is best-effort: nothing here is worth failing the caller over
             log.warning("worker %s: %s failed to stop", self.owner, what, exc_info=True)
+
+    async def _connect(self) -> AsyncConnection:
+        return await AsyncConnection.connect(self._config.database_url, autocommit=True,
+                                             row_factory=dict_row)
+
+    async def _beat_connection(self) -> AsyncConnection:
+        """The heartbeat's own connection, reconnected in place if it broke. A single connection is a
+        single point of failure, so a drop must be recovered from rather than fatal: without this, one
+        dropped connection silently costs every run this worker holds its lease."""
+        if self._beat_conn is None or self._beat_conn.closed:
+            self._beat_conn = await self._connect()
+        return self._beat_conn
 
     def _nonce(self, run_id: str) -> str | None:
         """The per-run secret marker nonce, or None when no key is configured (ENGINE_DEV_INSECURE).
@@ -223,11 +243,13 @@ class Worker:
         """
         interval = self._config.heartbeat_sec
         last = time.monotonic()
+        last_ok = time.monotonic()
         while True:
             await asyncio.sleep(interval)
             now = time.monotonic()
             try:
-                async with self._pool.connection() as conn:
+                async with self._beat_lock:  # one connection, so one beat at a time
+                    conn = await self._beat_connection()
                     beat = await run_db.heartbeat(conn, run_id=run_id, owner=self.owner,
                                                   lease_sec=self._config.lease_sec,
                                                   delta_ms=int((now - last) * 1000))
@@ -238,8 +260,17 @@ class Worker:
                 # executing regardless, and needs its lease extended on the next tick or a healthy run
                 # gets reclaimed by the reaper out from under it.
                 log.warning("heartbeat failed for run %s; retrying next interval", run_id, exc_info=True)
+                if now - last_ok > self._config.lease_sec:
+                    # The lease has certainly expired by now and the reaper may already have handed this
+                    # run to someone else. Stop rather than keep executing against a checkpoint we no
+                    # longer own (2b design §8.1).
+                    log.error("no heartbeat for run %s in %.0fs; giving up the run", run_id, now - last_ok)
+                    guard.lose_lease()
+                    task.cancel()
+                    return
                 continue
             last = now
+            last_ok = now
             if beat is None:  # the lease is gone: stop the run and write nothing (design 6.2)
                 guard.lose_lease()
                 task.cancel()  # don't wait for the next node boundary; the new owner may already be running

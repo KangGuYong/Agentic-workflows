@@ -146,7 +146,11 @@ async def worker_factory(pool, redis, db_url):
     async def make(llm, *, owner: str = "worker-1", **overrides):
         import dataclasses
 
-        config = dataclasses.replace(load_config(), claim_poll_sec=0.2, heartbeat_sec=0.2, **overrides)
+        # Defaults a test can override: spelling one of these in `overrides` used to be a TypeError
+        # ("multiple values for keyword argument"), which is exactly what a test tuning the heartbeat
+        # wants to do.
+        fast = {"claim_poll_sec": 0.2, "heartbeat_sec": 0.2}
+        config = dataclasses.replace(load_config(), **{**fast, **overrides})
         worker = Worker(config, pool, redis, owner=owner, llm=llm)
         await worker.start()
         started.append(worker)

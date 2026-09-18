@@ -3279,7 +3279,7 @@ git commit -m "feat(engine): purge expired run data and orphan checkpoints" -m "
 - Modify: `services/engine/engine/worker/worker.py`, `services/engine/engine/db/pool.py`
 - Test: `services/engine/tests/test_worker_lease.py` (append)
 
-- [ ]  **Step 1: Write the failing tests**
+- [x]  **Step 1: Write the failing tests**
 
 Append to `services/engine/tests/test_worker_lease.py`:
 
@@ -3377,13 +3377,13 @@ class _SlowLLM:
         raise AssertionError("should have been cancelled")
 ```
 
-- [ ]  **Step 2: Run them to see them fail**
+- [x]  **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/test_worker_lease.py -q`
 Expected: FAIL — `AttributeError: 'Worker' object has no attribute '_beat_conn'`; the lease dies while the
 pool is held; and the last test times out because a failing heartbeat currently just keeps retrying.
 
-- [ ]  **Step 3: Give the pool a shorter acquisition timeout**
+- [x]  **Step 3: Give the pool a shorter acquisition timeout**
 
 In `services/engine/engine/db/pool.py`, pass `timeout=5.0` to `AsyncConnectionPool` (and document it):
 
@@ -3393,7 +3393,7 @@ In `services/engine/engine/db/pool.py`, pass `timeout=5.0` to `AsyncConnectionPo
     timeout=5.0,
 ```
 
-- [ ]  **Step 4: Implement the dedicated connection**
+- [x]  **Step 4: Implement the dedicated connection**
 
 In `services/engine/engine/worker/worker.py`:
 
@@ -3468,12 +3468,12 @@ and:
         return self._beat_conn
 ```
 
-- [ ]  **Step 5: Run the tests**
+- [x]  **Step 5: Run the tests**
 
 Run: `uv run pytest tests/test_worker_lease.py tests/test_worker_run.py tests/test_worker_reaper.py -q`
 Expected: PASS, run twice.
 
-- [ ]  **Step 6: Run everything and commit**
+- [x]  **Step 6: Run everything and commit**
 
 Run: `uv run pytest -q` → all pass.
 Run: `uv run ruff check .` → `All checks passed!`
@@ -4997,3 +4997,24 @@ bounded like the HTTP limits: a 0-day retention would purge every run the moment
 and reproduces **one run in five in isolation**, with Task 11 touching only `config.py` and `reaper.py`.
 That is handoff §9's known flake, sharper than "once each": it is a hardcoded deadline racing a wall
 clock. Task 14 touches the render pool and should fix it there.
+
+### Task 12 — post-review note
+
+**The plan's own tests could not run as written.** `worker_factory` hardcoded `claim_poll_sec=0.2,
+heartbeat_sec=0.2` in its `dataclasses.replace`, so a test passing `heartbeat_sec` — which two of the
+plan's three new tests do — died with `TypeError: got multiple values for keyword argument`. The fixture
+now merges its fast defaults under the caller's overrides, which is what a fixture offering defaults
+should have done all along.
+
+**One mutant survived the plan's tests, and it is the nastier half of the give-up rule.** Deleting
+`last_ok = now` from the *success* path left everything green. That mutant means the give-up clock is
+measured from when the run started rather than from the last good beat — so a run that has been beating
+happily for hours is abandoned by the very first transient blip, which is the opposite of what the rule is
+for. The plan's failure test makes *every* beat fail from the first tick, so `last_ok` never gets a chance
+to matter. The new test surrounds a three-beat blip with successes on both sides, which is the only shape
+that separates the two behaviours. Four mutants, all killed.
+
+**Added beyond the plan:** a dropped heartbeat connection is reconnected in place rather than being fatal.
+The dedicated connection is a single point of failure by construction — that is the price of keeping it off
+the pool — so the one thing that must not happen is a drop silently costing every run this worker holds its
+lease. `_beat_connection()` already handled it; nothing proved it did.
