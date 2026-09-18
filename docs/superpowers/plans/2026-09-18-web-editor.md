@@ -245,15 +245,15 @@ async function proxy(request: Request, path: string[]) {
 
 **Tests first** (`services/engine/tests/test_api_validate.py`):
 
-- [ ] A valid chain `start → template_1 → end` returns `nodes` with `template_1.variables == ["start"]` and `end.variables == ["start", "template_1"]`.
-- [ ] A branch: nodes only on one side of a condition are **not** in the join's `variables` (the ∩ rule), and a merge's are (the ∪ rule).
-- [ ] `handles` for a `condition` is `["true", "false"]`; for a `classifier` it is its category ids plus `default`; for `human_approval` it is `["approve", "reject"]`.
-- [ ] `outputSchema` for an `llm` node without `outputSchema` config is the text schema (`{text: string}`).
-- [ ] A DSL with a structural error returns `issues` **and** `"nodes": {}` — not a 500, and not a partial graph.
-- [ ] A DSL with only warnings returns both `issues` and a full `nodes`.
-- [ ] `variables` is sorted, so the response is stable between calls (a set's iteration order is not).
-- [ ] 201 nodes → `nodes` has 200 entries and `nodesTruncated` is `true`. 200 nodes → no `nodesTruncated` key.
-- [ ] The existing `/validate` tests still pass unchanged: adding a key must not change `issues`.
+- [x] A valid chain `start → template_1 → end` returns `nodes` with `template_1.variables == ["start"]` and `end.variables == ["start", "template_1"]`.
+- [x] A branch: nodes only on one side of a condition are **not** in the join's `variables` (the ∩ rule), and a merge's are (the ∪ rule).
+- [x] `handles` for a `condition` is `["true", "false"]`; for a `classifier` it is its category ids plus `default`; for `human_approval` it is `["approve", "reject"]`.
+- [x] `outputSchema` for an `llm` node without `outputSchema` config is the text schema (`{text: string}`).
+- [x] A DSL with a structural error returns `issues` **and** `"nodes": {}` — not a 500, and not a partial graph.
+- [x] A DSL with only warnings returns both `issues` and a full `nodes`.
+- [x] `variables` is sorted, so the response is stable between calls (a set's iteration order is not).
+- [x] 201 nodes → `nodes` has 200 entries and `nodesTruncated` is `true`. 200 nodes → no `nodesTruncated` key.
+- [x] The existing `/validate` tests still pass unchanged: adding a key must not change `issues`.
 
 **Implementation** (`engine/api/routers/workflows.py`)
 
@@ -285,19 +285,19 @@ def _node_analysis(analysis: Analysis) -> tuple[dict[str, Any], bool]:
     return nodes, len(graph.order) > MAX_ANALYSIS_NODES
 ```
 
-- [ ] `validate_workflow` calls it and adds `nodes` (and `nodesTruncated` only when true).
-- [ ] `compute_before`/`compute_schemas` are already imported by `engine.validator`; export them from there rather than reaching into `engine.validator.refs` from the router.
-- [ ] **Do not** recompute the analysis. `analyze()` already ran; these two functions are cheap re-walks of the graph it returned, but calling `analyze` twice would double the CPU on the editor's hottest endpoint.
+- [x] `validate_workflow` calls it and adds `nodes` (and `nodesTruncated` only when true).
+- [x] `compute_before`/`compute_schemas` are already imported by `engine.validator`; export them from there rather than reaching into `engine.validator.refs` from the router.
+- [x] **Do not** recompute the analysis. `analyze()` already ran; these two functions are cheap re-walks of the graph it returned, but calling `analyze` twice would double the CPU on the editor's hottest endpoint.
 
 **Mutation test**
-- [ ] Change `sorted(...)` to `list(...)` — a test must fail (stability).
-- [ ] Change `[:MAX_ANALYSIS_NODES]` to no slice — the truncation test must fail.
-- [ ] Make `_node_analysis` return `{}` unconditionally — several tests must fail.
-- [ ] Any survivor is either a missing test or genuinely equivalent; write down which.
+- [x] Change `sorted(...)` to `list(...)` — a test must fail (stability).
+- [x] Change `[:MAX_ANALYSIS_NODES]` to no slice — the truncation test must fail.
+- [x] Make `_node_analysis` return `{}` unconditionally — several tests must fail.
+- [x] Any survivor is either a missing test or genuinely equivalent; write down which.
 
 **Verification**
-- [ ] `uv run pytest -q` and `uv run ruff check .` pass.
-- [ ] Commit: `feat(engine): return per-node variables, schemas and handles from /validate`
+- [x] `uv run pytest -q` and `uv run ruff check .` pass.
+- [x] Commit: `feat(engine): return per-node variables, schemas and handles from /validate`
 
 ---
 
@@ -922,3 +922,73 @@ SSE 쪽은 이미 끝난 실행을 재생한 것이라 *실시간* 흐름을 증
   검사 스크립트가 다음 명령을 깨진 상태로 남기면 안 된다.
 
 **검증**: `pnpm test` 75 passed (6 files), `typecheck`·`lint` clean, `build` 성공, `test:bundle` 통과.
+
+### Task 3 — `/validate` returns what autocomplete needs
+
+`POST /workflows/{id}/validate`가 `issues` 외에 노드별 `variables`·`outputSchema`·`handles`를 돌려준다.
+전부 `analyze`가 이미 계산하던 것이고, API로 나올 길만 없었다.
+
+**계획이 도달 불가능한 코드를 시켰다.** 계획(과 3 설계 §4.1)은 "노드 200개까지만 채우고 넘으면
+`nodesTruncated: true`"를 요구했다. 그대로 구현하고 테스트를 썼더니 경계 테스트가 통과하지 못했다 —
+198+2=200개 체인에서 `nodes`가 `{}`로 왔다. 원인은:
+
+> `engine/validator/structure.py::MAX_NODES = 100`. 워크플로는 **100개 노드**를 넘을 수 없고, 넘으면
+> phase 1에서 `LIMIT_EXCEEDED` **오류**가 나서 `analyze`가 거기서 멈춘다 → `graph is None` → `nodes: {}`.
+
+즉 200개 상한은 **어떤 draft로도 도달할 수 없는 분기**였고, 그 분기를 검사하는 테스트도 쓸 수 없었다.
+상한과 `nodesTruncated`를 **삭제**했다. 응답은 `MAX_NODES`가 이미 묶고 있고, 그게 진짜 경계다.
+테스트도 상상 속 경계 대신 실제 경계를 못 박는다: 98+2=100개는 `nodes` 100개와 `issues: []`,
+99+2=101개는 `LIMIT_EXCEEDED` 하나와 `nodes: {}`.
+
+계획서가 시킨 대로 두었다면 테스트가 없는 죽은 분기를 남기고, 3 설계 §4.1은 계속 거짓을 말했을 것이다.
+설계 문서도 함께 고쳤다.
+
+**측정하다 찾은, 에디터에 유리한 성질.** `analyze`는 오류가 난 단계에서 멈추지만 **phase 3(참조·타입)
+오류는 graph를 지우지 않는다.** 확인:
+
+| draft | issues | nodes |
+|---|---|---|
+| 구조 오류(알 수 없는 노드 타입) | `DSL_INVALID` | `{}` |
+| 참조 오류(`{{ start.nope }}`) | `REF_UNKNOWN_FIELD` | **채워짐** |
+| 경고만(타입 미선언 값을 숫자 칸에) | `TYPE_WARNING` | 채워짐 |
+
+참조를 반쯤 타이핑한 상태가 자동완성이 가장 필요한 순간이므로 이건 다행한 성질이다. 테스트로 못 박았다.
+
+**남은 공백 — Task 10이 부딪힐 것.** 비는 것은 phase 1·2 오류일 때인데, **캔버스에 노드를 새로 놓고 아직
+연결하지 않은 상태**가 바로 그 경우다(`HANDLE_NOT_CONNECTED`는 오류다). 에디터는 마지막 성공 분석으로
+폴백하지만 거기엔 방금 놓은 노드가 없으므로, 그 노드의 템플릿 칸에서는 자동완성이 비어 있게 된다.
+
+고치려면 `analyze`가 phase 2 오류에서도 graph를 넘겨야 하는데, 그건 Plan 1의 계약을 넓히는 일이고
+`tests/test_validator_refs.py::test_graph_is_only_set_after_phases_one_and_two_pass`가 그 계약을 못 박고
+있다. **Task 3의 범위가 아니므로 넓히지 않았다.** Task 10에서 실제로 불편한지 먼저 확인하고, 불편하면
+그때 Plan 1 계약 변경을 따로 다루는 것이 맞다.
+
+**계획이 비어 있던 것**
+
+- 두 번 `analyze`하지 않는다. `compute_before`/`compute_schemas`는 이미 만들어진 graph를 다시 걷는
+  값싼 함수다. `/validate`는 에디터의 가장 뜨거운 엔드포인트(디바운스된 키 입력마다 1회)라 두 배는 비싸다.
+- `variables`는 정렬한다. `compute_before`는 frozenset을 돌려주고 그 순회 순서는 프로세스 간 보장되지
+  않는다. mutation으로 `sorted`를 `list`로 바꾸자 **4개 테스트가 깨졌다** — 실제로 순서가 다르다는 뜻이다.
+- `handles`가 왜 `/node-types`로 못 나오는지: classifier의 핸들은 테넌트가 타이핑한 카테고리 id들이라
+  **설정에 따라 달라진다.** condition은 `["true","false"]`, human_approval은 `["approve","reject"]`.
+
+**내 테스트 기대값이 네 개 틀렸다** (엔진이 아니라 내 쪽):
+
+- `template` 노드 출력 스키마에 `additionalProperties`는 없다.
+- `start` 노드에 `inputs`를 선언하지 않으면 `{{ start.topic }}`이 `REF_UNKNOWN_FIELD`가 된다.
+- `routing.json`은 경고를 내지 않는다 — 보장되지 않는 참조에 전부 `| default('')`가 붙어 있다.
+  경고만 내는 draft를 따로 만들어야 했다: **타입을 선언하지 않은** 입력을 숫자 칸에 넣으면 `TYPE_WARNING`.
+  같은 자리에 **선언된 문자열**을 넣으면 오류(`TYPE_INCOMPATIBLE`)라서 그걸로는 안 된다.
+- 위의 `MAX_NODES` 건.
+
+**Mutation 5/5 잡힘**
+
+| 변형 | 깨진 테스트 |
+|---|---|
+| `sorted` → `list` | 4 |
+| 항상 빈 맵 반환 | 8 |
+| `handles`를 항상 `["out"]` | 1 |
+| `outputSchema`를 `{}` | 1 |
+| `graph is None` 가드 제거 | 2 |
+
+**검증**: `uv run pytest -q` → `1372 passed` (1360 → +12), `uv run ruff check .` clean.
