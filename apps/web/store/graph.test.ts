@@ -218,3 +218,57 @@ describe("undo and redo", () => {
     expect(store.getState().selection.nodes).toEqual([])
   })
 })
+
+describe("auto layout", () => {
+  it("places a chain left to right and keeps every node", async () => {
+    // Runs ELK for real: the mapping tests pin what it is told and how its answer is read, but only
+    // this proves the two fit together and that the options produce the direction we asked for.
+    store.getState().addNodeAt("start", { x: 900, y: 40 })
+    store.getState().addNodeAt("llm", { x: 10, y: 700 })
+    store.getState().addNodeAt("end", { x: 400, y: 300 })
+    store.getState().connectNodes({ source: "start", sourceHandle: "out", target: "llm_1" })
+    store.getState().connectNodes({ source: "llm_1", sourceHandle: "out", target: "end" })
+
+    await store.getState().autoLayout()
+
+    const x = dsl().nodes.map((node) => node.position.x)
+    expect(ids()).toEqual(["start", "llm_1", "end"])
+    expect(x[0]).toBeLessThan(x[1] as number)
+    expect(x[1]).toBeLessThan(x[2] as number)
+  })
+
+  it("undoes the whole layout in one step", async () => {
+    store.getState().addNodeAt("start", { x: 900, y: 40 })
+    store.getState().addNodeAt("llm", { x: 10, y: 700 })
+    store.getState().connectNodes({ source: "start", sourceHandle: "out", target: "llm_1" })
+    const before = dsl().nodes.map((node) => ({ ...node.position }))
+
+    await store.getState().autoLayout()
+    store.getState().undo()
+
+    expect(dsl().nodes.map((node) => node.position)).toEqual(before)
+  })
+
+  it("spends no undo step on an empty document", async () => {
+    const depth = store.getState().history.past.length
+
+    await store.getState().autoLayout()
+
+    expect(store.getState().history.past).toHaveLength(depth)
+  })
+
+  it("refuses to run twice at once", async () => {
+    // A double click must not lay out twice. Asserting on `layingOut` alone would not catch that: it is
+    // false at the end either way. The undo depth is what tells them apart -- two layouts are two
+    // commands, and the user would have to press undo twice to get back.
+    store.getState().addNodeAt("start", { x: 900, y: 40 })
+    store.getState().addNodeAt("llm", { x: 10, y: 700 })
+    store.getState().connectNodes({ source: "start", sourceHandle: "out", target: "llm_1" })
+    const depth = store.getState().history.past.length
+
+    await Promise.all([store.getState().autoLayout(), store.getState().autoLayout()])
+
+    expect(store.getState().history.past).toHaveLength(depth + 1)
+    expect(store.getState().layingOut).toBe(false)
+  })
+})

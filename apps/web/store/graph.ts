@@ -3,6 +3,7 @@ import { createStore, type StoreApi } from "zustand/vanilla"
 import { addNode, connect, disconnect, removeNode, setPositions, type Connection } from "@/lib/dsl/commands"
 import type { EditorDsl, XY } from "@/lib/dsl/document"
 import { movedPositions, type NodeChange } from "@/lib/dsl/flow"
+import { layout } from "@/lib/dsl/layout"
 import {
   apply,
   canRedo as historyCanRedo,
@@ -43,6 +44,9 @@ export interface GraphState {
   removeSelected: () => void
   moveNodes: (changes: NodeChange[]) => void
   endDrag: () => void
+  autoLayout: () => Promise<void>
+  /** True while ELK is running, so the button can disable itself rather than stack layouts. */
+  layingOut: boolean
   select: (selection: Selection) => void
   undo: () => void
   redo: () => void
@@ -72,6 +76,7 @@ export function createGraphStore(initial: EditorDsl): GraphStore {
       ...derived(createHistory(initial)),
       selection: NOTHING,
       lastError: null,
+      layingOut: false,
 
       addNodeAt(type, position) {
         let next: EditorDsl
@@ -117,6 +122,21 @@ export function createGraphStore(initial: EditorDsl): GraphStore {
 
       endDrag() {
         set({ history: commit(get().history) })
+      },
+
+      async autoLayout() {
+        if (get().layingOut) return
+        set({ layingOut: true })
+        try {
+          const moved = await layout(get().dsl)
+          // One command for every node, so one undo puts the whole graph back where it was. Laying out
+          // node by node would make undo as many presses as there are nodes.
+          edit(setPositions(get().dsl, moved))
+        } catch (error) {
+          set({ lastError: error instanceof Error ? error.message : String(error) })
+        } finally {
+          set({ layingOut: false })
+        }
       },
 
       select(selection) {

@@ -10,13 +10,14 @@ import {
   type EdgeChange,
   type NodeChange as RfNodeChange,
 } from "@xyflow/react"
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useStore } from "zustand"
 
 import "@xyflow/react/dist/style.css"
 
 import { emptyDsl } from "@/lib/dsl/document"
 import { toFlowEdges, toFlowNodes, type NodeChange } from "@/lib/dsl/flow"
+import { anyNodeVisible } from "@/lib/dsl/viewport"
 import type { NodeType } from "@/lib/palette"
 import { createGraphStore, type GraphState } from "@/store/graph"
 
@@ -38,7 +39,8 @@ function Editor({ types }: { types: NodeType[] }) {
   // holds the document itself (3 설계 §5.1).
   const [store] = useState(() => createGraphStore(emptyDsl()))
   const state = useStore(store)
-  const { screenToFlowPosition } = useReactFlow()
+  const { screenToFlowPosition, fitView, getViewport } = useReactFlow()
+  const surface = useRef<HTMLDivElement>(null)
 
   const labels = useMemo(
     () => Object.fromEntries(types.map((item) => [item.type, item.label])),
@@ -88,6 +90,23 @@ function Editor({ types }: { types: NodeType[] }) {
     [state],
   )
 
+  const onAutoLayout = useCallback(async () => {
+    await state.autoLayout()
+    // Auto-layout always reframes: even when a node happens to stay in view, the new arrangement is
+    // what the user asked to see.
+    await fitView({ duration: 200, padding: 0.2 })
+  }, [state, fitView])
+
+  // The safety net. A command that moves every node at once -- auto-layout, its *undo*, loading another
+  // workflow -- leaves the viewport where the graph used to be and the canvas goes blank. The document
+  // is correct; there is just nothing in frame, which no test of the document can catch. Both bugs
+  // showed up only on opening the page.
+  useEffect(() => {
+    const box = surface.current?.getBoundingClientRect()
+    const view = { viewport: getViewport(), width: box?.width ?? 0, height: box?.height ?? 0 }
+    if (!anyNodeVisible(state.dsl.nodes, view)) void fitView({ duration: 200, padding: 0.2 })
+  }, [state.dsl, getViewport, fitView])
+
   const onDrop = useCallback(
     (event: React.DragEvent) => {
       event.preventDefault()
@@ -102,6 +121,7 @@ function Editor({ types }: { types: NodeType[] }) {
     <div className="flex h-full min-h-0 flex-1">
       <Palette types={types} />
       <div
+        ref={surface}
         className="canvas-grid relative min-w-0 flex-1"
         onDrop={onDrop}
         onDragOver={(event) => {
@@ -131,13 +151,13 @@ function Editor({ types }: { types: NodeType[] }) {
         >
           <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="transparent" />
         </ReactFlow>
-        <Toolbar state={state} />
+        <Toolbar state={state} onAutoLayout={onAutoLayout} />
       </div>
     </div>
   )
 }
 
-function Toolbar({ state }: { state: GraphState }) {
+function Toolbar({ state, onAutoLayout }: { state: GraphState; onAutoLayout: () => Promise<void> }) {
   return (
     <div className="pointer-events-none absolute left-4 top-4 flex items-center gap-2">
       <div className="pointer-events-auto flex items-center gap-1 border border-ink-600 bg-ink-800 p-1" style={{ borderRadius: "var(--radius)" }}>
@@ -147,6 +167,16 @@ function Toolbar({ state }: { state: GraphState }) {
         <ToolbarButton label="다시하기" disabled={!state.canRedo} onClick={state.redo}>
           ↷
         </ToolbarButton>
+        <span className="mx-1 h-4 w-px bg-ink-600" aria-hidden />
+        <button
+          type="button"
+          onClick={() => void onAutoLayout()}
+          disabled={state.layingOut || state.dsl.nodes.length === 0}
+          className="px-2 py-1 text-xs disabled:opacity-35"
+          style={{ borderRadius: "var(--radius)" }}
+        >
+          자동 정렬
+        </button>
       </div>
       {state.lastError !== null ? (
         <p

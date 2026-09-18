@@ -385,14 +385,14 @@ Write that last point as a test before implementing it; getting the direction ba
 
 ## Task 8: Auto-layout
 
-- [ ] ELKjs (`elkjs/lib/elk.bundled.js`) with `layered` algorithm, left-to-right.
-- [ ] Run it in a **Web Worker**. ELK on a 200-node graph blocks the main thread long enough to drop the drag the user is in the middle of.
-- [ ] "자동 정렬" button applies the result as **one** `autoLayout` command, so one undo puts every node back.
-- [ ] Test: a three-node chain gets strictly increasing x positions and the node count is unchanged.
-- [ ] Test: layout on an empty document is a no-op that does not push a history entry.
+- [x] ELKjs (`elkjs/lib/elk.bundled.js`) with `layered` algorithm, left-to-right.
+- [x] Run it in a **Web Worker**. ELK on a 200-node graph blocks the main thread long enough to drop the drag the user is in the middle of.
+- [x] "자동 정렬" button applies the result as **one** `autoLayout` command, so one undo puts every node back.
+- [x] Test: a three-node chain gets strictly increasing x positions and the node count is unchanged.
+- [x] Test: layout on an empty document is a no-op that does not push a history entry.
 
 **Verification**
-- [ ] Commit: `feat(web): auto-layout the graph with ELK`
+- [x] Commit: `feat(web): auto-layout the graph with ELK`
 
 ---
 
@@ -1173,3 +1173,62 @@ build 스테이지에 주입해 빌드하고, 파일은 삭제했다(**커밋하
 
 **검증**: `pnpm test` 152 passed (12 files), `typecheck`·`lint` clean, `build` 성공, 실제 브라우저에서
 드래그 앤 드롭 확인.
+
+### Task 8 — auto-layout
+
+`lib/dsl/layout.ts`(ELK 그래프 매핑 두 개 + 호출), `lib/dsl/viewport.ts`(가시성 판정),
+스토어의 `autoLayout`, 그리고 툴바의 자동 정렬 버튼.
+
+**Web Worker를 쓰지 않기로 했다 — 계획의 근거가 두 군데 틀렸다.** 계획은
+"ELK가 200노드 그래프에서 메인 스레드를 사용자가 하고 있는 드래그를 떨어뜨릴 만큼 붙잡는다"고 했다.
+
+1. **200노드짜리 그래프는 존재할 수 없다.** `structure.MAX_NODES`는 100이다(Task 3에서 확인).
+2. **자동 정렬은 버튼 클릭이다.** 버튼을 누르면서 동시에 드래그하고 있을 수는 없다.
+
+실제로 재봤다(같은 V8, 각 5회 중앙값):
+
+| 그래프 | 중앙값 | 최대 |
+|---|---|---|
+| 11 노드 | 16.1ms | 20.2ms |
+| 51 노드 | 40.8ms | 67.6ms |
+| **100 노드** (엔진 상한) | **51.3ms** | 67.4ms |
+
+51ms는 프레임 서너 개, 명시적 사용자 동작에 대한 눈에 띄지 않는 멈칫이지 멈춤이 아니다. 워커를 쓰면
+번들러별 워커 진입점, 메시지 프로토콜, 생명주기, 그리고 "워커 로드 실패" 오류 경로 한 무리가 붙는다 —
+51ms를 감추려고. 대신 **동적 `import()`** 를 썼다: `elk.bundled`는 ~1.5MB라, 자동 정렬을 누르기 전까지
+초기 번들에서 빼는 쪽이 훨씬 큰 실질 이득이다.
+
+**테스트는 다 통과했는데 기능은 못 쓰는 상태였다.** 브라우저로 열어보니 자동 정렬을 누르면
+**캔버스가 하얗게 비었다.** 문서는 완벽히 정확했다 — ELK가 flow 원점 근처에 배치하는데 뷰포트는 사용자가
+두고 온 자리에 남아 있어서, 그래프 전체가 화면 밖으로 나간 것이다. 문서를 검사하는 어떤 테스트도 이걸
+잡을 수 없다.
+
+고치고 나서 **되돌리기에서 같은 증상이 다시 나왔다.** 자동 정렬 뒤에 맞춰진 뷰포트가, undo가 복원한
+흩어진 배치를 비추지 못한다. 여기서 "자동 정렬 뒤에 fitView"는 한 경우만 고치고 그 undo를 방치하는
+반창고라는 게 분명해졌다.
+
+그래서 규칙으로 만들었다: **문서가 바뀐 뒤 화면에 노드가 하나도 없으면 뷰를 맞춘다.**
+"항상 맞춘다"가 아니다 — 작은 undo마다 뷰포트가 홱 움직인다. `anyNodeVisible`은 순수 함수라
+pan·zoom·경계·미측정 컨테이너를 전부 테스트로 못 박았다. 자동 정렬 자체는 그와 별개로 항상 재구성한다:
+노드 하나가 우연히 화면에 남아 있어도, 사용자가 보자고 한 것은 새 배치 전체다.
+
+**새 커맨드는 필요 없었다.** 계획은 `autoLayout` 커맨드를 말했지만 `setPositions`가 이미 정확히 그것이다
+— 모든 노드를 한 번에 옮기는 것. 한 커맨드이므로 undo 한 번에 전체가 돌아온다.
+
+**Mutation 6/6 잡힘** (한 번은 고친 뒤)
+
+| 변형 | 깨진 테스트 |
+|---|---|
+| `elk.direction` RIGHT → DOWN | 2 |
+| 끊어진 엣지 필터 제거 | 1 |
+| `positionsFrom`이 미배치 노드도 포함 | 1 |
+| 가시성 판정을 overlap → containment | 1 |
+| 빈 문서를 "안 보임"으로 | 1 |
+| 중복 실행 가드 제거 | **처음엔 0** → 테스트 보강 후 1 |
+
+마지막 것이 기록할 값이 있다. 원래 테스트는 두 번 호출한 뒤 `layingOut === false`만 봤는데, 가드가
+있든 없든 끝에는 false다. 구분되는 관찰은 **undo 깊이**다 — 두 번 배치되면 커맨드가 둘이고 사용자는
+undo를 두 번 눌러야 한다. 상태 플래그가 아니라 사용자가 겪는 결과를 단언해야 했다.
+
+**검증**: `pnpm test` 172 passed (14 files), `typecheck`·`lint` clean, `build` 성공,
+실제 브라우저에서 배치 → 연결 → 자동 정렬 → 되돌리기까지 확인.
