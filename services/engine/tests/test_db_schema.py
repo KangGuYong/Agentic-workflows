@@ -77,3 +77,21 @@ async def test_one_row_per_attempt(pool):
         await conn.execute(insert, (str(uuid.uuid4()), run_id))
         with pytest.raises(UniqueViolation):
             await conn.execute(insert, (str(uuid.uuid4()), run_id))
+
+
+async def test_the_secrets_table_and_retention_columns_exist(pool):
+    async with pool.connection() as conn:
+        columns = await (await conn.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name='secrets'")).fetchall()
+        purged = await (await conn.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_name='runs' AND column_name='purged_at'")).fetchall()
+        key = await (await conn.execute(
+            "SELECT a.attname FROM pg_index i JOIN pg_attribute a"
+            "   ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)"
+            " WHERE i.indrelid = 'secrets'::regclass AND i.indisprimary ORDER BY a.attname")).fetchall()
+
+    assert {row["column_name"] for row in columns} == {
+        "workspace_id", "name", "ciphertext", "created_at", "updated_at"}
+    assert [row["column_name"] for row in purged] == ["purged_at"]
+    assert [row["attname"] for row in key] == ["name", "workspace_id"]

@@ -12,7 +12,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-APP_TABLES = ("run_events", "node_runs", "runs", "workflow_versions", "workflows")
+APP_TABLES = ("run_events", "node_runs", "runs", "workflow_versions", "workflows", "secrets")
 CHECKPOINT_TABLES = ("checkpoint_blobs", "checkpoint_writes", "checkpoints")  # not checkpoint_migrations
 
 
