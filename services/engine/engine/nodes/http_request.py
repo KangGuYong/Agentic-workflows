@@ -72,7 +72,7 @@ class HttpRequestConfig(BaseModel):
 class HttpRequestNode(NodeSpec):
     type = "http_request"
     label = "HTTP 요청"
-    category = "action"
+    category = "Action"
     Config = HttpRequestConfig
     default_policy = Policy(timeoutSec=TIMEOUT_SEC, retry=RetrySpec(maxAttempts=3))
     side_effects = True

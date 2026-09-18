@@ -303,11 +303,11 @@ def _node_analysis(analysis: Analysis) -> tuple[dict[str, Any], bool]:
 
 ## Task 4: Normalise the `http_request` category (engine)
 
-- [ ] Write a test asserting every registered node's `category` is one of `{"IO", "Logic", "AI", "Human", "Action"}`. It fails on `http_request`'s `"action"`.
-- [ ] Change `HttpRequestNode.category` to `"Action"`.
-- [ ] Grep the engine tests for the literal `"action"` and fix any that pinned the old value.
-- [ ] `uv run pytest -q` and `uv run ruff check .` pass.
-- [ ] Commit: `fix(engine): give http_request the same category casing as every other node`
+- [x] Write a test asserting every registered node's `category` is one of `{"IO", "Logic", "AI", "Human", "Action"}`. It fails on `http_request`'s `"action"`.
+- [x] Change `HttpRequestNode.category` to `"Action"`.
+- [x] Grep the engine tests for the literal `"action"` and fix any that pinned the old value.
+- [x] `uv run pytest -q` and `uv run ruff check .` pass.
+- [x] Commit: `fix(engine): give http_request the same category casing as every other node`
 
 ---
 
@@ -992,3 +992,24 @@ SSE 쪽은 이미 끝난 실행을 재생한 것이라 *실시간* 흐름을 증
 | `graph is None` 가드 제거 | 2 |
 
 **검증**: `uv run pytest -q` → `1372 passed` (1360 → +12), `uv run ruff check .` clean.
+
+### Task 4 — normalise the `http_request` category
+
+`HttpRequestNode.category`가 `"action"`에서 `"Action"`으로. 나머지 8종은 `IO`/`Logic`/`AI`/`Human`이라
+이것만 소문자였고, 팔레트가 category로 묶으므로 그대로 두면 아무도 스타일링하지 않은 여섯 번째 그룹이
+화면에 생긴다.
+
+테스트는 노드별 단언이 아니라 **집합**으로 못 박았다: `{item["category"] for item in nodeTypes}`가 정확히
+`{"IO", "Logic", "AI", "Human", "Action"}`이어야 한다. 그래야 새 노드 타입이 여섯 번째 그룹을 발명하는 대신
+이 다섯 중 하나를 고르도록 강제된다.
+
+레포 전체에서 `"action"` 문자열을 확인했다. 나머지 히트는 전부 Redis 제어 채널 메시지의
+`{"runId": ..., "action": "cancel"}` 키라 무관하다. 기존 테스트 중 이 값을 박아둔 것은 없었다.
+
+**검증**: `uv run pytest -q` → `1373 passed` (+1), `uv run ruff check .` clean.
+
+**Task 4 중에 일어난 환경 사고 (코드와 무관, 기록용).** 세션이 잠시 유휴 상태였다가 돌아오니
+**샌드박스 컨테이너가 재시작**되어 있었다(PID가 세 자리로 돌아가 있었다). dockerd가 죽어 있어서
+testcontainers가 붙지 못했고 — 통합 테스트가 setup에서 에러 — 사용자가 계속 띄워두라고 한 배포 스택도
+함께 사라져 있었다. `dockerd` 재기동 + `docker compose up -d`로 복구했다. 이미지는 남아 있어 재빌드는
+필요 없었다. 긴 유휴 뒤에는 통합 테스트를 돌리기 전에 `docker ps`를 먼저 확인하는 편이 낫다.
