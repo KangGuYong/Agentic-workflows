@@ -4179,7 +4179,7 @@ the real resolver into the worker and proves the invariants through the API, aga
 - Create: `services/engine/tests/golden/http_call.json`, `services/engine/tests/test_acceptance_2b.py`
 - Test: `services/engine/tests/test_golden_patterns.py` (append)
 
-- [ ]  **Step 1: Wire the real ports into the worker**
+- [x]  **Step 1: Wire the real ports into the worker**
 
 Nothing has built a `GuardedClient` or a `PostgresSecretResolver` yet — Task 6 gave `Worker` the two
 parameters and Task 9 used them, but the entrypoint still passes neither.
@@ -4217,7 +4217,7 @@ hand in a client pointed at its own server:
         worker = Worker(config, pool, redis, owner=owner, llm=llm, http=http, secrets=secrets)
 ```
 
-- [ ]  **Step 2: Add the sixth golden**
+- [x]  **Step 2: Add the sixth golden**
 
 Create `services/engine/tests/golden/http_call.json` — the pattern a tenant actually writes: call an API
 with a stored credential, then summarise what came back.
@@ -4253,7 +4253,7 @@ Append `"http_call"` to `PATTERNS` in `services/engine/tests/test_golden_pattern
 with the rest. Do not add an `execute_run` test for it there: that file runs against `InMemorySaver` with
 no HTTP port, and the real execution is Step 4's acceptance test.
 
-- [ ]  **Step 3: Add the server fixture**
+- [x]  **Step 3: Add the server fixture**
 
 Append to `services/engine/tests/conftest.py`:
 
@@ -4294,7 +4294,7 @@ def http_server():
         thread.join(timeout=5)
 ```
 
-- [ ]  **Step 4: Write the acceptance tests**
+- [x]  **Step 4: Write the acceptance tests**
 
 Create `services/engine/tests/test_acceptance_2b.py`:
 
@@ -4472,7 +4472,7 @@ Two things to confirm while writing this file rather than copying blindly:
 - `ScriptedLLM([RuntimeError(...)])` assumes the stub raises what it is given. Check
   `engine/llm/scripted.py`; if it does not, make the run fail the way the existing failure tests do.
 
-- [ ]  **Step 5: Run them**
+- [x]  **Step 5: Run them**
 
 Run: `uv run pytest tests/test_acceptance_2b.py tests/test_golden_patterns.py -q`
 Expected: PASS. Run twice — these drive real workers and a real socket, so a pass that only happens once is
@@ -4481,7 +4481,7 @@ a failure.
 If the first test fails because the secret appears in `caplog`, do not weaken the assertion: find the log
 line and fix it. That assertion is the point of the task.
 
-- [ ]  **Step 6: Run everything and commit**
+- [x]  **Step 6: Run everything and commit**
 
 Run: `uv run pytest -q` → all pass.
 Run: `uv run ruff check .` → `All checks passed!`
@@ -5160,3 +5160,37 @@ unintercepted network needs none of this.
 
 **Also corrected:** the uv base image is pinned to `0.8` (this project uses `uv 0.8.17`); the plan's `0.5`
 would have been a different resolver.
+
+### Task 17 — post-review note
+
+**The acceptance tests cannot test the wiring this task adds, and the first mutation pass proved it.**
+They build their own `GuardedClient` and `PostgresSecretResolver` and hand them to `worker_factory`, so
+deleting either one from `engine/worker/main.py` left all six of them green. That failure mode is the
+quiet kind: the deployment starts fine and every `http_request` raises `EngineFault` at run time.
+`tests/test_worker_main.py` now asserts the entrypoint hands the worker both, and that the HTTP client is
+closed on shutdown — a leaked httpx pool is otherwise invisible. The shutdown list went from five
+resources to six.
+
+**One test had to be replaced, because its premise was wrong.** The plan's implicit claim is that the
+marker is what gets recorded; it is not. `headers.Authorization` is replaced wholesale by *key-name*
+redaction before the attempt is stored, so a reader sees `[REDACTED]` and no marker at all — stricter than
+the plan assumed. That left a real hole: `SECRET not in <everything>` passes just as well if the node
+never resolved anything and put the marker on the wire. The `http_server` fixture now records the
+`Authorization` headers it was actually sent, and the test asserts the server received
+`Bearer <the real secret>`. That is the "reaches the server" half of the invariant, and nothing before it
+proved it.
+
+**`"127.0.0.1" not in json.dumps(run)` is wrong as written** and passes only by accident elsewhere: the
+run's *inputs* legitimately contain the URL the tenant supplied. The assertion belongs on `run["error"]`,
+which is where the "category, never the address" rule actually applies.
+
+**Three of the plan's snippets do not match the code**: `put_secret` takes `key=` and no `workspace_id`;
+the save endpoint's field is `draftDsl`, not `dsl`; and the orphan-checkpoint test ages
+`checkpoints.created_at`, a column that does not exist (Task 11). The ageing step is simply gone — the
+orphan rule is the run row's absence.
+
+**`secret_key` is deliberately not overridden.** The plan passes `secret_key=KEY` with a key of its own,
+which would seal the worker's run payloads under a key the API cannot open: outputs would come back empty
+for a reason unrelated to what is being tested. The tests use the configured key for both.
+
+Five mutants, all killed. Ran twice, as the plan asks, plus the full suite twice: 1,360 passed.

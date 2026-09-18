@@ -145,7 +145,7 @@ async def worker_factory(pool, redis, db_url):
 
     started: list = []
 
-    async def make(llm, *, owner: str = "worker-1", **overrides):
+    async def make(llm, *, owner: str = "worker-1", http=None, secrets=None, **overrides):
         import dataclasses
 
         # Defaults a test can override: spelling one of these in `overrides` used to be a TypeError
@@ -153,7 +153,7 @@ async def worker_factory(pool, redis, db_url):
         # wants to do.
         fast = {"claim_poll_sec": 0.2, "heartbeat_sec": 0.2}
         config = dataclasses.replace(load_config(), **{**fast, **overrides})
-        worker = Worker(config, pool, redis, owner=owner, llm=llm)
+        worker = Worker(config, pool, redis, owner=owner, llm=llm, http=http, secrets=secrets)
         await worker.start()
         started.append(worker)
         return worker
@@ -161,3 +161,50 @@ async def worker_factory(pool, redis, db_url):
     yield make
     for worker in started:
         await worker.stop()
+
+
+@pytest.fixture
+def http_server():
+    """A real HTTP server on 127.0.0.1, so the guarded client makes a real connection.
+
+    It echoes the Authorization header back in the body — which is what makes "a secret the server returns
+    never reaches storage" testable — and records every one it was sent, which is what makes the other
+    half testable: that the real credential, not the marker standing in for it, actually went on the wire.
+    """
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    received: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's own naming
+            authorization = self.headers.get("Authorization", "")
+            received.append(authorization)
+            body = json.dumps({"title": "이슈 제목", "seen": authorization})
+            payload = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Set-Cookie", "session=should-not-be-stored")
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):  # keep pytest output clean
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    class Server(str):
+        """The base URL, so existing uses read unchanged, with what it saw hanging off it."""
+
+        authorizations = received
+
+    try:
+        yield Server(f"http://127.0.0.1:{server.server_port}")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

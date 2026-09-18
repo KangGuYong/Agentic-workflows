@@ -1,0 +1,19 @@
+{
+  "version": "1",
+  "nodes": [
+    {"id": "start", "type": "start", "label": "시작",
+     "config": {"inputs": {"type": "object", "properties": {"issue": {"type": "string"}}, "required": ["issue"]}}},
+    {"id": "http_1", "type": "http_request", "label": "이슈 조회",
+     "config": {"method": "GET", "url": "{{start.issue}}",
+                "headers": {"Authorization": "Bearer {{secret.API_TOKEN}}"}},
+     "policy": {"timeoutSec": 10, "retry": {"maxAttempts": 1}}},
+    {"id": "template_1", "type": "template", "label": "요약",
+     "config": {"template": "상태 {{http_1.status}}: {{http_1.body.title}}", "format": "text"}},
+    {"id": "end", "type": "end", "label": "끝", "config": {"outputs": {"summary": "{{template_1.text}}"}}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start", "target": "http_1"},
+    {"id": "e2", "source": "http_1", "target": "template_1"},
+    {"id": "e3", "source": "template_1", "target": "end"}
+  ]
+}

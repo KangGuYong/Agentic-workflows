@@ -16,6 +16,7 @@ class Fakes:
 
     def __init__(self) -> None:
         self.events: list[str] = []
+        self.worker_kwargs: dict = {}
         self.fail_worker_start = False
 
 
@@ -31,7 +32,25 @@ def install(monkeypatch: pytest.MonkeyPatch, fakes: Fakes) -> None:
     monkeypatch.setattr(main, "Redis", FakeRedis(fakes))
     monkeypatch.setattr(main, "OllamaRaw", lambda base_url: FakeOllama(fakes))
     monkeypatch.setattr(main, "RenderPool", lambda *, size, timeout: FakeRenderPool(fakes))
-    monkeypatch.setattr(main, "Worker", lambda config, pool, redis, *, llm, render: FakeWorker(fakes))
+    # `**_` on the Worker double so it keeps matching as the entrypoint hands the worker more
+    # collaborators (http and secrets arrived with the http_request node).
+    def fake_worker(config, pool, redis, *, llm, render, **collaborators):
+        fakes.worker_kwargs = collaborators
+        return FakeWorker(fakes)
+
+    monkeypatch.setattr(main, "Worker", fake_worker)
+    monkeypatch.setattr(main, "GuardedClient", lambda *args, **kwargs: FakeHttpClient(fakes))
+
+
+class FakeHttpClient:
+    """The guarded egress client. It holds an httpx connection pool, so a shutdown that forgets it leaks
+    sockets for the life of the process -- and nothing else in the suite would notice."""
+
+    def __init__(self, fakes: Fakes) -> None:
+        self._fakes = fakes
+
+    async def aclose(self) -> None:
+        self._fakes.events.append("http.aclose")
 
 
 class FakePool:
@@ -108,7 +127,7 @@ def fakes(monkeypatch: pytest.MonkeyPatch) -> Fakes:
     return state
 
 
-async def test_clean_start_stop_closes_all_five_resources(fakes: Fakes):
+async def test_clean_start_stop_closes_all_six_resources(fakes: Fakes):
     stop = asyncio.Event()
     stop.set()  # already-set: run() must return as soon as it reaches `await stop.wait()`
 
@@ -118,8 +137,9 @@ async def test_clean_start_stop_closes_all_five_resources(fakes: Fakes):
     assert "prepare_database" in fakes.events
     assert "pool.open" in fakes.events
     assert "worker.start" in fakes.events
-    # ...and every one of the five resources run() opened was closed on the way out.
-    for closed in ("worker.stop", "render.close", "ollama.aclose", "redis.aclose", "pool.close"):
+    # ...and every one of the six resources run() opened was closed on the way out.
+    for closed in ("worker.stop", "render.close", "http.aclose", "ollama.aclose", "redis.aclose",
+                   "pool.close"):
         assert closed in fakes.events, f"{closed} was never called"
 
 
@@ -133,5 +153,26 @@ async def test_a_failing_worker_start_still_closes_what_was_already_opened(fakes
     # worker.start() raised, so the run never reached `await stop.wait()` - but every resource opened
     # before that point (including the worker itself, so its own partial state is cleaned up too) must
     # still be closed rather than leaked.
-    for closed in ("worker.stop", "render.close", "ollama.aclose", "redis.aclose", "pool.close"):
+    for closed in ("worker.stop", "render.close", "http.aclose", "ollama.aclose", "redis.aclose",
+                   "pool.close"):
         assert closed in fakes.events, f"{closed} was never called"
+
+
+async def test_the_worker_is_built_with_an_http_client_and_a_secret_resolver(
+    fakes: Fakes, monkeypatch: pytest.MonkeyPatch,
+):
+    """`http_request` is useless without both, and the failure is silent in the worst way: every call
+    raises `EngineFault` ("http_request needs an HTTP client") at run time, on a deployment that started
+    cleanly. The acceptance tests cannot catch this — they construct their own client and hand it to
+    `worker_factory`, bypassing this entrypoint entirely.
+    """
+    # A configured key, because the resolver is deliberately absent without one: `ENGINE_DEV_INSECURE`
+    # means "no secret storage", and building a resolver around a null key would only fail later.
+    monkeypatch.setenv("ENGINE_SECRET_KEY", "1" * 32)
+    stop = asyncio.Event()
+    stop.set()
+
+    await asyncio.wait_for(main.run(stop), timeout=5)
+
+    assert fakes.worker_kwargs.get("http") is not None, "the worker was built with no HTTP client"
+    assert fakes.worker_kwargs.get("secrets") is not None, "the worker was built with no secret resolver"
