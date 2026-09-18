@@ -1553,7 +1553,7 @@ git commit -m "feat(engine): store secrets encrypted and resolve them just in ti
 - Modify: `services/engine/engine/api/app.py`
 - Test: `services/engine/tests/test_api_secrets.py`
 
-- [ ]  **Step 1: Write the failing tests**
+- [x]  **Step 1: Write the failing tests**
 
 Create `services/engine/tests/test_api_secrets.py`:
 
@@ -1620,12 +1620,12 @@ async def test_the_value_never_appears_in_the_logs(api, caplog):
     assert SECRET not in caplog.text
 ```
 
-- [ ]  **Step 2: Run them to see them fail**
+- [x]  **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/test_api_secrets.py -q`
 Expected: FAIL — every request answers 404 because the router does not exist.
 
-- [ ]  **Step 3: Implement the router**
+- [x]  **Step 3: Implement the router**
 
 Create `services/engine/engine/api/routers/secrets.py`:
 
@@ -1698,16 +1698,16 @@ async def list_secrets(request: Request) -> dict[str, Any]:
                          "updatedAt": row["updated_at"].isoformat()} for row in rows]}
 ```
 
-- [ ]  **Step 4: Register it**
+- [x]  **Step 4: Register it**
 
 In `services/engine/engine/api/app.py`, import `secrets` alongside the other routers and add `app.include_router(secrets.router)` next to the existing `include_router` calls.
 
-- [ ]  **Step 5: Run the tests**
+- [x]  **Step 5: Run the tests**
 
 Run: `uv run pytest tests/test_api_secrets.py -q`
 Expected: PASS.
 
-- [ ]  **Step 6: Run everything and commit**
+- [x]  **Step 6: Run everything and commit**
 
 Run: `uv run pytest -q` → all pass.
 Run: `uv run ruff check .` → `All checks passed!`
