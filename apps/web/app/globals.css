@@ -1,0 +1,161 @@
+@import "tailwindcss";
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   계기판 (Instrument panel)
+
+   이 제품은 "보이는 기계"다. 캔버스 위로 데이터가 흐르고, 실행은 살아서 움직인다.
+   그래서 미학 방향은 계기판 — 관제실, 오실로스코프, 항공기 콕핏의 계측기다.
+
+   이 방향을 고른 이유는 취향이 아니라 기능이다. 계측기는 조밀한 정보를 한눈에
+   읽히도록 설계된 물건이고, 그것이 노드 캔버스와 설정 패널이 요구하는 바로 그
+   제약이다. 1px 음각 괘선, 모눈종이 캔버스, 등폭 수치 판독, 그리고 "지금 살아
+   있다"를 뜻하는 단 하나의 뜨거운 신호색.
+
+   frontend-design 스킬의 "Frontend Aesthetics Guidelines"를 따르되
+   "Scroll-Driven Website Design Guidelines"는 적용하지 않는다 (Plan 3 계획서
+   「시각 디자인」 절). 특히 스킬의 "NEVER use cards or containers"는 여기서
+   뒤집힌다: 노드 패널·실행 기록 행·승인 대화상자는 경계가 분명해야 읽힌다.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  color-scheme: dark;
+
+  /* 잉크 — 순수 검정이 아니라 차가운 흑연. 계측기 케이스의 색이다. */
+  --ink-900: #0b0f12; /* 페이지 바탕 */
+  --ink-800: #11171b; /* 패널 */
+  --ink-700: #182027; /* 입력·융기면 */
+  --ink-600: #222d35; /* 괘선 */
+  --ink-500: #33414c; /* 강조 괘선, 비활성 테두리 */
+
+  --fg: #dfe6ea;
+  --fg-muted: #8c9aa4;
+  --fg-faint: #768189;
+
+  /* 신호색 하나. 보라 그라데이션이 아니라 호박색 경고등이다. */
+  --accent: #f5a524;
+  --accent-dim: #7d5613;
+  --accent-fg: #0b0f12;
+
+  /* 실행 상태 6종.
+     색만으로 구분하지 않는다 — 각 상태는 형태도 함께 갖는다(§상태 글리프).
+     실패는 일부러 호박색에서 먼 진홍으로 민다: 8px 배지 크기에서 호박과
+     주황빛 빨강은 구분되지 않는다. */
+  --st-queued: #6b7a85; /* 대기   — 속 빈 고리 */
+  --st-running: #f5a524; /* 실행   — 도는 고리 */
+  --st-succeeded: #3fb984; /* 성공   — 꽉 찬 점 */
+  --st-failed: #e5484d; /* 실패   — ✕ */
+  --st-waiting: #39a0c9; /* 승인대기 — 일시정지 막대 */
+  --st-default: #a08a5a; /* 기본값  — 파선 고리 */
+
+  /* 계측기는 둥글지 않다. */
+  --radius: 3px;
+  --radius-lg: 5px;
+  --rule: 1px solid var(--ink-600);
+  --rule-strong: 1px solid var(--ink-500);
+
+  /* 모눈종이 캔버스 */
+  --grid-size: 24px;
+  --grid-ink: rgba(223, 230, 234, 0.05);
+
+  --font-sans: var(--font-plex-kr), sans-serif;
+  /* 한글은 등폭 문맥에 들어올 일이 없도록 설계했지만(노드 id는 ASCII),
+     템플릿 본문처럼 섞이는 곳이 있다. 폴백을 같은 슈퍼패밀리의 형제로 두어
+     낯선 글꼴로 튀는 대신 조화되게 한다. */
+  --font-mono: var(--font-plex-mono), var(--font-plex-kr), monospace;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /* 종이. 계측기의 인쇄된 눈금판 쪽이다. */
+  --ink-900: #f4f1ea;
+  --ink-800: #fbf9f4;
+  --ink-700: #ffffff;
+  --ink-600: #ded8ca;
+  --ink-500: #c3bba8;
+
+  --fg: #1b1f22;
+  --fg-muted: #5c6469;
+  --fg-faint: #686e72;
+
+  --accent: #a05f00;
+  --accent-dim: #e8c88a;
+  --accent-fg: #fffdf7;
+
+  --st-queued: #7e858a;
+  --st-running: #a05f00;
+  --st-succeeded: #1d7f57;
+  --st-failed: #c0272d;
+  --st-waiting: #1f6f92;
+  --st-default: #8a7444;
+
+  --grid-ink: rgba(27, 31, 34, 0.06);
+}
+
+@theme inline {
+  --color-ink-900: var(--ink-900);
+  --color-ink-800: var(--ink-800);
+  --color-ink-700: var(--ink-700);
+  --color-ink-600: var(--ink-600);
+  --color-ink-500: var(--ink-500);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-faint: var(--fg-faint);
+  --color-accent: var(--accent);
+  --color-accent-dim: var(--accent-dim);
+  --color-accent-fg: var(--accent-fg);
+  --color-st-queued: var(--st-queued);
+  --color-st-running: var(--st-running);
+  --color-st-succeeded: var(--st-succeeded);
+  --color-st-failed: var(--st-failed);
+  --color-st-waiting: var(--st-waiting);
+  --color-st-default: var(--st-default);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --radius-instrument: var(--radius);
+}
+
+body {
+  background: var(--ink-900);
+  color: var(--fg);
+  font-family: var(--font-sans);
+}
+
+/* 라틴·숫자 전용 라벨. 계측기의 실크스크린 각인이다.
+   한국어를 여기에 넣지 않는다 — 등폭 글꼴에 한글 자형이 없다. */
+.instrument-label {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+/* 수치 판독. 표처럼 자리가 맞아야 실행 기록이 읽힌다. */
+.readout {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.rule-etched {
+  border-top: var(--rule);
+  box-shadow: 0 -1px 0 rgba(0, 0, 0, 0.35);
+}
+
+.canvas-grid {
+  background-color: var(--ink-900);
+  background-image:
+    linear-gradient(var(--grid-ink) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-ink) 1px, transparent 1px);
+  background-size: var(--grid-size) var(--grid-size);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
