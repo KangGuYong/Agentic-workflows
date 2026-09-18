@@ -4789,3 +4789,28 @@ predicted failure arriving exactly as predicted: a test written while the only h
 was unavailable, asserted to be green on the strength of `-m "not integration"`.
 
 The `EXPLAIN` check on `runs_retention_idx` is **still owed** — nothing has run it yet.
+
+### Task 6 — post-review note
+
+Two things in the plan's Task 6 were wrong, and both were found by running rather than reading.
+
+**"Existing callers keep working because the new argument has a default" is false for the test doubles.**
+`render_fields` and `RenderPool.__call__` do default the new argument, but `_rendered` calls
+`deps.render(fields, outputs, deps.secret_nonce)` with three positional arguments, and the four render
+hooks in `tests/test_compiler_wrapper.py` are hand-written two-parameter functions. Step 8's expectation
+of a clean run was wrong: four tests failed on arity. The doubles now take the nonce explicitly, which is
+the right shape anyway — they implement `RenderFn`, so they should break when its contract changes.
+
+**Nothing proved the nonce survives the off-loop path.** The plan's two new wrapper tests both exercise
+the inline renderer. The pool path is exactly where the nonce can silently go missing, and dropping it
+there is invisible in ordinary use — every `http_request` template simply fails. The hook test now
+asserts the forwarded nonce.
+
+**Mutation results.** Eight mutants, one survivor on the first pass:
+`substitute`'s `found.group(2) != nonce` guard could be deleted with every test still green, because the
+plan's test paired this run's `API_TOKEN` marker with a *foreign* `OTHER` marker — a name that is absent
+from `values` either way, so the lookup misses and the output is identical with or without the check. The
+property that matters is the same name under a foreign nonce: text carried over from another run, or
+tenant text that guessed a name, must not be filled with this run's value. Both `substitute` and
+`find_names` now have that case, and all eight mutants are killed. The plan's version of this test was
+the §10 pattern again: a test that passes whether or not the thing it names is there.
