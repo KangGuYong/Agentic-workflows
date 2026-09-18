@@ -42,6 +42,7 @@ def db_url() -> Iterator[str]:
         os.environ["ENGINE_DATABASE_URL"] = existing
         os.environ.setdefault("LANGGRAPH_AES_KEY", "0" * 32)
         os.environ.setdefault("ENGINE_SECRET_KEY", "1" * 32)
+        os.environ.setdefault("ENGINE_API_TOKEN", "dev-token-0123456789")
         yield existing
         return
     from testcontainers.postgres import PostgresContainer
@@ -51,6 +52,7 @@ def db_url() -> Iterator[str]:
         os.environ["ENGINE_DATABASE_URL"] = url
         os.environ.setdefault("LANGGRAPH_AES_KEY", "0" * 32)
         os.environ.setdefault("ENGINE_SECRET_KEY", "1" * 32)
+        os.environ.setdefault("ENGINE_API_TOKEN", "dev-token-0123456789")
         yield url
 
 

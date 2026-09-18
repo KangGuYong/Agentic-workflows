@@ -6,6 +6,10 @@ from dataclasses import dataclass
 
 from engine.http.policy import AllowEntry, PolicyError, parse_allowlist
 
+# Long enough that guessing is not a strategy; short enough to type into a compose file. A token below
+# this is the same as no token, and "we will set a real one later" is how it reaches production.
+MIN_API_TOKEN_LEN = 16
+
 
 class ConfigError(Exception):
     """A required setting is missing or unusable. Raised at startup, never per request."""
@@ -76,6 +80,15 @@ def load_config() -> EngineConfig:
     secret_key = secret_key_text.encode("utf-8") if secret_key_text else None
     if secret_key is not None and len(secret_key) not in (16, 24, 32):
         raise ConfigError("ENGINE_SECRET_KEY must be 16, 24 or 32 bytes")
+    api_token = os.getenv("ENGINE_API_TOKEN") or None  # an empty value means "unset", not a zero-length token
+    if api_token is None and not dev_insecure:
+        # Without it the engine serves every workflow, run and secret name to anyone who can reach the
+        # port (2b design §9). It used to be a warning, which is a thing people scroll past.
+        raise ConfigError("ENGINE_API_TOKEN is required (set ENGINE_DEV_INSECURE=1 only for development)")
+    if api_token is not None and len(api_token) < MIN_API_TOKEN_LEN:
+        # Checked even in development: dev mode is permission to run *without* a token, not permission to
+        # run with a guessable one.
+        raise ConfigError(f"ENGINE_API_TOKEN must be at least {MIN_API_TOKEN_LEN} characters")
     try:
         allowlist = parse_allowlist(os.getenv("HTTP_ALLOWLIST") or "")
     except PolicyError as exc:
@@ -85,7 +98,7 @@ def load_config() -> EngineConfig:
     return EngineConfig(
         database_url=database_url,
         redis_url=os.getenv("ENGINE_REDIS_URL") or "redis://localhost:6379/0",
-        api_token=os.getenv("ENGINE_API_TOKEN") or None,
+        api_token=api_token,
         secret_key=secret_key,
         encrypt_checkpoints=bool(os.getenv("LANGGRAPH_AES_KEY")),
         ollama_base_url=os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434",

@@ -3871,7 +3871,7 @@ the port. Today an unset token is a warning.
   `TokenAuthMiddleware` lives — check with `grep -rn "class TokenAuthMiddleware" services/engine/engine`)
 - Test: `services/engine/tests/test_config.py` (append), `services/engine/tests/test_api_auth.py` (append)
 
-- [ ]  **Step 1: Write the failing tests**
+- [x]  **Step 1: Write the failing tests**
 
 Append to `services/engine/tests/test_config.py`:
 
@@ -3900,12 +3900,12 @@ def test_a_token_that_is_too_short_is_refused(monkeypatch):
 If `tests/test_config.py` has no `_base_env` helper, use whatever it already does to build a valid
 environment and keep the two tests in that style.
 
-- [ ]  **Step 2: Run them to see them fail**
+- [x]  **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/test_config.py -q`
 Expected: FAIL — `load_config()` returns a config instead of raising.
 
-- [ ]  **Step 3: Implement**
+- [x]  **Step 3: Implement**
 
 In `services/engine/engine/config.py`, next to the existing `LANGGRAPH_AES_KEY` and `ENGINE_SECRET_KEY`
 checks:
@@ -3933,14 +3933,14 @@ letting requests through and log once at startup, not per request:
 
 Move that `log.warning` out of the request path and into `__init__` if it is not already there.
 
-- [ ]  **Step 4: Fix the tests and fixtures that ran without a token**
+- [x]  **Step 4: Fix the tests and fixtures that ran without a token**
 
 Run: `grep -rln "load_config\|ENGINE_API_TOKEN" services/engine/tests`
 Every fixture that builds an environment needs a token of at least 16 characters, except the tests that
 are specifically about a missing one. `tests/conftest.py` already sets development defaults with
 `os.environ.setdefault` — add `os.environ.setdefault("ENGINE_API_TOKEN", "dev-token-0123456789")` there.
 
-- [ ]  **Step 5: Run everything and commit**
+- [x]  **Step 5: Run everything and commit**
 
 Run: `uv run pytest -q` → all pass.
 Run: `uv run ruff check .` → `All checks passed!`
@@ -5094,3 +5094,23 @@ pebble, where no node deadline can see it. Four mutants, all killed.
 
 **Also:** `tests/test_api_main.py`'s `make_pool` double took `database_url` only, so `max_size` broke three
 lifespan tests that have nothing to do with pool sizing. It takes `**_` now.
+
+### Task 15 — post-review note
+
+**The length rule applies in development too, which the plan left ambiguous.** Its snippet checks the
+length after the `dev_insecure` branch, and either reading is defensible from the code alone. The choice
+here: `ENGINE_DEV_INSECURE=1` is permission to run *without* a token, not permission to run with a
+guessable one. A weak token left in a compose file is exactly what gets promoted to production, and the
+mutant that skips the length check in development is killed by its own test.
+
+**Two cases the plan's tests do not cover, both of them ordinary operator mistakes.**
+
+- `ENGINE_API_TOKEN=` (empty) in a compose file is a common way to "unset" a variable. It must read as
+  *absent* — refused in production, accepted as no-token in development — not as a configured token of
+  zero length. Dropping the `or None` survived every other test: the length rule catches the empty string
+  in production, so only the development path tells the two apart.
+- The minimum itself: with only "short" tested, lowering `MIN_API_TOKEN_LEN` to 4 stayed green. The
+  boundary is pinned at 15/16 now.
+
+Five mutants, all killed. Step 3 also asks for the per-request warning to be moved to startup; it was
+already in `create_app` from Plan 2a, so nothing moved.
