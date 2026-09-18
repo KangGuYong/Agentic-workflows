@@ -34,17 +34,33 @@ def pytest_collection_modifyitems(items):
 
 @pytest.fixture(scope="session")
 def db_url() -> Iterator[str]:
+    # An already-running server, when one is named, so the suite can be run where Docker is not available
+    # (CI without a socket, a remote sandbox). The database it points at is truncated between tests like
+    # any other, so it must be a throwaway.
+    existing = os.getenv("ENGINE_TEST_DATABASE_URL")
+    if existing:
+        os.environ["ENGINE_DATABASE_URL"] = existing
+        os.environ.setdefault("LANGGRAPH_AES_KEY", "0" * 32)
+        os.environ.setdefault("ENGINE_SECRET_KEY", "1" * 32)
+        yield existing
+        return
     from testcontainers.postgres import PostgresContainer
 
     with PostgresContainer("postgres:17-alpine", driver=None) as container:
         url = container.get_connection_url()
         os.environ["ENGINE_DATABASE_URL"] = url
         os.environ.setdefault("LANGGRAPH_AES_KEY", "0" * 32)
+        os.environ.setdefault("ENGINE_SECRET_KEY", "1" * 32)
         yield url
 
 
 @pytest.fixture(scope="session")
 def redis_url() -> Iterator[str]:
+    existing = os.getenv("ENGINE_TEST_REDIS_URL")  # as above
+    if existing:
+        os.environ["ENGINE_REDIS_URL"] = existing
+        yield existing
+        return
     from testcontainers.redis import RedisContainer
 
     with RedisContainer("redis:7-alpine") as container:

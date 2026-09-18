@@ -109,9 +109,11 @@ async def test_a_secret_name_longer_than_the_api_allows_is_refused(pool):
     async with pool.connection() as conn:
         await conn.execute("INSERT INTO secrets (workspace_id, name, ciphertext) VALUES (%s, %s, %s)",
                            (workspace, "A" * 64, b"ciphertext"))
-    async with pool.connection() as conn, pytest.raises(CheckViolation):
-        await conn.execute("INSERT INTO secrets (workspace_id, name, ciphertext) VALUES (%s, %s, %s)",
-                           (workspace, "A" * 65, b"ciphertext"))
+    async with pool.connection() as conn:
+        # `pytest.raises` is a plain context manager, so it cannot be a second item of an `async with`.
+        with pytest.raises(CheckViolation):
+            await conn.execute("INSERT INTO secrets (workspace_id, name, ciphertext) VALUES (%s, %s, %s)",
+                               (workspace, "A" * 65, b"ciphertext"))
 
 
 async def test_the_same_name_can_exist_in_two_workspaces(pool):
