@@ -3963,7 +3963,7 @@ git commit -m "feat(engine): require an API token unless development mode is on"
 - Modify: `services/engine/README.md`
 - Test: manual (`docker compose config`, then a real `up`)
 
-- [ ]  **Step 1: Write the Dockerfile**
+- [x]  **Step 1: Write the Dockerfile**
 
 Create `services/engine/Dockerfile`:
 
@@ -4003,7 +4003,7 @@ tests
 Pin the uv image tag to whatever `uv --version` reports locally if 0.5 is not what the project uses; check
 with `uv --version` before building.
 
-- [ ]  **Step 2: Write the compose file**
+- [x]  **Step 2: Write the compose file**
 
 Create `deploy/docker-compose.yml`:
 
@@ -4079,7 +4079,7 @@ volumes:
 Redis holds only live event fan-out and control messages, all of which are rebuilt from Postgres, so
 persistence is turned off deliberately.
 
-- [ ]  **Step 3: Write the environment example**
+- [x]  **Step 3: Write the environment example**
 
 Create `deploy/.env.example`:
 
@@ -4115,7 +4115,7 @@ ENGINE_API_PORT=8000
 Make sure `deploy/.env` is ignored: `grep -n "^\.env" .gitignore` and add `deploy/.env` if it is not
 covered.
 
-- [ ]  **Step 4: Check the compose file parses**
+- [x]  **Step 4: Check the compose file parses**
 
 Run: `docker compose -f deploy/docker-compose.yml --env-file deploy/.env.example config`
 Expected: the resolved configuration prints. The `:?` variables are set (empty) in the example file, so
@@ -4153,14 +4153,14 @@ Run: `docker compose -f deploy/docker-compose.yml down`
 If Docker is not available in this environment, stop and report it rather than skipping the task: the
 compose file is the deliverable and an unbuilt one is not evidence of anything.
 
-- [ ]  **Step 6: Update the README**
+- [x]  **Step 6: Update the README**
 
 Add a "Deployment" section to `services/engine/README.md` covering: copy `.env.example`, generate the two
 keys and the token, point `OLLAMA_BASE_URL` at the GPU host, fill `HTTP_ALLOWLIST` (and that an empty one
 blocks every `http_request`), `up -d --build`, and scaling workers with `--scale worker=N`. Say plainly
 that rotating either key makes existing encrypted data unreadable.
 
-- [ ]  **Step 7: Commit**
+- [x]  **Step 7: Commit**
 
 ```bash
 git add services/engine/Dockerfile services/engine/.dockerignore services/engine/README.md deploy .gitignore
@@ -5114,3 +5114,33 @@ mutant that skips the length check in development is killed by its own test.
 
 Five mutants, all killed. Step 3 also asks for the per-request warning to be moved to startup; it was
 already in `create_app` from Plan 2a, so nothing moved.
+
+### Task 16 — post-review note
+
+**Step 5 (`up -d --build` against real containers) is NOT done, and the reason is not "no Docker".** A
+Docker daemon runs fine in this environment. What does not work is pulling any image: the agent proxy
+answers `403` to `CONNECT production.cloudfront.docker.com` and to `pkg-containers.githubusercontent.com`
+— Docker Hub's and ghcr's blob CDNs. Their manifest hosts (`registry-1.docker.io`, `ghcr.io`) answer
+normally, so the block is specifically on blob storage. With no base image obtainable, neither
+`docker build` nor `docker compose up` can run, and even `docker build --check` fails resolving
+`docker/dockerfile:1`. **The compose stack has therefore never been started.** Anyone with unrestricted
+registry access should run Step 5 as written before this is deployed.
+
+**What was verified here, without containers:**
+
+- `docker compose config` resolves the whole file — but only with a filled-in `.env`. Step 4 expects
+  `--env-file .env.example` to validate it; it cannot, because every `:?` guard fires on the empty values
+  the example file ships. That is the guards working, not a defect, but the plan's expectation is wrong.
+- The API healthcheck command — the most error-prone line in the file, a nested-quoted Python one-liner —
+  was run **verbatim** against a locally started `python -m engine.api.main`, and returns
+  `{"status":"ok","db":true,"redis":true}`. Without the header the same route answers `401`, which is why
+  the check has to carry the token at all.
+- Both compose `command:` entrypoints start for real: the API applies migrations (0002 → 0003 ran on a
+  fresh database) and serves; the worker reaches `ready`.
+- `uv lock --check` passes, so `uv sync --frozen` in the image will not fail on a stale lock. The uv base
+  image is pinned to `0.8`, matching the `uv 0.8.17` this project uses — the plan's `0.5` would have been
+  a different resolver.
+
+**Step 5's own instructions have two errors** for whoever runs them: `grep -c "worker started"` finds
+nothing, because the worker logs `worker <id> ready`; and `--scale worker=3` needs `--env-file deploy/.env`
+like every other invocation, or the `:?` guards reject it.

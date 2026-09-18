@@ -75,8 +75,45 @@ covers the whole app, docs routes included, with no per-route opt-out -- see `en
 a container healthcheck must send the same bearer token, e.g.
 `curl -H "Authorization: Bearer $ENGINE_API_TOKEN" http://localhost:8000/healthz`.
 
+## Deployment
+
+`deploy/docker-compose.yml` runs the whole engine: Postgres, Redis, the API and one or more workers.
+Ollama is **not** bundled — it already runs on the on-prem GPU host, and `OLLAMA_BASE_URL` points at it.
+(`deploy/docker-compose.dev.yml` is the development stack instead: plaintext credentials, ports published
+to the host, no engine containers.)
+
+```bash
+cd deploy
+cp .env.example .env          # then fill it in; .env is git-ignored
+
+# the two keys (32 random ASCII characters each; 16 and 24 also work)
+python -c "import secrets,string; a=string.ascii_letters+string.digits; print(''.join(secrets.choice(a) for _ in range(32)))"
+# the API token (at least 16 characters)
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+docker compose up -d --build
+docker compose ps             # postgres/redis/api healthy, worker running
+```
+
+Every route, `/healthz` included, requires `Authorization: Bearer $ENGINE_API_TOKEN`; the API container's
+own healthcheck carries it for that reason. Workers scale with `docker compose up -d --scale worker=3` —
+leases, fencing and the reaper's advisory lock were built for more than one, and one worker wins the
+reaper's lock each sweep while the others skip it.
+
+Both processes run `prepare_database` at startup, so migrations apply on the first `up` with no separate
+step; concurrent starts serialise on an advisory lock.
+
+**What you must set, and what happens if you get it wrong:**
+
+| Variable | Consequence |
+|---|---|
+| `LANGGRAPH_AES_KEY` | Encrypts checkpoints. **Rotating it makes every existing checkpoint unreadable** — there is no re-encryption path in this release. |
+| `ENGINE_SECRET_KEY` | Encrypts stored secrets and run inputs/outputs. **Rotating it makes them unreadable too**: secrets read as missing (`SECRET_NOT_FOUND`) and run payloads come back empty. Deliberately a different key from the one above, so one leaking does not open the other. |
+| `ENGINE_API_TOKEN` | Required, at least 16 characters. Without it the engine refuses to start unless `ENGINE_DEV_INSECURE=1`, which accepts every request unauthenticated. |
+| `HTTP_ALLOWLIST` | **Empty blocks every `http_request` node.** That is the default on purpose: a host reaches the network only once it is listed. |
+| `RUN_DATA_RETENTION_DAYS` | After this many days a finished run keeps its metadata and loses its payloads and checkpoints. |
+
 ## Not here yet
 
-Deferred to Plan 2b by design: the `http_request` node, egress policy, secrets and `{{secret.NAME}}`,
-header/value redaction, retention purge, and the production deployment compose file. `deploy/docker-compose.dev.yml`
-is development-only (plaintext credentials, ports published to the host).
+Multi-tenant workspaces, user accounts, the AI copilot and the RAG knowledge base are all out of scope for
+this release.
