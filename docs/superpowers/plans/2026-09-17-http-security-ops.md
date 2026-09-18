@@ -2171,7 +2171,7 @@ git commit -m "feat(engine): allow secret references in http_request fields only
 - Modify: `services/engine/engine/events/redact.py`
 - Test: `services/engine/tests/test_events_redact.py` (append)
 
-- [ ]  **Step 1: Write the failing test**
+- [x]  **Step 1: Write the failing test**
 
 Append to `services/engine/tests/test_events_redact.py`:
 
@@ -2192,12 +2192,12 @@ def test_header_redaction_lowercases_names_and_keeps_order():
     assert list(redact_headers({"COOKIE": "a", "Accept": "b"})) == ["cookie", "accept"]
 ```
 
-- [ ]  **Step 2: Run it to see it fail**
+- [x]  **Step 2: Run it to see it fail**
 
 Run: `uv run pytest tests/test_events_redact.py -q`
 Expected: FAIL — `ImportError: cannot import name 'redact_headers'`.
 
-- [ ]  **Step 3: Implement it**
+- [x]  **Step 3: Implement it**
 
 In `services/engine/engine/events/redact.py`, add:
 
@@ -2216,12 +2216,12 @@ def redact_headers(headers: dict[str, str]) -> dict[str, str]:
 
 and update the module docstring: header-name redaction lives here now, and value-based redaction lives at the `http_request` boundary (2b design §6).
 
-- [ ]  **Step 4: Run the tests**
+- [x]  **Step 4: Run the tests**
 
 Run: `uv run pytest tests/test_events_redact.py -q`
 Expected: PASS.
 
-- [ ]  **Step 5: Run everything and commit**
+- [x]  **Step 5: Run everything and commit**
 
 Run: `uv run pytest -q` → all pass.
 Run: `uv run ruff check .` → `All checks passed!`
@@ -4839,3 +4839,16 @@ observable. The field rule still will not be, unless Task 9 adds a case for an `
 field that is *not* `url`/`body`/`headers.*` — if the node has one. If it has no such field, say so in
 its note rather than leaving the gap unrecorded: a rule with no possible witness is a rule no test
 protects, and the next person to add a `body` field to some other node type will never hear about it.
+
+### Task 8 — post-review note
+
+The plan's two tests leave the actual defence unguarded. `redact_headers` is a list plus a lookup rule,
+and both halves can be broken without either test noticing: they name four headers between them, so
+dropping `proxy-authorization` or `x-auth-token` from `SECRET_HEADERS` stays green, and switching the
+exact lookup to substring matching stays green too. Three cases were added — every name in the list,
+a name that merely *contains* one (`x-cookie-policy`, which must not be redacted), and two spellings of
+one header collapsing to a single redacted entry. Four mutants, all killed.
+
+The substring case is the one worth keeping in mind: blanket matching looks safer and is not. It hides
+ordinary fields from whoever is debugging a failed run, which is the cost that makes people turn
+redaction off.
