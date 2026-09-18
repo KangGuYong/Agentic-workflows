@@ -154,19 +154,19 @@ export async function GET() {
 
 ## Task 1: Project skeleton
 
-- [ ] `pnpm create next-app apps/web` with TypeScript, ESLint, App Router, no Tailwind decision yet — pick Tailwind, it keeps component CSS out of this plan's way.
-- [ ] Set `"strict": true`, `"noUncheckedIndexedAccess": true` in `tsconfig.json`. The second one matters: the editor indexes into `nodes[id]` constantly and TypeScript should force the missing case to be handled.
-- [ ] Add vitest with `environment: "jsdom"` for component tests and `environment: "node"` for `lib/` tests — use vitest projects so both run under one `pnpm test`.
-- [ ] Add scripts: `dev`, `build`, `start`, `test`, `test:watch`, `lint`, `typecheck`, `e2e`.
-- [ ] Write one trivial test in `lib/` and one component test, so both projects are proven to run.
-- [ ] Add `apps/web` to the repo `.gitignore` exceptions as needed (`node_modules`, `.next`).
-- [ ] **미학 방향과 토큰을 정한다** (시각 디자인 절): 방향 한 줄, 서체 짝(한글 글꼴 포함, Inter·Roboto·Arial 금지), 색 토큰과 상태색 4종을 `app/globals.css`의 `:root`에 쓴다. 이후 Task는 이 토큰만 참조한다.
+- [x] `pnpm create next-app apps/web` with TypeScript, ESLint, App Router, no Tailwind decision yet — pick Tailwind, it keeps component CSS out of this plan's way.
+- [x] Set `"strict": true`, `"noUncheckedIndexedAccess": true` in `tsconfig.json`. The second one matters: the editor indexes into `nodes[id]` constantly and TypeScript should force the missing case to be handled.
+- [x] Add vitest with `environment: "jsdom"` for component tests and `environment: "node"` for `lib/` tests — use vitest projects so both run under one `pnpm test`.
+- [x] Add scripts: `dev`, `build`, `start`, `test`, `test:watch`, `lint`, `typecheck`, `e2e`.
+- [x] Write one trivial test in `lib/` and one component test, so both projects are proven to run.
+- [x] Add `apps/web` to the repo `.gitignore` exceptions as needed (`node_modules`, `.next`).
+- [x] **미학 방향과 토큰을 정한다** (시각 디자인 절): 방향 한 줄, 서체 짝(한글 글꼴 포함, Inter·Roboto·Arial 금지), 색 토큰과 상태색 4종을 `app/globals.css`의 `:root`에 쓴다. 이후 Task는 이 토큰만 참조한다.
 
 **Verification**
-- [ ] `pnpm test` passes with two tests.
-- [ ] `pnpm typecheck` and `pnpm lint` pass.
-- [ ] `pnpm build` succeeds.
-- [ ] Commit: `chore(web): scaffold the Next.js editor app`
+- [x] `pnpm test` passes with two tests.
+- [x] `pnpm typecheck` and `pnpm lint` pass.
+- [x] `pnpm build` succeeds.
+- [x] Commit: `chore(web): scaffold the Next.js editor app`
 
 ---
 
@@ -753,3 +753,77 @@ test is not optional.**
 
 **Cost:** one throwaway app, 447 MB of `node_modules`, deleted. Nothing was committed but this note.
 
+### Task 1 — project skeleton, and the aesthetic direction
+
+**미학 방향: 계기판 (instrument panel).** 관제실·오실로스코프·콕핏 계측기. 1px 음각 괘선, 모눈종이 캔버스,
+등폭 수치 판독, "지금 살아 있다"를 뜻하는 단 하나의 호박색 신호. 취향이 아니라 기능으로 고른 방향이다 —
+계측기는 조밀한 정보를 한눈에 읽히도록 설계된 물건이고, 그것이 노드 캔버스와 설정 패널의 제약과 같다.
+근거 전문은 `apps/web/app/globals.css` 머리말에 있다.
+
+- **서체**: IBM Plex Sans KR (표시·본문) + IBM Plex Mono (판독). Plex는 엔지니어링 서체로 그려진 물건이라
+  중립적 UI 산세리프에 없는 성격이 있고, KR 컷이 한글을 덮으므로 제목과 본문이 서로 다른 패밀리로
+  갈라지지 않는다. 등폭은 라틴·숫자 전용 문맥(노드 id, exec_index, 소요 시간, 토큰 수)에만 쓰고, 섞이는
+  곳에서는 같은 슈퍼패밀리의 형제로 폴백한다.
+- **색**: 차가운 흑연 잉크 5단계 + 호박색 신호 하나. 밝은 테마는 따뜻한 종이. 상태 6종은 색과 **형태를
+  함께** 갖는다(○ ◍ ● ✕ ❙❙ ◌) — 호박과 진홍은 8px 배지에서 구분되지 않고, 적록색약에서는 더 그렇다.
+
+**계획이 틀렸던 것**
+
+- **Next.js 15 → 16.3.5.** 16이 현재 `latest`다. Task 0에서 이미 고쳤다.
+- `create-next-app`은 **대상의 부모 디렉터리가 없으면 "path is not writable"** 로 거절한다. `apps/`가 없어서
+  처음 실행이 실패했다. 메시지가 권한을 가리키지만 원인은 권한이 아니다. `mkdir -p apps` 먼저.
+- **vitest 5는 `@types/node` ^22 이상을 요구**하는데 create-next-app은 ^20을 박아둔다. 런타임이 Node 22이므로
+  ^22로 올리는 것이 맞다.
+- `vite-tsconfig-paths`는 **필요 없다.** Vite가 `resolve.tsconfigPaths: true`로 직접 지원하고, projects는
+  선언 파일의 plugins를 상속하므로 중복 선언하면 vitest가 경고한다.
+- `package.json`에 `"type": "module"`이 없으면 vitest 5가 ESM 설정 파일을 CJS로 읽고 경고한다.
+
+**Korean 글꼴 — 막힐 줄 알았으나 막히지 않았다, 대신 다른 것이 나왔다**
+
+계획은 "한글 글꼴이 실제로 존재하는 조합"을 요구했다. 확인해보니 Next의 `font-data.json`에서
+**`korean` subset을 선언한 폰트가 0개**다(`IBM Plex Sans KR`조차 `["latin","latin-ext"]`만 선언한다).
+여기서 멈추고 self-host로 갔다면 헛수고였다 — 실제로 빌드해보니 로더가 Google CSS 전체를 받아
+**한글 unicode-range(U+AC00–D7A3)를 포함한 woff2를 485개 자가 호스팅한다.** 한글은 그냥 된다.
+`subsets` 옵션이 실제 커버리지의 전부가 아니다.
+
+**그 대신 진짜 결함이 그 밑에 있었다.** 빌드된 HTML을 세어보니
+**`<link rel="preload" as="font">`가 376개**였다. Google은 한글 폰트를 무게당 ~100개 unicode-range 조각으로
+쪼개고, `next/font`는 자가 호스팅하는 파일마다 preload를 하나씩 뱉는다. 브라우저는 unicode-range로 필요한
+조각만 알아서 가져가므로 preload는 전부 비용이다. KR 얼굴에 `preload: false`를 주니 **376 → 3**이 되었고
+한글 커버리지는 그대로다. 이건 눈으로 볼 수 없는 종류의 결함이라, 계획이 요구하지 않았어도 세어본 것이
+맞았다. `app/layout.tsx`에 근거를 주석으로 남겼다.
+
+**대비(contrast) — 테스트로 만든 것이 값을 했다**
+
+토큰을 정하고 WCAG 대비를 재보니 **5쌍이 기준 미달**이었다.
+
+| 토큰 | 전 | 후 |
+|---|---|---|
+| dark `--fg-faint` | 3.36 | 4.83 (ink-900) / 4.54 (ink-800) |
+| light `--fg-faint` | 2.79 **FAIL** | 4.58 |
+| light `--st-queued` | 3.00 **FAIL** | 3.56 |
+| light `--accent` | 3.76 | 4.51 |
+| light `--st-running` | 4.03 | 4.83 |
+
+그리고 **손으로 짠 확인 스크립트가 놓친 것을 테스트가 잡았다**: 스크립트는 `--ink-900`만 봤는데,
+패널 표면인 `--ink-800` 위에서 dark `--fg-faint`가 4.29로 미달이었다. 두 표면을 모두 도는 테스트가
+아니었으면 `.instrument-label`이 패널 안에서만 읽히지 않는 상태로 21개 Task를 갔을 것이다.
+그래서 이 검사는 일회성 스크립트가 아니라 `lib/design/contrast.test.ts`로 남는다: 본문 토큰 4.5:1,
+상태 글리프 3:1(WCAG 비텍스트), 강조 채움 위 텍스트 4.5:1.
+
+**Mutation 결과 (5/5 잡힘)**
+
+| 변형 | 결과 |
+|---|---|
+| 글리프 중복(실패도 `●`) | 잡힘 — 형태 구분 테스트 |
+| CSS에 없는 토큰 이름 | 잡힘 |
+| 라벨을 영어로 | 잡힘 |
+| 컴포넌트에 hex 리터럴 | 잡힘 — 토큰 규율 테스트 |
+| 상태 하나 삭제 | 잡힘 — **단 하나의 테스트만** |
+
+마지막 것이 기록할 값이 있다: 페이지 테스트는 `STATUSES`를 돌며 만들어지므로 `STATUSES`가 줄어드는 것을
+원리적으로 잡을 수 없다. 리터럴 `IDS` 배열에 못 박은 커버리지 테스트만이 잡는다. 파생된 테스트는 원본이
+줄어드는 것을 검사하지 못한다 — 다음 Task들에서도 같은 함정이 반복될 것이다.
+
+**검증**: `pnpm test` 31 passed (3 files), `pnpm typecheck` clean, `pnpm lint` clean, `pnpm build` 성공,
+preload 3개. 다크·라이트 두 테마를 Playwright로 실제 렌더해 눈으로 확인했다.
