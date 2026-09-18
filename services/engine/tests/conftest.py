@@ -16,12 +16,13 @@ APP_TABLES = ("run_events", "node_runs", "runs", "workflow_versions", "workflows
 CHECKPOINT_TABLES = ("checkpoint_blobs", "checkpoint_writes", "checkpoints")  # not checkpoint_migrations
 
 
-def pytest_asyncio_loop_factories(config, item):
-    """psycopg's async connections refuse Windows' default ProactorEventLoop, so development on Windows
-    runs tests on the selector loop. Deployment is Linux, where None leaves the default alone."""
-    if sys.platform == "win32":
+if sys.platform == "win32":
+    # psycopg's async connections refuse Windows' default ProactorEventLoop, so development on Windows
+    # runs tests on the selector loop. The hook is only defined there: pytest-asyncio demands a non-empty
+    # mapping from every registered implementation, so a version that returns None to mean "no opinion"
+    # fails collection everywhere else. Not registering it at all is what leaves the default alone.
+    def pytest_asyncio_loop_factories(config, item):
         return {"selector": asyncio.SelectorEventLoop}
-    return None
 
 
 def pytest_collection_modifyitems(items):
