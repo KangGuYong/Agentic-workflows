@@ -342,22 +342,22 @@ The core of the editor. Pure TypeScript, no React, no network — so it can be t
 
 **Tests first** (`lib/dsl/history.test.ts`):
 
-- [ ] Apply three commands, undo twice, redo once → the document equals the state after the second command.
-- [ ] A new command after an undo **clears the redo stack**.
-- [ ] The stack is capped at 50; the 51st push drops the oldest and undo still works 50 times.
-- [ ] Consecutive `setPosition` on the **same node** merge into one entry; on different nodes they do not.
-- [ ] `commit()` ends a merge window, so a drag followed by a config change is two entries.
-- [ ] Undo restores positions exactly (a merged drag undoes to before the drag, not to an intermediate frame).
+- [x] Apply three commands, undo twice, redo once → the document equals the state after the second command.
+- [x] A new command after an undo **clears the redo stack**.
+- [x] The stack is capped at 50; the 51st push drops the oldest and undo still works 50 times.
+- [x] Consecutive `setPosition` on the **same node** merge into one entry; on different nodes they do not.
+- [x] `commit()` ends a merge window, so a drag followed by a config change is two entries.
+- [x] Undo restores positions exactly (a merged drag undoes to before the drag, not to an intermediate frame).
 
 **Implementation**
-- [ ] `history.ts` keeps `past: EditorDsl[]`, `future: EditorDsl[]` and a `mergeKey: string | null`. Snapshots, not inverse operations (3 설계 §5.1).
-- [ ] `push(dsl, mergeKey?)`: when `mergeKey` equals the previous push's key, replace the top of `past` instead of adding to it — **no**, the opposite: keep the *older* snapshot (that is the state to return to) and do not push a new one.
+- [x] `history.ts` keeps `past: EditorDsl[]`, `future: EditorDsl[]` and a `mergeKey: string | null`. Snapshots, not inverse operations (3 설계 §5.1).
+- [x] `push(dsl, mergeKey?)`: when `mergeKey` equals the previous push's key, replace the top of `past` instead of adding to it — **no**, the opposite: keep the *older* snapshot (that is the state to return to) and do not push a new one.
 
 Write that last point as a test before implementing it; getting the direction backwards is the obvious bug and it looks fine until you undo a drag.
 
 **Verification**
-- [ ] `pnpm test` passes.
-- [ ] Commit: `feat(web): undo and redo over document snapshots`
+- [x] `pnpm test` passes.
+- [x] Commit: `feat(web): undo and redo over document snapshots`
 
 ---
 
@@ -1066,3 +1066,50 @@ testcontainers가 붙지 못했고 — 통합 테스트가 setup에서 에러 �
 | `setPositions`가 원본을 변경 | 2 |
 
 **검증**: `pnpm test` 103 passed (8 files), `typecheck`·`lint` clean.
+
+### Task 6 — undo/redo
+
+`lib/dsl/history.ts`. 역연산 대신 **문서 스냅샷**을 쌓는다: `past`(각 커맨드 직전 상태, 오래된 것부터),
+`present`, `future`(undo로 지나온 것, 가까운 것부터), 그리고 진행 중인 드래그의 `mergeKey`.
+
+역연산을 구현하지 않는 이유는 코드량이 아니라 **틀릴 수 있다는 것**이다 — 틀린 역연산은 사용자가 흔치 않은
+것을 되돌릴 때까지 아무도 모른다. DSL은 512KB 상한이고 스택은 50개라 최악이 묶여 있다. 스냅샷이 안전한
+것은 오직 Task 5의 커맨드가 전부 순수하기 때문이다. 제자리에서 고치는 커맨드가 하나라도 있으면 스냅샷까지
+같이 바뀐다.
+
+**계획이 경고한 병합 방향.** 계획서는 이렇게 적어뒀다:
+
+> `push(dsl, mergeKey?)`: mergeKey가 직전과 같으면 `past`의 top을 교체 — **아니다, 반대다**: 더 *오래된*
+> 스냅샷을 유지하고 새로 쌓지 않는다. 이걸 먼저 테스트로 쓰라, 방향을 거꾸로 잡는 것이 뻔한 버그이고
+> 드래그를 되돌리기 전까지는 멀쩡해 보인다.
+
+그대로 따랐고, mutation으로 방향을 뒤집어 확인했다: 정확히 그 한 테스트(`undoes a merged drag to before
+the drag, not to an intermediate frame`)만 깨진다. 다른 114개는 전부 통과한다 — 경고가 없었다면 이 버그는
+리뷰에서도 살아남았을 것이다.
+
+**계획에 없던 규칙 셋.** 전부 드래그 병합이 인접한 조작으로 새는 것을 막는다.
+
+- **`undo`가 병합 창을 닫는다.** 닫지 않으면 undo 직후의 이동이 방금 돌아간 그 단계로 병합되어 둘이
+  한꺼번에 되돌아간다.
+- **`redo`도 마찬가지.**
+- **`apply`는 문서가 그대로면(`next === present`) 아무것도 하지 않는다.** Task 5의 커맨드는 할 일이
+  없을 때 입력을 참조 그대로 돌려주므로, 그걸 기록하면 "undo를 눌렀는데 아무 일도 안 일어나는" 단계가
+  스택에 쌓인다.
+
+**상한은 `slice(-MAX_HISTORY)`로 apply와 redo 양쪽에 건다.** 51번째가 가장 오래된 것을 떨어뜨리고, undo는
+그 뒤로도 50번 동작한다. 테스트는 60번 편집 후 50번 undo해서 남은 10개가 창 밖이라 되돌아가지 않는 것을
+확인한다.
+
+**Mutation 7/7 잡힘**
+
+| 변형 | 깨진 테스트 |
+|---|---|
+| **병합 방향 반대** | **1** (계획이 경고한 바로 그것) |
+| no-op 가드 제거 | 1 |
+| `apply`가 `future` 유지 | 1 |
+| 상한 제거 | 1 |
+| `undo`가 `mergeKey` 유지 | 1 |
+| `commit`이 아무것도 안 함 | 1 |
+| 키가 달라도 병합 | 6 |
+
+**검증**: `pnpm test` 115 passed (9 files), `typecheck`·`lint` clean.
