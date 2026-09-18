@@ -3,12 +3,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol
 
 from pydantic import BaseModel
 
 from engine.dsl.models import Policy
 from engine.dsl.types import Target
+from engine.http.client import HttpResponse
 from engine.jsondata import schema_problems
 from engine.jsondata import schema_violations as schema_violations  # re-exported for node modules
 from engine.llm.base import LLMClient, TokenSink
@@ -41,6 +42,15 @@ class NodeResult:
     usage: Usage = field(default_factory=Usage)
 
 
+class HttpClient(Protocol):
+    async def request(self, *, method: str, url: str, headers: dict[str, str], body: str | None,
+                      timeout_sec: float) -> HttpResponse: ...
+
+
+class SecretResolver(Protocol):
+    async def resolve(self, names: set[str]) -> dict[str, str]: ...
+
+
 @dataclass
 class NodeContext:
     run_id: str
@@ -53,6 +63,10 @@ class NodeContext:
     llm: LLMClient
     on_token: TokenSink | None = None
     interrupt: Callable[[dict[str, Any]], Awaitable[Any]] | None = None
+    http: HttpClient | None = None
+    secrets: SecretResolver | None = None
+    secret_nonce: str | None = None
+    timeout_sec: float | None = None
 
 
 class NodeSpec(ABC):
@@ -61,6 +75,10 @@ class NodeSpec(ABC):
     category: ClassVar[str]
     Config: ClassVar[type[BaseModel]]
     default_policy: ClassVar[Policy | None] = None  # None: the node does not accept a policy
+
+    def policy_for(self, config: BaseModel) -> Policy | None:
+        """Effective default policy for this config. Only http_request varies it (by method)."""
+        return self.default_policy
     side_effects: ClassVar[bool] = False
     is_branch: ClassVar[bool] = False
 

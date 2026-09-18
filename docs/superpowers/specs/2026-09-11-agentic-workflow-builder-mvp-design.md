@@ -93,12 +93,12 @@
 [web]    Next.js(App Router) + @xyflow/react + Zustand + ELKjs + RJSF(shadcn 테마)
             │  REST + SSE   (TS 타입은 FastAPI OpenAPI → openapi-typescript로 생성)
 [api]    FastAPI
-            │  Redis 큐(arq)
+            │  runs 테이블 + LISTEN/NOTIFY  (v3: arq 대체)
 [worker] Python — 검증기 → 컴파일러 → LangGraph 실행 → 이벤트 기록·발행
-         + reaper(arq cron) — 리스 만료 실행 복구, 대기 만료, 보존 기간 정리
+         + reaper(워커 내 주기 태스크) — 리스 만료 실행 복구, 대기 만료, 보존 기간 정리
             │
 [Postgres]  애플리케이션 테이블 + 이벤트 로그 + LangGraph 체크포인트 (source of truth)
-[Redis]     작업 큐 · 실시간 이벤트 전송(pub/sub) · 실행 제어 채널 · 모델별 세마포어
+[Redis]     실시간 이벤트 전송(pub/sub) · 실행 제어 채널 · 모델별 세마포어
 [Ollama]    모델 서버 (LLM 게이트웨이를 통해서만 호출)
 ```
 
@@ -110,7 +110,7 @@
 apps/web/                      # Next.js 에디터
 services/engine/               # Python 패키지 (api와 worker가 공유)
   engine/api/                  # FastAPI 라우터
-  engine/worker/               # arq 워커 엔트리포인트, 리스·하트비트, reaper
+  engine/worker/               # 워커 엔트리포인트, 점유·리스·하트비트, reaper
   engine/dsl/                  # DSL Pydantic 모델, 타입 시스템
   engine/validator/            # 그래프·변수·타입 검증
   engine/compiler/             # DSL → StateGraph, 노드 래퍼
@@ -119,7 +119,7 @@ services/engine/               # Python 패키지 (api와 worker가 공유)
   engine/llm/                  # LLM 게이트웨이 (Ollama, OpenAI 호환)
   engine/events/               # 이벤트 기록(Postgres) + 발행(Redis)
   engine/security/             # 시크릿 암호화, 레닥션, HTTP egress 정책
-  engine/db/                   # SQLAlchemy 모델, Alembic 마이그레이션
+  engine/db/                   # psycopg3 질의, Alembic 마이그레이션
 deploy/docker-compose.yml      # web, api, worker, postgres, redis, ollama
 ```
 
@@ -147,7 +147,7 @@ deploy/docker-compose.yml      # web, api, worker, postgres, redis, ollama
 | `workflows`         | `id`, `workspace_id`, `name`, `draft_dsl jsonb`, `revision int`, `created_at`, `updated_at`                                                                                                                                                                                                                                                                                                                                      |
 | `workflow_versions` | `id`, `workflow_id`, `workspace_id`, `version_no`, `dsl jsonb`, `dsl_hash`, `created_at` — **불변**, `unique(workflow_id, dsl_hash)`, `unique(workflow_id, version_no)`                                                                                                                                                                                                                                                         |
 | `runs`              | `id`, `workspace_id`, `workflow_id`, `workflow_version_id`, `status`, `inputs jsonb`, `outputs jsonb`, `error jsonb`, `idempotency_key`, `lease_owner`, `lease_expires_at`, `cancel_requested_at`, `waiting_node_id`, `waiting_exec_index`, `resume_payload jsonb`, `retry_count`, `recovery_count`, `event_seq bigint`, `created_at`, `started_at`, `finished_at`, `active_ms bigint` — `unique(workflow_id, idempotency_key)` |
-| `node_runs`         | `id`, `run_id`, `node_id`, `exec_index`, `attempt`, `status`, `input jsonb`, `output jsonb`, `error jsonb`, `tokens_in`, `tokens_out`, `truncated bool`, `started_at`, `finished_at` — `unique(run_id, node_id, exec_index, attempt)`                                                                                                                                                                                           |
+| `node_runs`         | `id`, `run_id`, `node_id`, `exec_index`, `attempt`, `status`, `input jsonb`, `output jsonb`, `error jsonb`, `tokens_in`, `tokens_out`, `truncated bool`, `waited bool`, `started_at`, `finished_at` — `unique(run_id, node_id, exec_index, attempt)`                                                                                                                                                                                           |
 | `run_events`        | `run_id`, `seq bigint`, `type`, `node_id`, `exec_index`, `attempt`, `payload jsonb`, `created_at` — `primary key(run_id, seq)`                                                                                                                                                                                                                                                                                                  |
 | `secrets`           | `id`, `workspace_id`, `name`, `ciphertext bytea`, `created_at`, `updated_at` — `unique(workspace_id, name)`                                                                                                                                                                                                                                                                                                                     |
 | (LangGraph)         | 체크포인트 테이블 —`AsyncPostgresSaver.setup()`이 관리, 암호화 직렬화(10.3)                                                                                                                                                                                                                                                                                                                                                     |
@@ -347,12 +347,11 @@ stateDiagram-v2
 
 ### 5.2 중복 실행 방지: 리스·펜싱·Reaper
 
-- **점유**: 워커는 `UPDATE runs SET status='running', lease_owner=:w, lease_expires_at=now()+30s WHERE id=:id AND status='queued' RETURNING *`. 실패하면 작업을 버린다(중복 큐 등록에도 안전).
+- **점유**: 워커는 `UPDATE runs SET status='running', lease_owner=:w, lease_expires_at=now()+30s WHERE id = (SELECT id FROM runs WHERE status='queued' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING *`. 이 문장이 큐이자 CAS 점유다(v3: Redis 큐 대체). 실행 생성 트랜잭션이 `NOTIFY`로 워커를 깨우고, 워커는 알림을 놓쳐도 5초 주기 폴링으로 집는다.
 - **하트비트**: 10초마다 `lease_expires_at` 연장 + `cancel_requested_at` 확인. 연장에 실패(리스 상실)하면 즉시 자신의 실행 태스크를 취소한다.
 - **펜싱**: 워커의 모든 `runs` 갱신은 `WHERE lease_owner=:w` 조건을 붙인다. 노드 래퍼는 각 노드 시작 전 로컬 리스 유효 플래그를 확인한다.
-- **Reaper**(15초 주기, arq cron):
+- **Reaper**(15초 주기, 워커 내 주기 태스크. `pg_try_advisory_lock`으로 한 번에 한 워커만):
   - 리스 만료된 `running` → 5.1 규칙대로 `queued`(재등록, `recovery_count+1`) / `failed` / `cancelled`.
-  - 60초 넘게 `queued`인 실행 → 큐 재등록(큐 유실 대비, CAS가 중복을 막음).
   - `waiting` 30일 초과 → `cancelled`.
   - 보존 기간 정리(10.4).
 - 남는 위험: 리스를 잃은 워커가 알아차리기 전(최대 하트비트 간격) 노드 하나를 더 실행할 수 있다 → 5.4의 at-least-once로 수용한다.
@@ -361,6 +360,7 @@ stateDiagram-v2
 
 - **실행 상태**
   ```python
+  # v3: outputs는 노드마다 out_<node_id> 채널로 분리된다(체크포인트 저장량). 런타임 코어 설계 3절.
   class RunState(TypedDict):
       inputs: dict
       outputs: Annotated[dict[str, Any], merge_dicts]        # node_id → 최신 출력
@@ -676,7 +676,7 @@ FastAPI의 OpenAPI 문서가 요청·응답 스키마의 정본이며, 아래는
 | 노드 출력 크기(상태에 들어가는 값) | 1MB 초과 시`OUTPUT_TOO_LARGE`       |
 | 실행 활성 시간(대기 제외)          | 1시간 초과 시`RUN_TIMEOUT`으로 실패 |
 | 승인 대기                          | 30일 초과 시 자동 취소              |
-| 워커당 동시 실행                   | 10 (arq`max_jobs`, 설정 가능)       |
+| 워커당 동시 실행                   | 10 (`WORKER_MAX_RUNS`, 설정 가능)   |
 | 모델별 동시 LLM 호출               | `OLLAMA_NUM_PARALLEL` (설정 가능)   |
 
 ### 11.2 성능 목표 (단일 서버, MVP)
@@ -723,6 +723,7 @@ FastAPI의 OpenAPI 문서가 요청·응답 스키마의 정본이며, 아래는
 ## 부록 A. 변경 이력
 
 - **v1** (2026-09-11): 최초 설계.
+- **v3** (2026-09-16): 하위 프로젝트 2를 2a(런타임 코어)·2b(HTTP·보안·운영)로 분리. Plan 1 구현과 최종 리뷰 결과 반영 — Redis 큐(arq)를 `runs` 테이블 + `LISTEN/NOTIFY`로 대체, reaper를 워커 내 주기 태스크로, 실행 상태를 노드별 채널로 분리, `node_runs.waited` 추가, DB 접근을 psycopg3 + 수동 SQL로. 세부는 `2026-09-16-runtime-core-design.md`.
 - **v2** (2026-09-11): 리뷰 반영
   - 실행 상태 머신·전이 주체, 리스·펜싱·Reaper(5.1–5.2)
   - 노드 성공 기준, exec_index/attempt, at-least-once·멱등 키(`run:node:exec_index`, attempt 미포함), 수동 retry 의미(5.3–5.5)

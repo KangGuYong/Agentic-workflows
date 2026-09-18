@@ -11,7 +11,9 @@ from engine.runtime.runner import execute_run
 from engine.validator import validate
 from tests.helpers import load_golden
 
-PATTERNS = ["chaining", "routing", "parallel", "evaluator_loop", "hitl"]
+# http_call is validated here but executed only in tests/test_acceptance_2b.py: running it needs a
+# real HTTP port and a secret resolver, neither of which this file's InMemorySaver setup has.
+PATTERNS = ["chaining", "routing", "parallel", "evaluator_loop", "hitl", "http_call"]
 
 
 def _deps(llm, run_id: str = "run-1") -> RunDeps:
