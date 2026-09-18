@@ -317,24 +317,24 @@ The core of the editor. Pure TypeScript, no React, no network — so it can be t
 
 **Tests first** (`lib/dsl/commands.test.ts`, `lib/dsl/ids.test.ts`):
 
-- [ ] `nextId("llm", dsl)` returns `llm_1` on an empty document, `llm_3` when `llm_1` and `llm_2` exist, and **`llm_3` when only `llm_2` exists** (max + 1, not count + 1).
-- [ ] Deleting `llm_2` then adding an llm gives `llm_3`, never `llm_2` again.
-- [ ] `start` and `end` get no number and `addNode` refuses a second one.
-- [ ] Every command returns a **new** object; the input is not mutated (assert with a deep-frozen input).
-- [ ] `removeNode` removes the node **and every edge touching it**.
-- [ ] `connect` refuses a duplicate `(source, sourceHandle, target)` triple — the engine reports `EDGE_DUPLICATE` for it, but the editor should not create it in the first place.
-- [ ] `connect` generates an edge id that does not collide with an existing one.
-- [ ] `setPolicy(node, {})` removes the `policy` key entirely rather than writing `{}` (3 설계 §5.4 — `dsl_hash` treats them differently).
-- [ ] `setConfig` replaces the whole config object; it does not deep-merge. A merged update cannot delete a key.
+- [x] `nextId("llm", dsl)` returns `llm_1` on an empty document, `llm_3` when `llm_1` and `llm_2` exist, and **`llm_3` when only `llm_2` exists** (max + 1, not count + 1).
+- [x] Deleting `llm_2` then adding an llm gives `llm_3`, never `llm_2` again.
+- [x] `start` and `end` get no number and `addNode` refuses a second one.
+- [x] Every command returns a **new** object; the input is not mutated (assert with a deep-frozen input).
+- [x] `removeNode` removes the node **and every edge touching it**.
+- [x] `connect` refuses a duplicate `(source, sourceHandle, target)` triple — the engine reports `EDGE_DUPLICATE` for it, but the editor should not create it in the first place.
+- [x] `connect` generates an edge id that does not collide with an existing one.
+- [x] `setPolicy(node, {})` removes the `policy` key entirely rather than writing `{}` (3 설계 §5.4 — `dsl_hash` treats them differently).
+- [x] `setConfig` replaces the whole config object; it does not deep-merge. A merged update cannot delete a key.
 
 **Implementation**
-- [ ] `lib/dsl/document.ts`: `EditorDsl = WorkflowDSL & { nodes: (Node & { position: XY })[] }`. Position is editor-only and excluded from `dsl_hash` by the engine, so it rides along in the document.
-- [ ] `lib/dsl/commands.ts`: one exported function per command, each `(dsl: EditorDsl, …args) => EditorDsl`.
-- [ ] `lib/dsl/ids.ts`: `nextId` and `nextEdgeId`.
+- [x] `lib/dsl/document.ts`: `EditorDsl = WorkflowDSL & { nodes: (Node & { position: XY })[] }`. Position is editor-only and excluded from `dsl_hash` by the engine, so it rides along in the document.
+- [x] `lib/dsl/commands.ts`: one exported function per command, each `(dsl: EditorDsl, …args) => EditorDsl`.
+- [x] `lib/dsl/ids.ts`: `nextId` and `nextEdgeId`.
 
 **Verification**
-- [ ] `pnpm test` passes; the immutability test fails first if a command mutates.
-- [ ] Commit: `feat(web): model the workflow document with pure edit commands`
+- [x] `pnpm test` passes; the immutability test fails first if a command mutates.
+- [x] Commit: `feat(web): model the workflow document with pure edit commands`
 
 ---
 
@@ -1013,3 +1013,56 @@ SSE 쪽은 이미 끝난 실행을 재생한 것이라 *실시간* 흐름을 증
 testcontainers가 붙지 못했고 — 통합 테스트가 setup에서 에러 — 사용자가 계속 띄워두라고 한 배포 스택도
 함께 사라져 있었다. `dockerd` 재기동 + `docker compose up -d`로 복구했다. 이미지는 남아 있어 재빌드는
 필요 없었다. 긴 유휴 뒤에는 통합 테스트를 돌리기 전에 `docker ps`를 먼저 확인하는 편이 낫다.
+
+### Task 5 — the DSL document and its commands
+
+`lib/dsl/document.ts`(타입), `lib/dsl/ids.ts`(id 생성), `lib/dsl/commands.ts`(편집 커맨드 8종).
+전부 순수 TS — React도 네트워크도 없어서 빠르고 촘촘하게 테스트된다.
+
+**계획보다 강하게 만든 것 하나.** 계획은 id 규칙을 `<type>_<n>`, max+1로 못 박으라고 했다. 그렇게 쓰고
+"관례를 따르지 않는 id는 무시한다" 테스트를 붙였다가 기대값이 틀렸는데, 고치면서 더 중요한 걸 알았다:
+
+> 형식 파싱은 *보기 좋은* 번호를 고르는 휴리스틱일 뿐이고, 정확성이 달린 진짜 요구사항은
+> **"이미 쓰는 id를 절대 돌려주지 않는다"** 이다.
+
+`llm_01`과 `llm_1`은 다른 문자열이라 공존할 수 있고, 가져온 문서나 손으로 고친 문서는 무엇이든 담을 수
+있다 — 예컨대 `llm_1`이라는 id를 가진 `template` 노드. 그래서 형식 규칙에서 *추론*하는 대신 충돌하지
+않을 때까지 증가시키는 루프로 **직접 보장**한다. 테스트도 그 불변식을 직접 단언한다.
+
+**계획이 다루지 않았지만 캔버스가 곧 부딪힐 것들.** React Flow는 사용자가 무엇이든 끌어다 놓게 해주므로
+커맨드가 막아야 한다. 전부 "문서를 그대로 돌려준다"(`before === after`)로 처리해, 호출자가 히스토리
+항목을 쌓지 않고 넘어갈 수 있게 했다.
+
+- 자기 자신으로의 연결 — 엔진의 그래프 규칙에 자리가 없다
+- 존재하지 않는 노드를 가리키는 연결
+- **명시적 `sourceHandle: "out"`과 생략을 같은 연결로 취급** — 엔진이 `"out"`으로 기본값을 채우므로
+  둘은 같은 엣지다. 기본값을 비교하지 않으면 에디터가 `EDGE_DUPLICATE`가 될 엣지를 만들어낸다
+- 같은 이유로, 기본 핸들은 **기록하지 않는다.** 모든 엣지에 `"out"`을 명시하면 의미가 완전히 같은 문서의
+  `dsl_hash`가 달라져서 아무것도 바뀌지 않은 새 워크플로 버전이 생긴다
+- `setLabel("")`은 빈 문자열을 저장하는 대신 키를 지운다
+
+**`setPositions`는 여러 노드를 한 번에 옮긴다** (계획의 `setPosition` 단수형과 다름). 다중 선택 드래그가
+한 번의 undo로 되돌아가야 하기 때문이다. Task 6의 병합 창과 맞물린다.
+
+**얼린 입력으로 순수성을 강제했다.** 테스트가 입력 문서를 `Object.freeze`로 깊이 얼려서, 제자리에서
+고치는 커맨드는 조용히 통과하는 대신 던진다. 이건 undo/redo가 의존하는 성질이다 — 히스토리가 스냅샷을
+보관하므로, 공유된 가변 노드 하나면 편집이 과거까지 바꾼다.
+
+**lint 설정 하나 추가.** `const { policy: _previous, ...rest } = node`는 키를 지우는 유일한 비파괴
+관용구인데 `@typescript-eslint/no-unused-vars`가 경고한다. `^_` 무시 패턴을 켰다 — 버리려고 만든
+바인딩이라는 표시다.
+
+**Mutation 8/8 잡힘**
+
+| 변형 | 깨진 테스트 |
+|---|---|
+| `removeNode`가 나가는 엣지만 제거 | 1 |
+| `connect` 중복 검사 제거 | 2 |
+| `connect`가 기본 핸들도 기록 | 1 |
+| `setConfig`가 병합 | 1 |
+| `setPolicy`가 빈 객체를 기록 | 2 |
+| `connect`가 자기 연결 허용 | 1 |
+| `nextNodeId`가 count+1 | 2 |
+| `setPositions`가 원본을 변경 | 2 |
+
+**검증**: `pnpm test` 103 passed (8 files), `typecheck`·`lint` clean.
