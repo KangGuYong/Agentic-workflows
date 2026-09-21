@@ -20,12 +20,16 @@ import { toFlowEdges, toFlowNodes, type NodeChange } from "@/lib/dsl/flow"
 import { anyNodeVisible } from "@/lib/dsl/viewport"
 import type { NodeType } from "@/lib/palette"
 import { saveDraft } from "@/lib/engine/save"
+import { validateDraft } from "@/lib/engine/validate"
 import { createGraphStore, type GraphState } from "@/store/graph"
 import { createSaveStore, type SaveState } from "@/store/save"
+import { createValidationStore, workflowIssues, type ValidationState } from "@/store/validation"
 
 import { NodePanel } from "@/components/panel/NodePanel"
 import { ConflictDialog } from "@/components/save/ConflictDialog"
 import { StatusBar } from "@/components/save/StatusBar"
+import { Banner } from "@/components/validation/Banner"
+import { RunButton } from "@/components/validation/RunButton"
 
 import { DRAG_TYPE, Palette } from "./Palette"
 import { WorkflowNode } from "./WorkflowNode"
@@ -55,7 +59,10 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
   const state = useStore(store)
   const saveStore = useSaveStore(store, workflowId, initialRevision)
   const save = useStore(saveStore)
+  const validationStore = useValidationStore(workflowId)
+  const validation = useStore(validationStore)
   useAutosave(state.dsl, save.changed)
+  useValidate(state.dsl, workflowId, validation.validate)
   const { screenToFlowPosition, fitView, getViewport } = useReactFlow()
   const surface = useRef<HTMLDivElement>(null)
 
@@ -63,14 +70,24 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
     () => Object.fromEntries(types.map((item) => [item.type, item.label])),
     [types],
   )
-  const nodes = useMemo(() => toFlowNodes(state.dsl, { labels }), [state.dsl, labels])
+  const handles = useMemo(
+    () =>
+      validation.nodes === null
+        ? undefined
+        : Object.fromEntries(Object.entries(validation.nodes).map(([id, analysis]) => [id, analysis.handles])),
+    [validation.nodes],
+  )
+  const nodes = useMemo(
+    () => toFlowNodes(state.dsl, { labels, handles, issues: validation.issues }),
+    [state.dsl, labels, handles, validation.issues],
+  )
   // The panel opens on exactly one node; a multi-select has nothing single to configure.
   const selected =
     state.selection.nodes.length === 1
       ? state.dsl.nodes.find((node) => node.id === state.selection.nodes[0])
       : undefined
   const byType = useMemo(() => new Map(types.map((item) => [item.type, item])), [types])
-  const edges = useMemo(() => toFlowEdges(state.dsl), [state.dsl])
+  const edges = useMemo(() => toFlowEdges(state.dsl, { issues: validation.issues }), [state.dsl, validation.issues])
 
   const onNodesChange = useCallback(
     (changes: RfNodeChange[]) => {
@@ -174,10 +191,16 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
         >
           <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="transparent" />
         </ReactFlow>
-        <Toolbar state={state} save={save} onAutoLayout={onAutoLayout} />
+        <Toolbar state={state} save={save} validation={validation} onAutoLayout={onAutoLayout} />
       </div>
       {selected !== undefined ? (
-        <NodePanel node={selected} nodeType={byType.get(selected.type)} types={types} state={state} />
+        <NodePanel
+          node={selected}
+          nodeType={byType.get(selected.type)}
+          types={types}
+          issues={validation.issues}
+          state={state}
+        />
       ) : null}
       <ConflictDialog state={save} />
     </div>
@@ -219,9 +242,20 @@ function useAutosave(dsl: EditorDsl, changed: () => void) {
   }, [dsl, changed])
 }
 
-function Toolbar({ state, save, onAutoLayout }: { state: GraphState; save: SaveState; onAutoLayout: () => Promise<void> }) {
+function Toolbar({
+  state,
+  save,
+  validation,
+  onAutoLayout,
+}: {
+  state: GraphState
+  save: SaveState
+  validation: ValidationState
+  onAutoLayout: () => Promise<void>
+}) {
   return (
-    <div className="pointer-events-none absolute left-4 top-4 flex items-center gap-2">
+    <div className="pointer-events-none absolute left-4 top-4 flex flex-col items-start gap-2">
+    <div className="flex items-center gap-2">
       <div className="pointer-events-auto flex items-center gap-1 border border-ink-600 bg-ink-800 p-1" style={{ borderRadius: "var(--radius)" }}>
         <ToolbarButton label="되돌리기" disabled={!state.canUndo} onClick={state.undo}>
           ↶
@@ -243,6 +277,7 @@ function Toolbar({ state, save, onAutoLayout }: { state: GraphState; save: SaveS
       <div className="pointer-events-auto border border-ink-600 bg-ink-800 px-2 py-1.5" style={{ borderRadius: "var(--radius)" }}>
         <StatusBar state={save} />
       </div>
+      <RunButton issues={validation.issues} nodeCount={state.dsl.nodes.length} />
       {state.lastError !== null ? (
         <p
           className="pointer-events-auto border px-2 py-1 text-xs"
@@ -253,8 +288,45 @@ function Toolbar({ state, save, onAutoLayout }: { state: GraphState; save: SaveS
         </p>
       ) : null}
     </div>
+    {/* Problems that belong to no node: a badge on an arbitrary one would send someone to fix a node
+        that is fine. */}
+    <Banner issues={workflowIssues(validation.issues)} />
+    </div>
   )
 }
+
+/** The validation slice, bound to this workflow.
+ *
+ * Without a workflow id there is nothing to validate against -- `/validate` is keyed by one -- so the
+ * request reports nothing rather than calling an endpoint that would 404.
+ */
+function useValidationStore(workflowId: string | undefined) {
+  const [validationStore] = useState(() =>
+    createValidationStore((dsl) =>
+      workflowId === undefined
+        ? Promise.resolve({ issues: [] })
+        : validateDraft(workflowId, dsl),
+    ),
+  )
+  return validationStore
+}
+
+/** Re-validate when the document changes.
+ *
+ * On the opening document too, unlike autosave: opening is not an edit, but a workflow saved with
+ * problems has them on open, and a canvas that looks clean until the first keystroke is lying.
+ */
+function useValidate(dsl: EditorDsl, workflowId: string | undefined, validate: (dsl: EditorDsl) => Promise<void>) {
+  useEffect(() => {
+    if (workflowId === undefined) return
+    // Same wait as autosave, for the same reason: `/validate` is the editor's hottest endpoint and a
+    // request per keystroke is a request per keystroke.
+    const timer = setTimeout(() => void validate(dsl), VALIDATE_DELAY_MS)
+    return () => clearTimeout(timer)
+  }, [dsl, workflowId, validate])
+}
+
+const VALIDATE_DELAY_MS = 700
 
 function ToolbarButton({
   label,

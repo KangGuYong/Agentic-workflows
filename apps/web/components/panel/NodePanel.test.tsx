@@ -6,6 +6,7 @@ import { useStore } from "zustand"
 import { emptyDsl, type EditorNode } from "@/lib/dsl/document"
 import type { NodeType } from "@/lib/palette"
 import { createGraphStore, type GraphStore } from "@/store/graph"
+import type { Issue } from "@/store/validation"
 
 import { NodePanel } from "./NodePanel"
 
@@ -84,8 +85,10 @@ function node(id: string, type: string, extra: Partial<EditorNode> = {}): Editor
   return { id, type, position: { x: 0, y: 0 }, ...extra }
 }
 
-function show(editorNode: EditorNode, nodeType: NodeType | undefined) {
-  return render(<NodePanel node={editorNode} nodeType={nodeType} state={store.getState()} />)
+function show(editorNode: EditorNode, nodeType: NodeType | undefined, issues: Issue[] = []) {
+  return render(
+    <NodePanel node={editorNode} nodeType={nodeType} issues={issues} state={store.getState()} />,
+  )
 }
 
 /** The panel as `Canvas` mounts it: reading the node back out of the store on every change.
@@ -329,5 +332,48 @@ describe("the shape of the generated form", () => {
     })
 
     expect(screen.queryByText("템플릿 작성 규칙")).toBeNull()
+  })
+})
+
+describe("validation messages in the panel", () => {
+  const FIELD_ISSUE: Issue = {
+    severity: "error",
+    code: "INVALID_CONFIG",
+    message: "설정 오류: Field required",
+    nodeId: "llm_1",
+    field: "config.model",
+  }
+
+  it("puts a field's message beside that field, translated", async () => {
+    show(node("llm_1", "llm"), LLM_TYPE, [FIELD_ISSUE])
+    await screen.findByTestId("template-editor")
+
+    const message = screen.getByText("설정 오류: 반드시 입력해야 합니다")
+    // Beside the input it is about, not in a list at the top: a message that does not say which field
+    // it means is a message someone has to hunt with.
+    expect(message.closest("div")?.querySelector("#root_model")).not.toBeNull()
+  })
+
+  it("puts a message with no field at the top of the tab", async () => {
+    // `REF_NOT_GUARANTEED` is about the node, not about one input.
+    show(node("llm_1", "llm"), LLM_TYPE, [
+      { severity: "error", code: "REF_NOT_GUARANTEED", message: "보장되지 않습니다", nodeId: "llm_1" },
+    ])
+    await screen.findByTestId("template-editor")
+
+    expect(screen.getByText("보장되지 않습니다")).toBeInTheDocument()
+  })
+
+  it("ignores issues belonging to other nodes", () => {
+    show(node("llm_1", "llm"), LLM_TYPE, [{ ...FIELD_ISSUE, nodeId: "llm_2" }])
+
+    expect(screen.queryByText(/반드시 입력해야 합니다/)).toBeNull()
+  })
+
+  it("shows nothing when the engine has nothing to say", async () => {
+    show(node("llm_1", "llm"), LLM_TYPE)
+    await screen.findByTestId("template-editor")
+
+    expect(screen.queryByText(/오류/)).toBeNull()
   })
 })

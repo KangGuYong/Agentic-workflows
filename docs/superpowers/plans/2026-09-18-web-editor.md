@@ -490,21 +490,21 @@ The hardest UI in this plan. 3 설계 §6.
 
 ## Task 13: Validation badges and Korean error messages
 
-- [ ] After a successful save, call `/validate`; store `issues` and `nodes` in the validation slice.
-- [ ] `nodes` empty (structural error) → keep the previous `nodes` for autocomplete, per 3 설계 §4.1. Write a test for exactly this.
-- [ ] Error badge (red) / warning badge (yellow) on nodes and edges by `nodeId`/`edgeId`.
-- [ ] `field` puts the message next to the matching input in the panel. `handles.<name>` addresses a handle, so a `HANDLE_NOT_CONNECTED` error highlights that handle on the canvas.
-- [ ] Any error → 실행 button disabled with a tooltip counting the errors.
-- [ ] `LIMIT_EXCEEDED` → top banner, not a node badge.
-- [ ] `lib/errors/korean.ts`: map pydantic error types (`string_too_short`, `greater_than_equal`, `literal_error`, `extra_forbidden`, …) to Korean sentences. Unmapped → show the original text.
+- [x] After a successful save, call `/validate`; store `issues` and `nodes` in the validation slice.
+- [x] `nodes` empty (structural error) → keep the previous `nodes` for autocomplete, per 3 설계 §4.1. Write a test for exactly this.
+- [x] Error badge (red) / warning badge (yellow) on nodes and edges by `nodeId`/`edgeId`.
+- [x] `field` puts the message next to the matching input in the panel. `handles.<name>` addresses a handle, so a `HANDLE_NOT_CONNECTED` error highlights that handle on the canvas.
+- [x] Any error → 실행 button disabled with a tooltip counting the errors.
+- [x] `LIMIT_EXCEEDED` → top banner, not a node badge.
+- [x] `lib/errors/korean.ts`: map pydantic ~~error types~~ → **메시지 문구. 타입은 전송되지 않는다 — Task 13 주석.** (`string_too_short`, `greater_than_equal`, `literal_error`, `extra_forbidden`, …) to Korean sentences. Unmapped → show the original text.
 
 **Tests**
-- [ ] Each mapped pydantic type renders its Korean sentence.
-- [ ] An unmapped type renders the English original, not an empty string.
-- [ ] A workflow with one error disables the run button; fixing it re-enables it.
+- [x] Each mapped pydantic type renders its Korean sentence.
+- [x] An unmapped type renders the English original, not an empty string.
+- [x] A workflow with one error disables the run button; fixing it re-enables it.
 
 **Verification**
-- [ ] Commit: `feat(web): show validation issues on the canvas in Korean`
+- [x] Commit: `feat(web): show validation issues on the canvas in Korean`
 
 ---
 
@@ -1623,4 +1623,94 @@ DB에 있던 초안들은 **`position`이 없다.** 당연한 일이다: 위치�
 - 워크플로 **이름**을 바꾸는 UI가 없다. `PUT`은 `name`을 받지만 Task 19의 몫이다.
 
 **검증**: `pnpm test` 401 passed (29 files), `e2e` 10 passed, `typecheck`·`lint` clean,
+`build` 성공, `test:bundle` 통과.
+
+---
+
+### Task 13 — 검증 표시와 한국어 메시지
+
+`store/validation.ts`(슬라이스와 조회 함수들), `lib/engine/validate.ts`, `lib/errors/korean.ts`,
+`components/validation/{Badge,Banner,RunButton}.tsx`, 그리고 `flow.ts`·`WorkflowNode`·`NodePanel`·
+`Canvas`가 그것을 쓴다. 엔진에는 테스트 파일 하나(`tests/test_pydantic_messages.py`)만 추가했다.
+
+**계획이 없는 것을 세 번째로 전제했다 — 이번엔 pydantic의 오류 *타입*이다.** 계획은
+`string_too_short`·`literal_error` 같은 타입으로 매핑하라고 했는데,
+`engine/validator/structure.py::pydantic_issues`는 `err["msg"]`만 보낸다. **타입은 전선을 건너지 않는다.**
+
+선택지가 둘이었다. 엔진이 타입을 싣게 바꾸거나, 웹이 문구로 매칭하거나. **문구로 매칭하기로 했다** —
+엔진의 공개 이슈 계약을 웹 편의를 위해 넓히지 않으려고. 문구 매칭의 약점은 하나뿐이다: pydantic이
+문장을 바꾸면 조용히 번역이 멈춘다. 그래서 **정확한 문자열들을 엔진 테스트 스위트에 못 박았다**
+(`tests/test_pydantic_messages.py`) — pydantic이 실제로 사는 곳이고, 업그레이드가 거기서 시끄럽게
+깨진다. 웹 테스트는 pydantic을 볼 수 없으므로 거기서는 못 박을 수가 없다.
+
+그리고 실패 모드 자체가 안전하다: 모르는 문장은 **영어 원문 그대로** 보여준다. 읽기 불편하지만 틀리지는
+않는다. 번역이 없다고 메시지를 비우면 고칠 수 있었던 문제가 조용한 실패가 된다.
+
+**반만 번역된 문장을 하나 잡았다.** `Input should be 'a' or 'b'`를 그대로 넣으니
+`'a' or 'b' 중에서 골라야 합니다`가 나왔다. 두 언어가 섞인 문장은 어느 한 언어로 된 문장보다 읽기 나쁘다.
+` or `를 ` 또는 `로 바꿨다.
+
+**`nodes`는 비어 있는 응답에 지워지지 않는다.** 이게 이 슬라이스의 핵심이다(3 설계 §4.1). 구조 오류 —
+중복 노드 id, 순환 — 가 있으면 분석 단계에 도달하지 못해서 `/validate`가 이슈만 주고 `nodes`는 빈 채로
+답한다. 거기서 맵을 갈아치우면 **오류를 고치려고 편집하는 바로 그 순간 템플릿 자동완성 목록이 빈다.**
+조금 낡은 스키마는 조금 틀린 것이고, 빈 목록은 쓸모가 없다. `undefined`와 `{}` 둘 다 "유지"로 다룬다.
+
+같은 이유로 **요청 자체가 실패하면 이슈를 지우지 않는다.** 배지를 지우는 것은 "문제 없음"이라고 말하는
+것인데, 진실은 "모른다"이다.
+
+**답이 순서를 어겨 도착할 수 있다.** 타이핑 중에는 요청 둘이 동시에 떠 있는 것이 정상이고, 느린 쪽이
+이기면 안 된다. 티켓 번호로 가장 최근 것만 쓰게 했다.
+
+**배지는 색만으로 말하지 않는다.** 빨간 점과 노란 점은 색각 이상이 있는 사람에게 같은 점이다. 글리프
+(`!`/`?`)와 개수가 같은 정보를 나른다. 메시지가 여럿이면 **첫 문장 + "외 N건"** 이다 — 다섯 문장을 이어
+붙인 `title`은 아무도 읽지 않는다.
+
+**`handles.<name>`은 필드가 아니다.** `HANDLE_NOT_CONNECTED`는 분기 출력 하나를 가리킨다. 노드만
+표시하면 "여기 뭔가 잘못됐다"이고, 핸들을 표시하면 "이걸 연결해라"이다 — 후자가 그 오류의 내용 전부다.
+`fieldOf`와 `handleOf`를 따로 두고, 서로를 오해하는 변형 둘을 각각 테스트가 잡는다.
+
+**`LIMIT_EXCEEDED`는 배너로 간다.** 문서 크기는 어느 노드의 사실도 아니다. 아무 노드에나 배지를 달면
+멀쩡한 노드를 고치러 보내게 된다.
+
+**실행 버튼을 지금 만들었다.** 동작은 Task 14가 준다. 여기 있는 이유는 **실행을 막는 것이 검증 질문이기
+때문이다**: 오류가 있으면 엔진이 어차피 거절하고, 누르고 나서 알게 되는 것은 누름을 낭비하고 버튼이
+못 미덥다는 인상을 남긴다. 막는 이유는 `title`에만 두지 않고 `aria-describedby`로도 읽힌다 — 툴팁은
+터치 화면에 존재하지 않고 모든 스크린 리더가 읽지도 않는다. 경고는 막지 않는다: 막으면 경고와 오류가
+구분되지 않는다.
+
+**Mutation 19/19 잡힘** (넷은 테스트 추가 후)
+
+| 변형 | 결과 |
+|---|---|
+| 빈 분석이 유지된 맵을 대체 / null로 | killed |
+| 낡은 응답이 최신을 덮어씀 | killed |
+| 실패한 요청이 이슈를 지움 | killed |
+| `worstOf`가 경고를 못 봄 / 경고를 오류보다 위로 | killed |
+| 엣지 이슈를 워크플로 전체로 분류 | killed |
+| 경고를 오류로 셈 | killed |
+| 핸들 경로를 설정 필드로 / 그 반대 | killed |
+| 모르는 문장이 빈 문자열이 됨 | killed |
+| 가장 흔한 문장을 번역 안 함 | killed |
+| **마지막 콜론에서 분리** | 처음엔 survived → 테스트 추가 후 killed |
+| **열거가 반만 영어로 남음** | 처음엔 NO-OP(하네스) → 다시 돌려 killed |
+| **엣지마다 아무 이슈로 색칠 / 노드마다 모든 이슈 / 핸들 아닌 것이 핸들 이름으로** | 처음엔 survived → 테스트 추가 후 killed |
+| 빈 캔버스가 실행 가능 / 오류가 실행을 안 막음 | killed |
+
+첫 번째 생존자가 기록할 값이 있다. 원래 테스트는 콜론이 든 한국어 메시지를 썼는데, 뒤쪽 조각이 어떤
+규칙과도 안 맞아서 느슨한 정규식으로도 결과가 같았다 — **통과했지만 아무것도 검사하지 않았다.**
+구분되는 입력은 **뒤쪽 조각이 규칙과 맞는 경우**다: `설정 오류: Value error, 시간: 형식이 ...`.
+마지막 콜론에서 자르면 `Value error,` 규칙에 닿지 못하고, 엔진이 가장 신경 써서 쓴 메시지에서만
+번역이 조용히 멈춘다.
+
+**실제 엔진으로 확인.** 저장돼 있던 워크플로를 열자 LLM 노드 둘이 빨간 테두리와 `2` 배지를 달았고,
+실행 버튼이 `오류 4건을 먼저 해결해 주세요`로 비활성화됐으며, 패널의 모델·프롬프트 칸 아래에
+`설정 오류: 반드시 입력해야 합니다`가 붙었다 — pydantic의 영어가 아니라.
+
+**남은 공백.**
+- **경고를 끄거나 접는 수단이 없다.** `REF_NOT_GUARANTEED`가 많은 워크플로에서는 노란 배지가 배경 소음이
+  된다. 계획에 없어서 넓히지 않았다.
+- 검증 디바운스가 **700ms**로 자동 저장(1s)과 따로 돈다. 한 문서 변경에 요청이 둘 나간다는 뜻이다.
+  Task 14 이후 실제로 부담이 되는지 보고 합치는 편이 낫다고 판단했다.
+
+**검증**: `pnpm test` 462 passed (35 files), `e2e` 10 passed, `typecheck`·`lint` clean,
 `build` 성공, `test:bundle` 통과.

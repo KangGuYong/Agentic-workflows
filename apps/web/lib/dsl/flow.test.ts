@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
 
+import type { Issue } from "@/store/validation"
+
 import { movedPositions, toFlowEdges, toFlowNodes } from "./flow"
 import type { EditorDsl } from "./document"
 
@@ -88,5 +90,67 @@ describe("movedPositions", () => {
     // React Flow emits `{type: "position", dragging: false}` with no position when a drag ends. Reading
     // it as a move would write `undefined` over the node's real coordinates.
     expect(movedPositions([{ id: "start", type: "position", dragging: false }])).toEqual({})
+  })
+})
+
+describe("validation on the canvas", () => {
+  const GRAPH: EditorDsl = {
+    version: "1",
+    nodes: [
+      { id: "cond_1", type: "condition", position: { x: 0, y: 0 } },
+      { id: "llm_1", type: "llm", position: { x: 1, y: 1 } },
+    ],
+    edges: [
+      { id: "e1", source: "cond_1", sourceHandle: "yes", target: "llm_1" },
+      { id: "e2", source: "llm_1", target: "cond_1" },
+    ],
+  }
+
+  const ISSUES: Issue[] = [
+    { severity: "error", code: "INVALID_CONFIG", message: "설정", nodeId: "llm_1", field: "config.model" },
+    { severity: "error", code: "HANDLE_NOT_CONNECTED", message: "연결", nodeId: "cond_1", field: "handles.no" },
+    { severity: "warning", code: "TYPE_WARNING", message: "경고", edgeId: "e1" },
+  ]
+
+  it("gives each node only its own issues", () => {
+    // Every node wearing every badge would make the badges meaningless.
+    const nodes = toFlowNodes(GRAPH, { issues: ISSUES })
+
+    expect(nodes.find((node) => node.id === "llm_1")?.data.issues).toHaveLength(1)
+    expect(nodes.find((node) => node.id === "cond_1")?.data.issues).toHaveLength(1)
+  })
+
+  it("names only the handles a handles.* issue points at", () => {
+    const nodes = toFlowNodes(GRAPH, { issues: ISSUES })
+
+    expect(nodes.find((node) => node.id === "cond_1")?.data.unconnectedHandles).toEqual(["no"])
+    // `config.model` is a field, not a handle. Reading it as one would mark a handle called
+    // "config.model" that does not exist, and leave the real problem unmarked.
+    expect(nodes.find((node) => node.id === "llm_1")?.data.unconnectedHandles).toEqual([])
+  })
+
+  it("leaves the issue lists empty when there is nothing to say", () => {
+    const nodes = toFlowNodes(GRAPH, {})
+
+    expect(nodes.every((node) => node.data.issues.length === 0)).toBe(true)
+  })
+
+  it("colours only the edge an issue names", () => {
+    const edges = toFlowEdges(GRAPH, { issues: ISSUES })
+
+    expect(edges.find((edge) => edge.id === "e1")?.style?.stroke).toBe("var(--st-waiting)")
+    expect(edges.find((edge) => edge.id === "e2")?.style).toBeUndefined()
+  })
+
+  it("colours an edge by its worst issue", () => {
+    const edges = toFlowEdges(GRAPH, {
+      issues: [...ISSUES, { severity: "error", code: "DUPLICATE_EDGE", message: "중복", edgeId: "e1" }],
+    })
+
+    expect(edges.find((edge) => edge.id === "e1")?.style?.stroke).toBe("var(--st-failed)")
+  })
+
+  it("leaves every edge plain when there are no issues", () => {
+    expect(toFlowEdges(GRAPH).every((edge) => edge.style === undefined)).toBe(true)
   })
 })

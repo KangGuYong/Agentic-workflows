@@ -12,8 +12,11 @@ import { buildUiSchema, collapseOptionalSchemas, hasTemplateField } from "@/lib/
 import type { NodeType } from "@/lib/palette"
 import { templateContext } from "@/lib/template/context"
 import type { GraphState } from "@/store/graph"
+import { fieldOf, issuesForNode, type Issue } from "@/store/validation"
 
 import { TEMPLATES } from "./templates"
+import { IssueList } from "@/components/validation/Badge"
+
 import { TemplateHelp } from "./TemplateHelp"
 import { FIELDS, WIDGETS } from "./widgets"
 
@@ -29,14 +32,18 @@ export function NodePanel({
   node,
   nodeType,
   types = [],
+  issues = [],
   state,
 }: {
   node: EditorNode
   nodeType: NodeType | undefined
   /** Every node type, for the labels the template editor shows in its completion list. */
   types?: readonly NodeType[]
+  /** The whole `/validate` issue list; the panel picks out this node's. */
+  issues?: readonly Issue[]
   state: GraphState
 }) {
+  const mine = issuesForNode(issues, node.id)
   const [tab, setTab] = useState<Tab>("settings")
   const hasPolicy = nodeType?.defaultPolicy != null
   const active = tab === "policy" && !hasPolicy ? "settings" : tab
@@ -54,7 +61,7 @@ export function NodePanel({
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
         {active === "settings" ? (
-          <Settings node={node} nodeType={nodeType} types={types} state={state} />
+          <Settings node={node} nodeType={nodeType} types={types} issues={mine} state={state} />
         ) : null}
         {active === "policy" && nodeType != null ? (
           <PolicyTab node={node} nodeType={nodeType} state={state} />
@@ -105,17 +112,31 @@ function Settings({
   node,
   nodeType,
   types,
+  issues,
   state,
 }: {
   node: EditorNode
   nodeType: NodeType | undefined
   types: readonly NodeType[]
+  issues: readonly Issue[]
   state: GraphState
 }) {
   if (nodeType === undefined) {
     return <p className="text-sm text-fg-muted">이 노드 타입의 설정 형식을 알 수 없습니다.</p>
   }
+  // An issue whose `field` is `config.<path>` belongs beside that input; everything else belongs at the
+  // top of the tab, where it is visible without hunting for which field it meant.
+  const byField = new Map<string, Issue[]>()
+  const general: Issue[] = []
+  for (const issue of issues) {
+    const field = fieldOf(issue)
+    if (field === null) general.push(issue)
+    else byField.set(field, [...(byField.get(field) ?? []), issue])
+  }
+
   return (
+    <>
+      <IssueList issues={general} />
     <Form
       schema={collapseOptionalSchemas(nodeType)}
       uiSchema={buildUiSchema(nodeType)}
@@ -127,7 +148,10 @@ function Settings({
       // The template editor needs the other nodes to complete against, which no part of this node's
       // schema describes. `null` analysis is honest: `/validate` is wired up in Task 13, and until then
       // the editor completes node ids without claiming anything about guarantees.
-      formContext={{ template: templateContext(state.dsl, types, null, node.id) }}
+      formContext={{
+        template: templateContext(state.dsl, types, null, node.id),
+        issuesByField: byField,
+      }}
       // RJSF's validation is display-only here: the engine's `/validate` is the authority, and blocking
       // an edit because a half-typed value does not match ajv would make the panel unusable.
       liveValidate={false}
@@ -141,6 +165,7 @@ function Settings({
           copies of them in a 320px panel is clutter. */}
       {hasTemplateField(nodeType) ? <TemplateHelp /> : <></>}
     </Form>
+    </>
   )
 }
 

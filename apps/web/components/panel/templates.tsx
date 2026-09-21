@@ -1,5 +1,8 @@
 "use client"
 
+import { IssueList } from "@/components/validation/Badge"
+import type { Issue } from "@/store/validation"
+
 import type {
   BaseInputTemplateProps,
   FieldTemplateProps,
@@ -19,8 +22,25 @@ import type {
 export const CONTROL =
   "w-full border border-ink-600 bg-ink-700 px-2 py-1.5 text-sm outline-none focus:border-ink-500 disabled:opacity-40"
 
-function FieldTemplate({ id, label, required, children, description, errors, help, hidden, displayLabel }: FieldTemplateProps) {
+function FieldTemplate({
+  id,
+  label,
+  required,
+  children,
+  description,
+  errors,
+  help,
+  hidden,
+  displayLabel,
+  fieldPathId,
+  registry,
+}: FieldTemplateProps) {
   if (hidden) return <div className="hidden">{children}</div>
+  // The engine's verdict on this field, beside the field. `/validate` addresses it as `config.<path>`
+  // and the panel splits that out; here the path is `fieldPathId.path` joined -- the same string.
+  const context = registry.formContext as { issuesByField?: Map<string, Issue[]> }
+  const issues = context.issuesByField?.get(fieldPathId.path.join(".")) ?? []
+
   return (
     <div className="mb-4">
       {displayLabel && label !== "" ? (
@@ -31,6 +51,7 @@ function FieldTemplate({ id, label, required, children, description, errors, hel
       ) : null}
       {children}
       {description}
+      <IssueList issues={issues} />
       {errors}
       {help}
     </div>
