@@ -15,32 +15,47 @@ import { useStore } from "zustand"
 
 import "@xyflow/react/dist/style.css"
 
-import { emptyDsl } from "@/lib/dsl/document"
+import { emptyDsl, type EditorDsl } from "@/lib/dsl/document"
 import { toFlowEdges, toFlowNodes, type NodeChange } from "@/lib/dsl/flow"
 import { anyNodeVisible } from "@/lib/dsl/viewport"
 import type { NodeType } from "@/lib/palette"
+import { saveDraft } from "@/lib/engine/save"
 import { createGraphStore, type GraphState } from "@/store/graph"
+import { createSaveStore, type SaveState } from "@/store/save"
 
 import { NodePanel } from "@/components/panel/NodePanel"
+import { ConflictDialog } from "@/components/save/ConflictDialog"
+import { StatusBar } from "@/components/save/StatusBar"
 
 import { DRAG_TYPE, Palette } from "./Palette"
 import { WorkflowNode } from "./WorkflowNode"
 
 const NODE_TYPES = { workflow: WorkflowNode }
 
-export function Canvas({ types }: { types: NodeType[] }) {
+export interface CanvasProps {
+  types: NodeType[]
+  /** Absent means nothing is saved -- the fixtures and tests that mount the canvas on its own. */
+  workflowId?: string
+  initialDsl?: EditorDsl
+  initialRevision?: number
+}
+
+export function Canvas(props: CanvasProps) {
   return (
     <ReactFlowProvider>
-      <Editor types={types} />
+      <Editor {...props} />
     </ReactFlowProvider>
   )
 }
 
-function Editor({ types }: { types: NodeType[] }) {
+function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasProps) {
   // One store per editor screen, created once. React Flow renders a view of its document; it never
   // holds the document itself (3 설계 §5.1).
-  const [store] = useState(() => createGraphStore(emptyDsl()))
+  const [store] = useState(() => createGraphStore(initialDsl ?? emptyDsl()))
   const state = useStore(store)
+  const saveStore = useSaveStore(store, workflowId, initialRevision)
+  const save = useStore(saveStore)
+  useAutosave(state.dsl, save.changed)
   const { screenToFlowPosition, fitView, getViewport } = useReactFlow()
   const surface = useRef<HTMLDivElement>(null)
 
@@ -159,16 +174,52 @@ function Editor({ types }: { types: NodeType[] }) {
         >
           <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="transparent" />
         </ReactFlow>
-        <Toolbar state={state} onAutoLayout={onAutoLayout} />
+        <Toolbar state={state} save={save} onAutoLayout={onAutoLayout} />
       </div>
       {selected !== undefined ? (
         <NodePanel node={selected} nodeType={byType.get(selected.type)} types={types} state={state} />
       ) : null}
+      <ConflictDialog state={save} />
     </div>
   )
 }
 
-function Toolbar({ state, onAutoLayout }: { state: GraphState; onAutoLayout: () => Promise<void> }) {
+/** The save slice, bound to this editor's document and workflow.
+ *
+ * Created once, like the graph store. Without a workflow id there is nothing to save into -- the
+ * fixtures mount the canvas that way -- so the request reports a failure rather than calling an
+ * endpoint that would 404, and the status bar says so instead of claiming 저장됨.
+ */
+function useSaveStore(store: ReturnType<typeof createGraphStore>, workflowId: string | undefined, revision: number) {
+  const [saveStore] = useState(() =>
+    createSaveStore({
+      revision,
+      getDsl: () => store.getState().dsl,
+      onReload: (dsl) => store.getState().replaceDocument(dsl),
+      save: (body) =>
+        workflowId === undefined
+          ? Promise.resolve({ outcome: "failed" as const, message: "열린 워크플로가 없습니다" })
+          : saveDraft(workflowId, body),
+    }),
+  )
+  return saveStore
+}
+
+/** Tell the save slice the document changed -- but not about the document it started with.
+ *
+ * `dsl` is a new object on every edit and the same one otherwise, so the identity is the signal. The
+ * first render is skipped deliberately: opening a workflow is not an edit, and saving on open would
+ * bump the revision of every workflow anybody looked at.
+ */
+function useAutosave(dsl: EditorDsl, changed: () => void) {
+  const opened = useRef(dsl)
+  useEffect(() => {
+    if (dsl === opened.current) return
+    changed()
+  }, [dsl, changed])
+}
+
+function Toolbar({ state, save, onAutoLayout }: { state: GraphState; save: SaveState; onAutoLayout: () => Promise<void> }) {
   return (
     <div className="pointer-events-none absolute left-4 top-4 flex items-center gap-2">
       <div className="pointer-events-auto flex items-center gap-1 border border-ink-600 bg-ink-800 p-1" style={{ borderRadius: "var(--radius)" }}>
@@ -188,6 +239,9 @@ function Toolbar({ state, onAutoLayout }: { state: GraphState; onAutoLayout: () 
         >
           자동 정렬
         </button>
+      </div>
+      <div className="pointer-events-auto border border-ink-600 bg-ink-800 px-2 py-1.5" style={{ borderRadius: "var(--radius)" }}>
+        <StatusBar state={save} />
       </div>
       {state.lastError !== null ? (
         <p

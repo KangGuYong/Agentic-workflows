@@ -65,6 +65,13 @@ export interface GraphState {
   select: (selection: Selection) => void
   undo: () => void
   redo: () => void
+  /** Replace the whole document, discarding the history.
+   *
+   * Only for taking someone else's draft on a save conflict (3 설계 §9). The history goes with it on
+   * purpose: an undo that reached back past the replacement would resurrect the local draft the person
+   * just chose to abandon, and autosave would then write it over theirs -- the overwrite they declined.
+   */
+  replaceDocument: (dsl: EditorDsl) => void
 }
 
 export type GraphStore = StoreApi<GraphState>
@@ -172,6 +179,10 @@ export function createGraphStore(initial: EditorDsl): GraphStore {
         } finally {
           set({ layingOut: false })
         }
+      },
+
+      replaceDocument(dsl) {
+        set({ ...derived(createHistory(dsl)), selection: NOTHING, lastError: null })
       },
 
       select(selection) {

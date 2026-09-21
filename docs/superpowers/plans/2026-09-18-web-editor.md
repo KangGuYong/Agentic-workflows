@@ -470,21 +470,21 @@ The hardest UI in this plan. 3 설계 §6.
 ## Task 12: Autosave and the conflict dialog
 
 **Tests first**
-- [ ] A change schedules a save 1s later (fake timers). Three changes in 500ms produce **one** save.
-- [ ] A change during an in-flight save produces exactly one follow-up save after it returns.
-- [ ] 200 updates the stored revision.
-- [ ] 409 opens the dialog and does **not** retry on its own.
-- [ ] "불러오기" replaces the document with `details.draftDsl` and adopts `details.currentRevision`.
-- [ ] "덮어쓰기" resends with `details.currentRevision`; a **second** 409 reopens the dialog rather than looping.
-- [ ] A 500 leaves the document untouched, shows the failure in the status bar, and retries on the next change.
-- [ ] The document is never replaced without the user choosing it.
+- [x] A change schedules a save 1s later (fake timers). Three changes in 500ms produce **one** save.
+- [x] A change during an in-flight save produces exactly one follow-up save after it returns.
+- [x] 200 updates the stored revision.
+- [x] 409 opens the dialog and does **not** retry on its own.
+- [x] "불러오기" replaces the document with `details.draftDsl` and adopts `details.currentRevision`.
+- [x] "덮어쓰기" resends with `details.currentRevision`; a **second** 409 reopens the dialog rather than looping.
+- [x] A 500 leaves the document untouched, shows the failure in the status bar, and retries on the next change.
+- [x] The document is never replaced without the user choosing it.
 
 **Implementation**
-- [ ] `store/save.ts` holds `revision`, `status: "saved" | "saving" | "pending" | "conflict" | "error"`, and the debounce timer.
-- [ ] The status bar shows 저장됨 / 저장 중 / 저장 실패 with the last successful time.
+- [x] `store/save.ts` holds `revision`, `status: "saved" | "saving" | "pending" | "conflict" | "error"`, and the debounce timer.
+- [x] The status bar shows 저장됨 / 저장 중 / 저장 실패 with the last successful time.
 
 **Verification**
-- [ ] Commit: `feat(web): debounced autosave with explicit conflict resolution`
+- [x] Commit: `feat(web): debounced autosave with explicit conflict resolution`
 
 ---
 
@@ -1527,3 +1527,100 @@ NO-OP으로 빠졌다. 구분자를 바꿔 따로 돌렸다. **"NO-OP"을 출력
 
 **검증**: `pnpm test` 348 passed (25 files), `typecheck`·`lint` clean, 실제 엔진에 붙은 브라우저에서
 폼으로 스키마 작성 → 중첩 진입 → JSON 전환까지 확인.
+
+---
+
+### Task 12 — 자동 저장과 충돌
+
+`store/save.ts`(디바운스·상태·충돌), `lib/engine/save.ts`(프록시 경유 PUT),
+`lib/dsl/read.ts`(남이 쓴 초안 읽기), `components/save/{StatusBar,ConflictDialog}.tsx`,
+그래프 스토어의 `replaceDocument`, 그리고 `app/page.tsx`가 워크플로를 연다.
+
+**계획이 또 없는 것을 전제했다 — 이번엔 워크플로 id다.** Task 10이 없는 validation 슬라이스를 읽으려 했듯,
+Task 12는 저장할 워크플로가 있다고 전제하는데 그것은 Task 19(목록)에서 생긴다. **실행되지 않는 자동
+저장은 자동 저장이 아니므로** 여는 것까지 했다: URL의 `?workflow=`, 없으면 가장 최근 것, 그것도 없으면
+새로 만든다. Task 19가 이 세 줄을 진짜 목록으로 바꾼다. 이 id는 Task 13의 `/validate`도 쓴다.
+
+**브라우저로 열자마자 편집기가 터졌다.** `Cannot read properties of undefined (reading 'x')` —
+DB에 있던 초안들은 **`position`이 없다.** 당연한 일이다: 위치는 에디터 전용이고 엔진은 `dsl_hash`에서
+제외한다. API로 만든 초안, 예전 에디터가 쓴 초안, 앞으로 나올 에디터가 쓴 초안 모두 위치가 없을 수 있다.
+**이건 예외가 아니라 정상이다.**
+
+그래서 `readDocument`를 만들었고, 결과가 **둘뿐이다.**
+
+- 읽히면: 위치를 채우고(겹치지 않게 격자로 — 그 다음 자동 정렬이 제대로 배치한다), **나머지는 전부
+  그대로** 통과시킨다. `config`·`policy`·`label`·`settings`, 그리고 새 엔진이 추가한 키까지.
+- 안 읽히면: **거부한다.** 그리고 호출자는 편집기를 열지 않는다.
+
+거부가 왜 중요한가. 못 읽은 초안 위에 빈 문서로 편집기를 열면 **1초 안에 자동 저장이 그 빈 문서를
+테넌트의 초안 위에 덮어쓴다.** 거부는 편집 한 번을 잃고, 추측은 워크플로를 잃는다. 같은 이유로 읽을 수
+없는 노드를 **버리지 않고** 거부한다 — 버린 노드는 다음 자동 저장에서 사라지고, 어느 것이었는지 아무도
+모른다.
+
+**충돌은 절대 자동으로 풀지 않는다.** 409면 자동 저장이 **멈추고** 대화상자가 뜬다. 되묻지 않는 재시도는
+두 탭이 서로를 덮어쓰는 경쟁이고, 거기서는 마지막에 친 사람이 이기고 다른 쪽 작업은 사라진다. 사람의
+클릭이 **그 한 번의 재시도**이고(3 설계 §9), 두 번째 409는 루프 대신 다시 묻는다.
+버튼 둘 다 **무엇을 잃는지** 적었다 — 이름만 있는 버튼 둘 중 하나를 고르는 것은 동전 던지기다.
+
+`불러오기`는 히스토리를 **버린다**(`replaceDocument`). 되돌리기가 교체 이전으로 닿으면 방금 포기하기로
+한 내 초안이 되살아나고, 자동 저장이 그것을 상대 초안 위에 쓴다 — 사람이 거절한 바로 그 덮어쓰기다.
+
+**jsdom에는 `showModal`이 없다.** 셋업에 shim을 넣되, **그 shim이 무엇을 검사하지 못하는지 주석에
+적었다**: 포커스 가둠, 배경 비활성, Esc는 jsdom에 아예 없고 그것들이 바로 파괴적 선택을 든 대화상자에서
+중요한 부분이다. 그래서 브라우저 테스트(`e2e/conflict-dialog.spec.ts`)를 따로 뒀고, 대조군 둘
+(`onCancel` 제거, `showModal`→`show`)이 각각 실패하는 것을 확인했다.
+
+그 브라우저 테스트가 **대화상자가 왼쪽 위 구석에 처박혀 있는 것**도 잡았다. UA 스타일시트는 모달을
+`margin: auto`로 가운데 놓는데, Tailwind preflight가 모든 요소의 margin을 0으로 만든다.
+
+**`Date.now()`를 렌더 중에 읽고 있었다.** lint가 순수하지 않다고 잡았고, 맞는 지적이다 — 게다가 그 시각은
+**갱신되지 않는다.** 다른 무언가가 다시 렌더할 때까지 "방금"이라고 적혀 있게 된다. 30초마다 도는 시계를
+넣었다(분 경계에서만 글자가 바뀌므로 더 자주 돌 이유가 없다). 테스트는 자기 시각을 넘긴다.
+
+**화면에 `role="status"`가 둘이 됐다** — 캔버스의 편집 오류와 저장 상태. 이름 없는 live region 둘은
+스크린 리더에게 구분되지 않고, 테스트에게도 구분되지 않았다(그래서 발견했다). 저장 쪽에
+`aria-label="저장 상태"`를 붙였다.
+
+**Mutation 22/22 잡힘** (둘은 테스트 추가 후, 하나는 코드 삭제로)
+
+| 변형 | 결과 |
+|---|---|
+| 미해결 충돌 위에 계속 저장 | killed |
+| 저장 중 변경이 두 번째 저장을 시작 / 잊힘 | killed |
+| 충돌이 대화상자를 안 염 | killed |
+| 디바운스 타이머를 취소하지 않음 | killed |
+| `불러오기`가 문서를 교체 안 함 / 낡은 revision 유지 | killed |
+| 모든 응답을 성공으로 취급 | killed |
+| 실패가 엔진 메시지를 잃음 | killed |
+| 409를 인식 못 함 / 쓸 수 있는 409를 실패로 강등 | killed |
+| **details 타입이 틀린 409를 충돌로 취급** | 처음엔 survived → 테스트 추가 후 killed |
+| revision 없는 200을 수용 | killed |
+| 워크플로 id를 경로에 그대로 붙임 | killed |
+| 위치 없음/반쪽을 그대로 둠 | killed |
+| 못 읽는 노드를 버림 | killed |
+| 채운 위치가 서로 겹침 | killed |
+| `settings`와 모르는 키를 버림 | killed |
+| `replaceDocument`가 히스토리를 유지 | killed |
+| **후속 저장 대기 중 상태 표시** | survived → **관측 불가능한 죽은 분기여서 삭제** |
+| `덮어쓰기`가 진 revision으로 재전송 | survived (등가 변형) |
+
+마지막 둘이 기록할 값이 있다.
+
+- **"후속 저장 대기 중"** 분기는 `again ? "pending" : "saved"`였는데, 바로 다음 줄의 후속 `send`가
+  **같은 동기 구간에서** `"saving"`으로 덮는다. 아무도 볼 수 없는 상태다. 테스트를 억지로 만드는 대신
+  분기를 지우고, 대신 **관측 가능한** 보장을 테스트했다: 후속 저장이 날아가는 동안 상태 표시줄은
+  `저장 중`이지 `저장됨`이 아니다.
+- **`덮어쓰기`**는 재전송 직전에 `revision`을 `currentRevision`으로 이미 올려두므로
+  `send(conflict.currentRevision)`과 `send(get().revision)`이 같은 값이다. 등가 변형이라 그대로 뒀다.
+
+**실제 엔진으로 확인.** 편집 → `저장 대기 중` → `저장됨 마지막 저장 방금`, PUT 한 번 200.
+탭 둘을 같은 워크플로에 띄워 실제 409를 만들었고, 대화상자가 뜨고 `덮어쓰기`가 이긴 revision으로
+재전송해 `저장됨`으로 끝나는 것까지 봤다.
+
+**남은 공백.**
+- **창을 닫을 때 저장 대기 중인 변경을 흘린다.** `beforeunload`로 `flush`를 부르거나 경고를 띄우는 것이
+  맞는데, 계획에 없고 Task 21(E2E)에서 실제로 확인할 수 있는 형태로 넣는 편이 낫다고 판단했다.
+- 워크플로 **이름**을 바꾸는 UI가 없다. `PUT`은 `name`을 받지만 Task 19의 몫이다.
+
+**검증**: `pnpm test` 401 passed (29 files), `e2e` 10 passed, `typecheck`·`lint` clean,
+`build` 성공, `test:bundle` 통과.

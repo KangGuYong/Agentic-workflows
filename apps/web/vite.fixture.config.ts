@@ -9,4 +9,6 @@ export default defineConfig({
   plugins: [react()],
   resolve: { alias: { "@": fileURLToPath(new URL(".", import.meta.url)) } },
   server: { port: 5199, strictPort: true },
+  // One page per component under test, so a failure names the component rather than the fixture app.
+  build: { rollupOptions: { input: ["index.html", "conflict.html"] } },
 })

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest"
 
-import { emptyDsl, type EditorDsl } from "@/lib/dsl/document"
+import { emptyDsl, type EditorDsl, type EditorNode } from "@/lib/dsl/document"
 
 import { createGraphStore, type GraphStore } from "./graph"
 
@@ -353,5 +353,45 @@ describe("editing a node from the panel", () => {
 
     store.getState().setNodePolicy("llm_1", undefined)
     expect(node() && "policy" in (node() as object)).toBe(false)
+  })
+})
+
+describe("replaceDocument", () => {
+  it("takes the new document and forgets the old one", () => {
+    const store = createGraphStore(emptyDsl())
+    store.getState().addNodeAt("start", { x: 0, y: 0 })
+    const theirs: EditorDsl = {
+      ...emptyDsl(),
+      nodes: [{ id: "llm_1", type: "llm", position: { x: 5, y: 5 } }],
+    }
+
+    store.getState().replaceDocument(theirs)
+
+    expect(store.getState().dsl).toEqual(theirs)
+  })
+
+  it("discards the history, so undo cannot resurrect the abandoned draft", () => {
+    // This only runs when someone chose the other side's draft over their own. An undo reaching past
+    // the replacement would bring their draft back, and autosave would write it over the one they
+    // just kept -- the overwrite they declined.
+    const store = createGraphStore(emptyDsl())
+    store.getState().addNodeAt("start", { x: 0, y: 0 })
+    expect(store.getState().canUndo).toBe(true)
+
+    store.getState().replaceDocument(emptyDsl())
+
+    expect(store.getState().canUndo).toBe(false)
+    expect(store.getState().canRedo).toBe(false)
+  })
+
+  it("clears the selection, which pointed at nodes that may not exist any more", () => {
+    const store = createGraphStore(emptyDsl())
+    store.getState().addNodeAt("start", { x: 0, y: 0 })
+    const placed = store.getState().dsl.nodes[0] as EditorNode
+    store.getState().select({ nodes: [placed.id], edges: [] })
+
+    store.getState().replaceDocument(emptyDsl())
+
+    expect(store.getState().selection).toEqual({ nodes: [], edges: [] })
   })
 })
