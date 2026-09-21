@@ -21,6 +21,8 @@ import { anyNodeVisible } from "@/lib/dsl/viewport"
 import type { NodeType } from "@/lib/palette"
 import { createGraphStore, type GraphState } from "@/store/graph"
 
+import { NodePanel } from "@/components/panel/NodePanel"
+
 import { DRAG_TYPE, Palette } from "./Palette"
 import { WorkflowNode } from "./WorkflowNode"
 
@@ -47,6 +49,12 @@ function Editor({ types }: { types: NodeType[] }) {
     [types],
   )
   const nodes = useMemo(() => toFlowNodes(state.dsl, { labels }), [state.dsl, labels])
+  // The panel opens on exactly one node; a multi-select has nothing single to configure.
+  const selected =
+    state.selection.nodes.length === 1
+      ? state.dsl.nodes.find((node) => node.id === state.selection.nodes[0])
+      : undefined
+  const byType = useMemo(() => new Map(types.map((item) => [item.type, item])), [types])
   const edges = useMemo(() => toFlowEdges(state.dsl), [state.dsl])
 
   const onNodesChange = useCallback(
@@ -153,6 +161,9 @@ function Editor({ types }: { types: NodeType[] }) {
         </ReactFlow>
         <Toolbar state={state} onAutoLayout={onAutoLayout} />
       </div>
+      {selected !== undefined ? (
+        <NodePanel node={selected} nodeType={byType.get(selected.type)} state={state} />
+      ) : null}
     </div>
   )
 }

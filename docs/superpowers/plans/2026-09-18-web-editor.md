@@ -386,7 +386,7 @@ Write that last point as a test before implementing it; getting the direction ba
 ## Task 8: Auto-layout
 
 - [x] ELKjs (`elkjs/lib/elk.bundled.js`) with `layered` algorithm, left-to-right.
-- [x] Run it in a **Web Worker**. ELK on a 200-node graph blocks the main thread long enough to drop the drag the user is in the middle of.
+- [x] ~~Run it in a **Web Worker**.~~ → **동적 `import()`. 이유는 Task 8 주석.** ELK on a 200-node graph blocks the main thread long enough to drop the drag the user is in the middle of.
 - [x] "자동 정렬" button applies the result as **one** `autoLayout` command, so one undo puts every node back.
 - [x] Test: a three-node chain gets strictly increasing x positions and the node count is unchanged.
 - [x] Test: layout on an empty document is a no-op that does not push a history entry.
@@ -398,22 +398,22 @@ Write that last point as a test before implementing it; getting the direction ba
 
 ## Task 9: The settings and policy tabs
 
-- [ ] Selected node → right panel with tabs 설정 / 실행 정책 / 라벨. The policy tab renders only when `defaultPolicy !== null`.
-- [ ] RJSF with `validator-ajv8`, `schema` = the node type's `configSchema`, `formData` = the node's config.
-- [ ] **RJSF's own validation is display-only.** The engine is the authority; do not block editing on an ajv error. Set `liveValidate={false}` and `noHtml5Validate`.
-- [ ] `uiSchema` table per node type supplies Korean labels and field order. Keep it in `components/panel/uiSchema.ts` with a comment saying why it cannot come from the engine.
-- [ ] Widget registry: `x-template` → the (still stub, Task 10) template widget; `start.inputs` and `llm.outputSchema` → the (still stub, Task 11) schema widget.
-- [ ] Policy tab writes `policy` only when a field differs from `defaultPolicy`; clearing the last override removes the key (Task 5's test already covers the command).
-- [ ] `http_request` with method POST or PATCH: `maxAttempts` disabled with the Korean note from 3 설계 §5.4.
-- [ ] Changes are debounced into `setConfig` at 300ms so every keystroke is not a history entry.
+- [x] Selected node → right panel with tabs 설정 / 실행 정책 / 라벨. The policy tab renders only when `defaultPolicy !== null`.
+- [x] RJSF with `validator-ajv8`, `schema` = the node type's `configSchema`, `formData` = the node's config.
+- [x] **RJSF's own validation is display-only.** The engine is the authority; do not block editing on an ajv error. Set `liveValidate={false}` and `noHtml5Validate`.
+- [x] `uiSchema` table per node type supplies Korean labels and field order. Keep it in ~~`components/panel/uiSchema.ts`~~ → **`lib/panel/uiSchema.ts`(JSX 없음). Task 9 주석.** with a comment saying why it cannot come from the engine.
+- [x] Widget registry: `x-template` → the (still stub, Task 10) template widget; `start.inputs` and `llm.outputSchema` → the (still stub, Task 11) schema widget.
+- [x] Policy tab writes `policy` only when a field differs from `defaultPolicy`; clearing the last override removes the key (Task 5's test already covers the command).
+- [x] `http_request` with method POST or PATCH: `maxAttempts` disabled with the Korean note from 3 설계 §5.4.
+- [x] ~~Changes are debounced into `setConfig` at 300ms~~ → **히스토리 머지 키. 이유는 Task 9 주석.** so every keystroke is not a history entry.
 
 **Component tests**
-- [ ] Selecting a `template` node shows the 설정 tab and no 실행 정책 tab.
-- [ ] Selecting an `llm` node shows both.
-- [ ] Switching `http_request` method GET → POST disables the attempts input and shows the note.
+- [x] Selecting a `template` node shows the 설정 tab and no 실행 정책 tab.
+- [x] Selecting an `llm` node shows both.
+- [x] Switching `http_request` method GET → POST disables the attempts input and shows the note.
 
 **Verification**
-- [ ] Commit: `feat(web): schema-driven settings and policy panels`
+- [x] Commit: `feat(web): schema-driven settings and policy panels`
 
 ---
 
@@ -1232,3 +1232,87 @@ undo를 두 번 눌러야 한다. 상태 플래그가 아니라 사용자가 겪
 
 **검증**: `pnpm test` 172 passed (14 files), `typecheck`·`lint` clean, `build` 성공,
 실제 브라우저에서 배치 → 연결 → 자동 정렬 → 되돌리기까지 확인.
+
+---
+
+### Task 9 — 설정·실행 정책 패널
+
+`lib/dsl/policy.ts`(오버라이드 ↔ 유효값 양방향), `lib/panel/uiSchema.ts`(RJSF uiSchema 생성),
+`lib/panel/retry.ts`(엔진이 재시도를 막는 지점), `components/panel/{NodePanel,widgets,templates}.tsx`,
+그리고 스토어의 `setNodeConfig`·`setNodeLabel`·`setNodePolicy`·`endEdit`.
+
+**300ms 디바운스 대신 머지 키를 썼다.** 계획은 "모든 키 입력이 히스토리 항목이 되지 않도록 300ms
+디바운스"를 말했다. 히스토리는 Task 4에서 이미 머지 키를 갖고 있으므로, `config:<노드 id>` 같은 키로
+**같은 노드의 같은 필드에 대한 연속 편집을 한 항목으로 합치면** 같은 목적을 달성한다. 디바운스보다 나은
+점이 둘이다. 하나, **마지막 키 입력을 잃지 않는다** — 디바운스는 타이머가 도는 중에 다른 노드를 선택하면
+마지막 글자를 삼킨다. 둘, **테스트가 타이머와 경주하지 않는다** — fake timer도, `await sleep(300)`도
+필요 없다. 되돌리기 한 번이 "이 필드에 한 편집"을 통째로 되돌리는 사용자 경험은 동일하다.
+
+**`uiSchema`는 `components/`가 아니라 `lib/panel/`에 뒀다.** JSX가 하나도 없는 순수 함수이고,
+vitest의 node 프로젝트에서 jsdom 없이 도는 쪽이 맞다. 계획이 경로를 지정한 이유(엔진에서 올 수 없는
+이유를 주석으로 남길 것)는 그대로 지켰다.
+
+**위젯 선택은 표가 아니라 스키마에서 끌어냈다.** Korean 제목은 손으로 쓸 수밖에 없지만(엔진에 표시
+문자열이 없다), "어느 필드가 템플릿인가"는 엔진이 `x-template`으로 이미 말하고 있다. 손으로 적은 목록은
+노드 타입이 필드 하나 늘어나는 순간 낡는다. `SCHEMA_FIELDS`만은 **노드 타입으로 키를 잡았다** — 훗날
+`inputs`라는 이름의 평범한 문자열 필드를 가진 노드가 스키마 편집기를 받으면 안 된다.
+
+**`ui:order`는 항상 `*`로 끝난다.** 빠뜨리면 RJSF가 순서에 없는 속성에서 **예외를 던진다** — 엔진이
+config 필드를 하나 추가하는 것만으로 패널이 통째로 빈 화면이 된다는 뜻이다. 테스트가 노드 타입 전부에
+대해 마지막 원소를 단언한다.
+
+**브라우저로 열어보고 결함 셋을 찾았다. 셋 다 단위 테스트가 구조적으로 못 잡는 것이다.**
+
+1. **폼이 스타일 없이 렌더됐고 머리말에 `HttpRequestConfig`가 떠 있었다.** RJSF의 기본 템플릿은 의도적으로
+   맨 HTML이다 — 라벨이 컨트롤과 같은 줄에 붙고, 간격이 없고, 체크박스가 벌거벗었다. 계기판 크롬 옆에서는
+   "수수한 페이지"가 아니라 **깨진 페이지**로 읽힌다. `FieldTemplate`·`ObjectFieldTemplate`·
+   `BaseInputTemplate`과 `Select`·`Checkbox` 위젯을 채웠다. 머리말은 pydantic 클래스 이름으로,
+   사용자에게 아무 뜻도 없고 두 줄 위 패널 헤더를 반복한다 — 루트 객체의 title만 죽였다. 중첩 객체는
+   유지한다(`headers`에는 제목이 필요하다).
+2. **도움말이 `<label>` 안에 있어서 컨트롤의 접근성 이름을 오염시켰다.** 스크린 리더가 필드에 포커스할
+   때마다 설명 문장 전체를 읽는다. `getByLabelText("라벨")`이 못 찾은 것이 이게 드러난 경위인데,
+   **테스트가 아니라 마크업을 고쳤다** — 도움말을 `<label>` 밖으로 빼고 `aria-describedby`로 연결했다.
+3. **`ObjectFieldTemplate`이 항목 추가 버튼을 떨어뜨려서 `http_request`가 헤더를 아예 못 넣었다.**
+   자유 형식 맵(엔진의 `dict[str, str]`, 여기서는 `additionalProperties`)은 **키를 추가할 방법이 있어야만**
+   쓸 수 있다. 필드가 아무것도 없는 제목으로만 렌더되고 있었다 — 그 노드가 하는 일의 대부분이 헤더인데.
+   복구하고, 버튼이 사라지면 깨지는 테스트를 붙였다.
+
+**RJSF 6은 `idSchema`를 `fieldPathId`로 바꿨다.** 루트 판별(`$id === "root"`)은 그대로다.
+`node_modules/@rjsf/utils`의 타입을 보고 확인했고, 옛 이름으로 쓴 코드는 조용히 `undefined`를 읽는다.
+
+**계획이 말한 "GET → POST 전환" 테스트를 실제 전환으로 썼다.** 처음엔 POST 노드 하나와 GET 노드 하나를
+각각 렌더하는 테스트 둘이었는데, 그건 전환이 아니다 — 메서드는 **설정 탭**에 있고 시도 횟수는
+**실행 정책 탭**에 있어서, 패널이 스토어에서 노드를 다시 읽지 않으면 아무것도 다시 렌더되지 않는다.
+`Canvas`가 마운트하는 방식 그대로(스토어 구독) 렌더하는 작은 하네스를 붙여서, 활성 → 비활성 전이를 봤다.
+
+**Mutation 16/16 잡힘** (한 번은 고친 뒤)
+
+| 변형 | 결과 |
+|---|---|
+| `policyOverride`가 기본값과 같은 값도 저장 | killed |
+| 빈 오버라이드가 `undefined` 대신 `{}` (정책·재시도 각각) | killed |
+| `retry` 오버라이드 통째로 누락 | killed |
+| `effectivePolicy` 병합 순서 뒤집기(기본값이 오버라이드를 이김) | killed |
+| `retry`를 필드별이 아니라 객체째 병합 | killed |
+| 구조 비교 → 동일성 비교 | **처음엔 0** → 테스트 보강 후 killed |
+| 재시도 금지가 모든 노드 타입에 적용 | killed |
+| PATCH를 멱등으로 취급 | killed |
+| 메서드 생략 시 기본값 GET → POST | killed |
+| `x-template`/스키마 필드가 위젯으로 안 감 (각각) | killed |
+| `SCHEMA_FIELDS`를 노드 타입과 무관하게 취급 | killed |
+| `ui:order`에서 `*` 제거 | killed |
+| 모르는 속성에 이름을 제목으로 지어냄 | killed |
+
+살아남은 하나가 기록할 값이 있다. 원래 테스트는 `defaultOutput: null`로 "구조 비교"를 단언했는데,
+`null === null`이라 동일성 비교로 바꿔도 통과한다. 실제로 구분되는 경우는 **기본값과 구조가 같은 별개
+객체**다 — RJSF는 키 입력마다 `formData`를 새로 만들기 때문에 폼의 사본은 결코 같은 참조가 아니다.
+동일성 비교였다면 저장할 때마다 기본값과 똑같은 "오버라이드"를 써서 **저장할 때마다 워크플로 버전이
+하나씩 늘어난다.** 테스트를 그 경우로 바꾸고, 대조군(진짜 바뀐 중첩 값은 잡혀야 한다)을 붙였다.
+
+**남은 공백 — Task 10·11이 채운다.** 템플릿 위젯과 스키마 위젯은 지금은 정직한 textarea다. 같은 값을
+쓰기 때문에 패널은 반쪽이 아니라 쓸 수 있는 상태이고, `{{` 자동완성(Task 10)과 스키마 폼 편집기(Task 11)가
+그 자리에 들어간다. 스키마 textarea는 **blur에서만** 파싱한다 — 타이핑 중인 JSON은 유효하지 않은 JSON이라,
+글자마다 그걸 보고하면 필드를 못 쓴다.
+
+**검증**: `pnpm test` 218 passed (18 files), `typecheck`·`lint` clean, `build` 성공,
+실제 엔진에 붙은 브라우저에서 설정 탭·실행 정책 탭 스크린샷 확인.

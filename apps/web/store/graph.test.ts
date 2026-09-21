@@ -272,3 +272,86 @@ describe("auto layout", () => {
     expect(store.getState().layingOut).toBe(false)
   })
 })
+
+describe("editing a node from the panel", () => {
+  beforeEach(() => {
+    store.getState().addNodeAt("llm", { x: 0, y: 0 })
+  })
+
+  function node() {
+    return dsl().nodes[0]
+  }
+
+  it("replaces the config", () => {
+    store.getState().setNodeConfig("llm_1", { model: "qwen2.5:14b", prompt: "안녕" })
+
+    expect(node()?.config).toEqual({ model: "qwen2.5:14b", prompt: "안녕" })
+  })
+
+  it("collapses a burst of typing into one undo step", () => {
+    // The whole point: a prompt is typed a character at a time, and undo should return to before the
+    // prompt, not to its second-to-last character.
+    const depth = store.getState().history.past.length
+    for (const prompt of ["안", "안녕", "안녕하", "안녕하세요"]) {
+      store.getState().setNodeConfig("llm_1", { prompt })
+    }
+
+    expect(store.getState().history.past).toHaveLength(depth + 1)
+    expect(node()?.config).toEqual({ prompt: "안녕하세요" })
+  })
+
+  it("starts a new step for a different node", () => {
+    store.getState().addNodeAt("template", { x: 0, y: 0 })
+    const depth = store.getState().history.past.length
+
+    store.getState().setNodeConfig("llm_1", { prompt: "a" })
+    store.getState().setNodeConfig("template_1", { template: "b" })
+
+    expect(store.getState().history.past).toHaveLength(depth + 2)
+  })
+
+  it("starts a new step for a different kind of edit on the same node", () => {
+    const depth = store.getState().history.past.length
+
+    store.getState().setNodeConfig("llm_1", { prompt: "a" })
+    store.getState().setNodeLabel("llm_1", "요약")
+
+    expect(store.getState().history.past).toHaveLength(depth + 2)
+  })
+
+  it("starts a new step after endEdit, which is what leaving the field calls", () => {
+    const depth = store.getState().history.past.length
+
+    store.getState().setNodeConfig("llm_1", { prompt: "a" })
+    store.getState().endEdit()
+    store.getState().setNodeConfig("llm_1", { prompt: "ab" })
+
+    expect(store.getState().history.past).toHaveLength(depth + 2)
+  })
+
+  it("undoes a burst back to before it", () => {
+    store.getState().setNodeConfig("llm_1", { prompt: "first" })
+    store.getState().endEdit()
+    for (const prompt of ["f", "fi", "fix"]) store.getState().setNodeConfig("llm_1", { prompt })
+
+    store.getState().undo()
+
+    expect(node()?.config).toEqual({ prompt: "first" })
+  })
+
+  it("writes a label and clears it", () => {
+    store.getState().setNodeLabel("llm_1", "요약")
+    expect(node()?.label).toBe("요약")
+
+    store.getState().setNodeLabel("llm_1", "")
+    expect(node() && "label" in (node() as object)).toBe(false)
+  })
+
+  it("removes the policy key when the override is empty", () => {
+    store.getState().setNodePolicy("llm_1", { timeoutSec: 30 })
+    expect(node()?.policy).toEqual({ timeoutSec: 30 })
+
+    store.getState().setNodePolicy("llm_1", undefined)
+    expect(node() && "policy" in (node() as object)).toBe(false)
+  })
+})

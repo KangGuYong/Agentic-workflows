@@ -1,7 +1,17 @@
 import { createStore, type StoreApi } from "zustand/vanilla"
 
-import { addNode, connect, disconnect, removeNode, setPositions, type Connection } from "@/lib/dsl/commands"
-import type { EditorDsl, XY } from "@/lib/dsl/document"
+import {
+  addNode,
+  connect,
+  disconnect,
+  removeNode,
+  setConfig,
+  setLabel,
+  setPolicy,
+  setPositions,
+  type Connection,
+} from "@/lib/dsl/commands"
+import type { EditorDsl, NodeConfig, Policy, XY } from "@/lib/dsl/document"
 import { movedPositions, type NodeChange } from "@/lib/dsl/flow"
 import { layout } from "@/lib/dsl/layout"
 import {
@@ -44,6 +54,11 @@ export interface GraphState {
   removeSelected: () => void
   moveNodes: (changes: NodeChange[]) => void
   endDrag: () => void
+  setNodeConfig: (nodeId: string, config: NodeConfig) => void
+  setNodeLabel: (nodeId: string, label: string) => void
+  setNodePolicy: (nodeId: string, policy: Policy | undefined) => void
+  /** Ends the merge window on a panel field, so the next edit starts a new undo step. */
+  endEdit: () => void
   autoLayout: () => Promise<void>
   /** True while ELK is running, so the button can disable itself rather than stack layouts. */
   layingOut: boolean
@@ -121,6 +136,26 @@ export function createGraphStore(initial: EditorDsl): GraphStore {
       },
 
       endDrag() {
+        set({ history: commit(get().history) })
+      },
+
+      // The three panel edits share one shape: merge consecutive changes to the *same field of the same
+      // node* into one undo step, so typing a prompt is one step rather than one per keystroke. The plan
+      // called for a 300ms debounce; merging does the same job without dropping the last keystroke of a
+      // burst and without a timer for tests to race (see the Task 9 note).
+      setNodeConfig(nodeId, config) {
+        edit(setConfig(get().dsl, nodeId, config), `config:${nodeId}`)
+      },
+
+      setNodeLabel(nodeId, label) {
+        edit(setLabel(get().dsl, nodeId, label), `label:${nodeId}`)
+      },
+
+      setNodePolicy(nodeId, policy) {
+        edit(setPolicy(get().dsl, nodeId, policy ?? {}), `policy:${nodeId}`)
+      },
+
+      endEdit() {
         set({ history: commit(get().history) })
       },
 
