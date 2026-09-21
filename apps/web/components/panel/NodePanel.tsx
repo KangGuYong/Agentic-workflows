@@ -26,13 +26,14 @@ import { FIELDS, WIDGETS } from "./widgets"
  * is no timeout to override on a `template` node.
  */
 
-type Tab = "settings" | "policy" | "label"
+type Tab = "settings" | "policy" | "label" | "trace"
 
 export function NodePanel({
   node,
   nodeType,
   types = [],
   issues = [],
+  trace,
   state,
 }: {
   node: EditorNode
@@ -41,12 +42,16 @@ export function NodePanel({
   types?: readonly NodeType[]
   /** The whole `/validate` issue list; the panel picks out this node's. */
   issues?: readonly Issue[]
+  /** The run history tab, present only while a run is being watched. */
+  trace?: React.ReactNode
   state: GraphState
 }) {
   const mine = issuesForNode(issues, node.id)
   const [tab, setTab] = useState<Tab>("settings")
   const hasPolicy = nodeType?.defaultPolicy != null
-  const active = tab === "policy" && !hasPolicy ? "settings" : tab
+  const hasTrace = trace !== undefined
+  // A tab that is no longer there cannot stay selected: the run ended, or this node type has no policy.
+  const active = (tab === "policy" && !hasPolicy) || (tab === "trace" && !hasTrace) ? "settings" : tab
 
   return (
     <aside className="flex w-80 shrink-0 flex-col border-l border-ink-600 bg-ink-800">
@@ -56,7 +61,7 @@ export function NodePanel({
       </header>
 
       <nav className="flex border-b border-ink-600" role="tablist">
-        <Tabs active={active} hasPolicy={hasPolicy} onSelect={setTab} />
+        <Tabs active={active} hasPolicy={hasPolicy} hasTrace={hasTrace} onSelect={setTab} />
       </nav>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
@@ -67,6 +72,7 @@ export function NodePanel({
           <PolicyTab node={node} nodeType={nodeType} state={state} />
         ) : null}
         {active === "label" ? <LabelTab node={node} state={state} /> : null}
+        {active === "trace" ? trace : null}
       </div>
     </aside>
   )
@@ -75,16 +81,20 @@ export function NodePanel({
 function Tabs({
   active,
   hasPolicy,
+  hasTrace,
   onSelect,
 }: {
   active: Tab
   hasPolicy: boolean
+  hasTrace: boolean
   onSelect: (tab: Tab) => void
 }) {
   const tabs: [Tab, string][] = [
     ["settings", "설정"],
     ...(hasPolicy ? ([["policy", "실행 정책"]] as [Tab, string][]) : []),
     ["label", "라벨"],
+    // Last, and only during a run: it is a record of something that happened, not a thing to configure.
+    ...(hasTrace ? ([["trace", "실행 기록"]] as [Tab, string][]) : []),
   ]
   return (
     <>

@@ -541,15 +541,15 @@ The hardest UI in this plan. 3 설계 §6.
 
 ## Task 16: The trace panel
 
-- [ ] Clicking a node with run history opens 실행 기록: one row per `(execIndex, attempt)` from `GET /runs/{id}/nodes`.
-- [ ] Each row shows status, duration, `tokensIn`/`tokensOut`, and expandable `input`/`output`/`error`.
-- [ ] `[REDACTED]` renders as a grey badge with a lock icon (3 설계 §8.5). Test that the literal string never appears as plain text.
-- [ ] `truncated: true` shows 값이 잘렸습니다.
-- [ ] `hasMore: true` from the API shows a "더 보기" control.
-- [ ] A node with no rows shows 아직 실행되지 않았습니다, not an empty panel.
+- [x] Clicking a node with run history opens 실행 기록: one row per `(execIndex, attempt)` from `GET /runs/{id}/nodes`.
+- [x] Each row shows status, duration, `tokensIn`/`tokensOut`, and expandable `input`/`output`/`error`.
+- [x] `[REDACTED]` renders as a grey badge with a lock icon (3 설계 §8.5). Test that the literal string never appears as plain text.
+- [x] `truncated: true` shows 값이 잘렸습니다.
+- [x] `hasMore: true` from the API shows a "더 보기" control.
+- [x] A node with no rows shows 아직 실행되지 않았습니다, not an empty panel.
 
 **Verification**
-- [ ] Commit: `feat(web): per-attempt trace panel for node runs`
+- [x] Commit: `feat(web): per-attempt trace panel for node runs`
 
 ---
 
@@ -1871,4 +1871,75 @@ HTTP 노드가 빨간 ✕(실패), 그 뒤 두 노드는 손대지 않은 채로
   재생만 받고 끝난다. Task 18의 몫이다.
 
 **검증**: `pnpm test` 553 passed (42 files), `e2e` 10 passed, `typecheck`·`lint` clean,
+`build` 성공, `test:bundle` 통과.
+
+---
+
+### Task 16 — 실행 기록 패널
+
+`lib/run/trace.ts`(행 정렬·소요 시간·가려짐 판정), `lib/engine/nodeRuns.ts`,
+`components/run/{JsonValue,TracePanel,useNodeRuns}.tsx`, 그리고 노드 패널의 네 번째 탭.
+
+**행은 노드마다가 아니라 시도마다 하나다.** 세 번 재시도한 노드는 행이 셋이고, 반복문 안의 노드는
+회차마다 하나다. 합치지 않았다 — **"됐다"와 "세 번째에 됐다"는 워크플로에 대한 다른 사실**이고,
+합치면 두 번째가 사라진다. 회차 번호는 회차가 둘 이상일 때만 보여준다. 반복문 밖에서는 뜻이 없는 숫자다.
+
+**`[REDACTED]`가 평문으로 나오면 안 된다는 것이 이 태스크의 핵심 요구다.** 엔진은 시크릿을 저장하기 전에
+그 문자열로 바꾼다. 기록을 `JSON.stringify`로 찍으면 **그 문자열이 그대로 화면에 뜨고**, 보는 사람은
+시크릿이 기록 안에 들어 있는 것처럼 읽는다. 게다가 가려진 필드와 값이 우연히 그 열 글자인 필드를
+구분할 방법이 없다. 그래서 값을 **찍지 않고 걸어 다니며** 마커를 만나면 자물쇠 배지로 바꾼다.
+
+테넌트가 진짜로 `[REDACTED]`라는 값을 넣었어도 배지가 뜬다. **안전한 쪽이 그쪽이다**: 글자 자리에
+배지가 뜨는 것은 미관 문제고, 배지 자리에 글자가 뜨는 것은 유출로 보인다.
+
+**내가 쓴 그 테스트가 곧바로 내 구현을 잡았다.** 트리는 네 단계 아래에서 들여쓰기가 패널보다 넓어져서
+`JSON.stringify`로 넘어가는데, **거기서 마커가 그대로 다시 찍혔다.** 컴포넌트의 존재 이유가 깊이 4
+아래에서 무효가 되고 있었던 것이다. `scrubRedactions`를 만들어 찍기 전에 치환한다.
+
+**`loading`을 상태가 아니라 파생값으로 만들었다.** 처음에는 `setLoading(true)`를 이펙트 안에서
+동기로 불렀는데, lint가 "이펙트 안의 동기 setState는 연쇄 렌더를 만든다"고 잡았다. 맞는 지적이다.
+`loading`은 **"이 키에 대한 페이지를 원하는데 아직 없다"** 이고, 그건 상태가 아니라 인자에 대한 사실이다.
+`(runId, limit, finished)`를 키로 만들어 그것과 받아둔 페이지의 키를 비교한다. 같은 이유로 실행이 없을 때
+빈 값을 **이펙트에서 지우지 않고** 반환값에서 파생시킨다 — 지우면 새 실행의 첫 프레임에 옛 실행의 행이
+비쳤다가 사라진다.
+
+**행은 이벤트마다 다시 받지 않는다.** 라이브 상태는 이미 스트림이 그린다. 프레임마다 다시 받으면
+**토큰 하나당 요청 하나**다. 다시 받는 시점은 **실행이 끝났을 때** — 기록이 완성되는 순간이다.
+실패한 갱신은 화면의 행을 지우지 않는다: 갱신 실패는 기록이 사라졌다는 증거가 아니다.
+
+**"실행되지 않았습니다"는 빈 패널과 다르다.** 아무것도 없는 패널은 "여기 아무것도 없다"와
+"이건 실행되지 않았다"를 똑같이 보이게 한다.
+
+**Mutation 23/23 잡힘** (하나는 하네스 artifact)
+
+| 변형 | 결과 |
+|---|---|
+| 오래된 시도를 위로 / 회차를 무시한 정렬 | killed |
+| 모든 노드의 시도를 보여줌 | killed |
+| 음수 소요 시간 / 못 읽는 타임스탬프가 NaN | killed |
+| ms·초 단위를 안 씀 / 정각 분이 "0초"로 | killed |
+| REDACTED를 포함하기만 하면 가려짐으로 | killed |
+| 스크럽이 마커를 놓침 / 배열에 안 들어감 | killed |
+| 빈 시도가 펼칠 내용이 있다고 함 | killed |
+| **마커가 평문으로 렌더 / 깊이 대체가 마커를 찍음** | killed |
+| hasMore 항상 참 / 형식 틀린 응답 수용 / 200 아닌 응답을 페이지로 | killed |
+| run id 미이스케이프 | killed |
+| 실행 안 한 노드가 아무것도 안 보여줌 | killed |
+| 더 보기 항상 제공 / 빈 시도가 펼쳐짐 / 회차 항상 표시 | killed |
+| `finishedAt === null` 가드 제거 | **survived — 하네스 artifact** |
+
+마지막 것은 테스트 공백이 아니다. **그 변형은 유효한 TypeScript가 아니다** — 가드를 지우면
+`Date.parse(string | null)`이 되어 `pnpm typecheck`가 거부한다(`TS2345`). vitest가 타입을 벗기고
+실행하기 때문에 통과한 것이고, 실제로는 타입 시스템이 이미 잡고 있다. 확인하고 넘어갔다.
+
+**실제 엔진으로 확인.** 실패한 HTTP 노드를 열어 `실행 기록` 탭 → `✕ 1번째 시도 4ms`,
+`오류: 차단된 요청입니다 (allowlist)`, `입력: url https://example.com/issues/42`,
+`headers.Authorization 🔒 가려짐`. 패널 전체 텍스트에 `[REDACTED]`가 **없다**는 것을 함께 확인했다.
+
+**남은 공백.**
+- **`meta`를 보여주지 않는다.** 엔진이 담는 값(모델 이름, 지연 시간 등)인데 노드 타입마다 달라서
+  일반적으로 렌더할 방법이 마땅치 않았다. 계획에도 없어서 넓히지 않았다.
+- 승인 대기 노드의 `waitingFor`는 **Task 17**이 다룬다. 지금은 상태만 `승인 대기`로 보인다.
+
+**검증**: `pnpm test` 614 passed (47 files), `e2e` 10 passed, `typecheck`·`lint` clean,
 `build` 성공, `test:bundle` 통과.

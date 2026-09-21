@@ -33,6 +33,8 @@ import { NodePanel } from "@/components/panel/NodePanel"
 import { ConflictDialog } from "@/components/save/ConflictDialog"
 import { StatusBar } from "@/components/save/StatusBar"
 import { RunDialog } from "@/components/run/RunDialog"
+import { TracePanel } from "@/components/run/TracePanel"
+import { useNodeRuns } from "@/components/run/useNodeRuns"
 import { useRunStream } from "@/components/run/useRunStream"
 import { RunStatusBar } from "@/components/run/RunStatusBar"
 import { Banner } from "@/components/validation/Banner"
@@ -75,6 +77,7 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
   useValidate(state.dsl, workflowId, validation.validate)
   useRunInUrl(run.runId)
   const stream = useRunStream(run.runId)
+  const trace = useNodeRuns(run.runId, stream.finished)
 
   // The engine's own verdict, when it disagreed with the editor's last `/validate`. Shown as badges
   // like any other issue, because that is where they can be acted on. Memoised: it feeds the node and
@@ -234,6 +237,18 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
           types={types}
           issues={issues}
           state={state}
+          trace={
+            run.runId === null ? undefined : (
+              <TracePanel
+                nodeId={selected.id}
+                runs={trace.runs}
+                hasMore={trace.hasMore}
+                loading={trace.loading}
+                error={trace.error}
+                onLoadMore={trace.loadMore}
+              />
+            )
+          }
         />
       ) : null}
       <ConflictDialog state={save} />
