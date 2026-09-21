@@ -31,3 +31,12 @@ export function statusById(id: StatusId): Status {
   if (found === undefined) throw new Error(`unknown status: ${id}`)
   return found
 }
+
+/** The run status a node's stream state draws as.
+ *
+ * `defaulted` is the engine's word for "finished on its `defaultOutput`" and the design's sixth state
+ * is called `default`; they are the same thing named twice, and this is the only place that knows it.
+ */
+export function statusOfNodeRun(status: "running" | "succeeded" | "defaulted" | "failed" | "waiting"): StatusId {
+  return status === "defaulted" ? "default" : status
+}

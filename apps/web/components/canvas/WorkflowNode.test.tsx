@@ -14,6 +14,7 @@ function show(data: Partial<FlowNodeData>, selected = false) {
     handles: ["yes", "no"],
     issues: [],
     unconnectedHandles: [],
+    run: null,
     ...data,
   }
   // `NodeProps` carries a dozen fields of React Flow plumbing this component never reads. Only the
@@ -80,5 +81,66 @@ describe("the node's validation state", () => {
     for (const handle of container.querySelectorAll<HTMLElement>("[data-handleid]")) {
       expect(handle.style.background).not.toBe("var(--st-failed)")
     }
+  })
+})
+
+describe("the node's run state", () => {
+  it("draws nothing extra when no run is being watched", () => {
+    const { container } = show({ issues: [] })
+
+    expect(screen.queryByRole("img")).toBeNull()
+    expect((container.firstChild as HTMLElement).style.borderColor).toBe("var(--ink-600)")
+  })
+
+  it("shows the run status with a glyph, not only a colour", () => {
+    show({ run: { status: "running", tokens: "" } })
+
+    const chip = screen.getByRole("img")
+    expect(chip).toHaveAccessibleName("실행 상태: 실행 중")
+    expect(chip).toHaveTextContent("◍")
+  })
+
+  it("names each status it can draw", () => {
+    for (const [status, label] of [
+      ["running", "실행 중"],
+      ["succeeded", "성공"],
+      ["failed", "실패"],
+      ["waiting", "승인 대기"],
+      ["default", "기본값"],
+    ] as const) {
+      const { unmount } = show({ run: { status, tokens: "" } })
+      expect(screen.getByRole("img"), status).toHaveAccessibleName(`실행 상태: ${label}`)
+      unmount()
+    }
+  })
+
+  it("lets the run state outrank a validation badge", () => {
+    // During a run, the run is what someone is watching; the validation colour is about a document
+    // they are not editing at that moment.
+    show({ run: { status: "running", tokens: "" }, issues: [issue()] })
+
+    expect(screen.getByRole("img")).toHaveAccessibleName(/실행 상태/)
+    expect(screen.queryByRole("img", { name: /오류/ })).toBeNull()
+  })
+
+  it("shows the streamed text", () => {
+    show({ run: { status: "running", tokens: "안녕하세요" } })
+
+    expect(screen.getByText("안녕하세요")).toBeInTheDocument()
+  })
+
+  it("shows only the tail of a long answer", () => {
+    // A node streaming a long answer would otherwise grow until it covered the canvas. What someone
+    // watches for is that text is still arriving, which the tail shows just as well.
+    const long = "가".repeat(500)
+    const { container } = show({ run: { status: "running", tokens: long } })
+
+    expect(container.textContent?.length).toBeLessThan(300)
+  })
+
+  it("shows no readout before any token has arrived", () => {
+    const { container } = show({ run: { status: "running", tokens: "" } })
+
+    expect(container.querySelector(".readout")).toBeNull()
   })
 })

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 
+import type { NodeRunState } from "@/lib/run/events"
 import type { Issue } from "@/store/validation"
 
 import { movedPositions, toFlowEdges, toFlowNodes } from "./flow"
@@ -152,5 +153,47 @@ describe("validation on the canvas", () => {
 
   it("leaves every edge plain when there are no issues", () => {
     expect(toFlowEdges(GRAPH).every((edge) => edge.style === undefined)).toBe(true)
+  })
+})
+
+describe("run state on the canvas", () => {
+  const GRAPH2: EditorDsl = {
+    version: "1",
+    nodes: [
+      { id: "start", type: "start", position: { x: 0, y: 0 } },
+      { id: "llm_1", type: "llm", position: { x: 1, y: 1 } },
+    ],
+    edges: [],
+  }
+
+  const RUNNING: NodeRunState = { status: "running", attempt: 1, tokens: "안녕", error: null, defaulted: false }
+  const DONE: NodeRunState = { status: "succeeded", attempt: 1, tokens: "", error: null, defaulted: false }
+
+  it("gives each node its own run state", () => {
+    // Every node wearing the first one's status would make the whole canvas light up at once.
+    const nodes = toFlowNodes(GRAPH2, { runNodes: { start: DONE, llm_1: RUNNING } })
+
+    expect(nodes.find((node) => node.id === "start")?.data.run).toEqual({ status: "succeeded", tokens: "" })
+    expect(nodes.find((node) => node.id === "llm_1")?.data.run).toEqual({ status: "running", tokens: "안녕" })
+  })
+
+  it("leaves a node the run has not reached without one", () => {
+    const nodes = toFlowNodes(GRAPH2, { runNodes: { start: DONE } })
+
+    expect(nodes.find((node) => node.id === "llm_1")?.data.run).toBeNull()
+  })
+
+  it("is null on every node when no run is being watched", () => {
+    expect(toFlowNodes(GRAPH2, {}).every((node) => node.data.run === null)).toBe(true)
+  })
+
+  it("draws a defaulted finish as the design's sixth state, not as a success", () => {
+    // `onError: "default"` means the node produced the fallback. Drawing it green would hide that the
+    // workflow ran on a stand-in value.
+    const nodes = toFlowNodes(GRAPH2, {
+      runNodes: { llm_1: { ...DONE, status: "defaulted", defaulted: true } },
+    })
+
+    expect(nodes.find((node) => node.id === "llm_1")?.data.run?.status).toBe("default")
   })
 })

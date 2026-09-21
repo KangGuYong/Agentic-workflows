@@ -527,15 +527,15 @@ The hardest UI in this plan. 3 설계 §6.
 
 ## Task 15: The event stream
 
-- [ ] `EventSource("/api/engine/runs/{id}/events")` opened when `?run=` is present and the run is not terminal.
-- [ ] Handlers per event type; `node_started`/`node_finished`/`node_failed`/`node_waiting` drive node colours, `node_token` appends to a token preview.
-- [ ] **Close explicitly on a terminal event** (3 설계 §8.1). Test: after `run_succeeded`, no further connection is opened.
-- [ ] `node_token` never changes a node's status. Test it.
-- [ ] Reconnection is `EventSource`'s job; the editor does not implement one. Test that the component does not create a second `EventSource` while one is open.
-- [ ] An `error` event while the run is still active shows 연결 끊김 — 재연결 중 in the status bar and clears it on the next message.
+- [x] `EventSource("/api/engine/runs/{id}/events")` opened when `?run=` is present and the run is not terminal.
+- [x] Handlers per event type; `node_started`/`node_finished`/`node_failed`/`node_waiting` drive node colours, `node_token` appends to a token preview.
+- [x] **Close explicitly on a terminal event** (3 설계 §8.1). Test: after `run_succeeded`, no further connection is opened.
+- [x] `node_token` never changes a node's status. Test it.
+- [x] Reconnection is `EventSource`'s job; the editor does not implement one. Test that the component does not create a second `EventSource` while one is open.
+- [x] An `error` event while the run is still active shows 연결 끊김 — 재연결 중 in the status bar and clears it on the next message.
 
 **Verification**
-- [ ] Commit: `feat(web): drive node state from the run event stream`
+- [x] Commit: `feat(web): drive node state from the run event stream`
 
 ---
 
@@ -1790,4 +1790,85 @@ URL에 `?run=7b476af8-...`. 엔진 쪽에서 `start` 노드가 `{"issue":"이슈
 - **`?run=`으로 다시 들어와도 아무것도 복원되지 않는다.** Task 18의 몫이다.
 
 **검증**: `pnpm test` 497 passed (39 files), `e2e` 10 passed, `typecheck`·`lint` clean,
+`build` 성공, `test:bundle` 통과.
+
+---
+
+### Task 15 — 이벤트 스트림
+
+`lib/run/events.ts`(순수 리듀서), `components/run/useRunStream.ts`(EventSource 하나),
+`components/run/RunStatusBar.tsx`, `lib/design/status.ts`의 매핑 하나,
+그리고 `flow.ts`·`WorkflowNode`가 그것을 그린다.
+
+**스트림의 전부를 순수 리듀서로 옮겼다.** 스트림에서 흥미로운 것은 전부 *순서*다 — 노드가 끝난 뒤에
+도착하는 토큰, 재시도될 실패, 두 번 오는 종료 이벤트. 그 중 어느 것도 소켓이 있어야 시험할 수 있는 것이
+아니다. `EventSource`가 하는 일은 프레임을 이 리듀서에 넘기는 것뿐이고, 훅에 남은 것은 **살아 있는 연결만
+가진 세 가지 성질**이다.
+
+1. **한 번에 연결 하나.** 둘이면 모든 이벤트가 두 번 오고 리듀서가 두 번 센다.
+2. **종료 이벤트에서 명시적으로 닫는다.** `EventSource`는 서버가 스트림을 닫으면 **알아서 다시
+   연결한다.** 끝난 실행을 닫지 않으면 영원히 다시 열리고, 매번 실행 전체를 재생한다.
+3. **재연결을 직접 만들지 않는다.** `EventSource`가 이미 백오프하고 `Last-Event-ID`를 다시 보낸다.
+   그 위에 두 번째 장치를 얹으면 서로 싸운다. 화면에는 "연결 끊김 — 재연결 중"이라고 **말만** 한다.
+
+테스트는 `EventSource` 대신 가짜를 쓰는데, 열린 인스턴스를 **전부 기록한다** — 실제 `EventSource`라면
+감춰졌을, 여기서 가장 중요한 성질(몇 개가 열렸나)을 단언하기 위해서다.
+
+**세 가지는 거짓말이 될 수 있어서 따로 못 박았다.**
+
+- **`node_token`은 노드 상태를 절대 바꾸지 않는다.** 토큰은 출력이지 상태 전이가 아니다. 토큰이
+  "실행 중"을 세우게 두면 **이미 끝난 노드가 되살아난다** — `node_finished` 뒤에 늦게 도착한 토큰이
+  정확히 그 일을 한다.
+- **`willRetry`인 실패는 "실행 중"으로 둔다.** 거기서 실패를 띄우면 다음 `node_started`가 곧바로
+  정정하는 거짓말이 되고, 그 깜빡임은 재시도가 아니라 에디터 버그로 읽힌다.
+- **재시도가 시작되면 이전 시도의 토큰과 오류를 지운다.** 그것들은 실패한 시도의 것이다. 남겨두면
+  다시 돌고 있는 노드 밑에 옛 실패가 붙어 있다.
+
+**`node_token`에는 `id:`가 없다**(설계 7.3). 그걸 0으로 치면 재연결이 실행 전체를 처음부터 재생한다.
+`lastSeq`는 id가 있는 이벤트로만, 그것도 **뒤로 가지 않게** 움직인다.
+
+**모르는 이벤트 타입은 오류가 아니다.** 새 엔진이 하나 더 보낼 수 있고, 그때 옳은 반응은 연결을 유지한 채
+프레임을 버리는 것이다. JSON이 아닌 프레임도 마찬가지 — 잘 전달되고 있는 스트림을 무너뜨릴 이유가 못 된다.
+
+**실행 중에는 실행 상태가 검증 색을 이긴다.** 실행을 보고 있는 사람에게 지금 중요한 것은 실행이고,
+검증 색은 그 순간 편집하고 있지 않은 문서에 대한 이야기다. 실행이 없으면 검증 색이 돌아온다.
+
+**토큰은 꼬리만 보여준다.** 긴 답을 스트리밍하는 노드는 캔버스를 덮을 때까지 자란다. 사람이 보는 것은
+글자가 계속 오고 있다는 사실이고, 그건 꼬리로도 똑같이 보인다.
+
+**`statusOfNodeRun`이 이름 하나를 옮긴다.** 엔진의 `defaulted`와 디자인의 여섯 번째 상태 `default`는
+같은 것의 두 이름이다. 그걸 아는 곳을 **한 군데로** 묶었다 — 다른 데서도 알면 맞춰 둘 곳이 하나 더 는다.
+
+**Mutation 15/15 잡힘** (셋은 테스트 추가 후)
+
+| 변형 | 결과 |
+|---|---|
+| 종료 뒤 프레임을 계속 적용 | killed |
+| 종료 이벤트가 끝내지 않음 / 실패·취소가 종료가 아님 | killed |
+| 전송 id 없는 이벤트가 재개 지점을 되돌림 | killed |
+| 순서가 뒤집힌 id가 재개 지점을 되돌림 | killed |
+| 메시지가 끊김 표시를 안 지움 | killed |
+| 재시도될 실패를 실패로 표시 | killed |
+| 기본값 완료를 성공처럼 | killed |
+| 재시도가 옛 토큰·오류를 유지 | killed |
+| **토큰이 노드 상태를 바꿈** | killed |
+| 끝난 실행이 끊김을 보고 | killed |
+| nodeId 없는 노드 이벤트를 적용 | killed |
+| **`defaulted`에 디자인 상태가 없음** | 처음엔 survived → 테스트 추가 후 killed |
+| **실행 상태가 노드에 안 닿음 / 모든 노드가 첫 노드 상태를** | 처음엔 survived → 테스트 추가 후 killed |
+
+살아남은 셋은 모두 같은 공백이었다: `toFlowNodes`에 `runNodes`를 주는 경로에 테스트가 없었다.
+리듀서는 촘촘히 덮었는데 **그 결과를 화면에 옮기는 한 줄**이 비어 있었던 것이다.
+
+**실제 엔진으로 확인.** 실행 → SSE 200 `text/event-stream` → 시작 노드가 초록 채운 점(성공),
+HTTP 노드가 빨간 ✕(실패), 그 뒤 두 노드는 손대지 않은 채로. 툴바에는 `실패`.
+그 실패 자체는 샌드박스가 바깥 HTTP를 막아서 난 것이고, 에디터가 할 일은 그것을 보여주는 것이었다.
+
+**남은 공백.**
+- **실패한 노드의 오류 메시지를 화면에서 볼 수 없다.** 리듀서는 들고 있지만 노드 위에는 상태만 그린다 —
+  Task 16의 실행 기록 패널이 그것을 보여준다.
+- **`?run=`으로 다시 들어와도 복원되지 않는다.** 스트림은 `?run=`이 있으면 열리지만, 이미 끝난 실행은
+  재생만 받고 끝난다. Task 18의 몫이다.
+
+**검증**: `pnpm test` 553 passed (42 files), `e2e` 10 passed, `typecheck`·`lint` clean,
 `build` 성공, `test:bundle` 통과.

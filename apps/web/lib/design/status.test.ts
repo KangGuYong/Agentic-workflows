@@ -3,7 +3,7 @@ import { join } from "node:path"
 
 import { describe, expect, it } from "vitest"
 
-import { STATUSES, statusById, type StatusId } from "./status"
+import { STATUSES, statusById, statusOfNodeRun, type StatusId } from "./status"
 
 const IDS: StatusId[] = ["queued", "running", "succeeded", "failed", "waiting", "default"]
 
@@ -63,5 +63,27 @@ describe("design tokens", () => {
       }
     }
     expect(offenders).toEqual([])
+  })
+})
+
+describe("statusOfNodeRun", () => {
+  it("maps each stream status onto a design state", () => {
+    // Every value the reducer can produce has to land on one of the six, or `statusById` throws at
+    // render time -- on the canvas, during a run.
+    for (const status of ["running", "succeeded", "failed", "waiting"] as const) {
+      expect(() => statusById(statusOfNodeRun(status))).not.toThrow()
+    }
+  })
+
+  it("renames `defaulted` to the design's `default`", () => {
+    // The engine's word for "finished on its defaultOutput" and the design's sixth state are the same
+    // thing named twice. Anywhere else knowing that would be a second place to keep in step.
+    expect(statusOfNodeRun("defaulted")).toBe("default")
+    expect(statusById(statusOfNodeRun("defaulted")).label).toBe("기본값")
+  })
+
+  it("leaves the statuses whose names already match", () => {
+    expect(statusOfNodeRun("running")).toBe("running")
+    expect(statusOfNodeRun("waiting")).toBe("waiting")
   })
 })

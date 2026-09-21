@@ -1,3 +1,5 @@
+import { statusOfNodeRun, type StatusId } from "@/lib/design/status"
+import type { NodeRunState } from "@/lib/run/events"
 import { handleOf, worstOf, type Issue } from "@/store/validation"
 
 import { DEFAULT_HANDLE, edgeHandle, type EditorDsl, type XY } from "./document"
@@ -17,6 +19,8 @@ export interface FlowNodeData extends Record<string, unknown> {
   issues: Issue[]
   /** Handles a `HANDLE_NOT_CONNECTED` error names, so the node can mark the one that is empty. */
   unconnectedHandles: string[]
+  /** How this node is doing in the run being watched, or null when no run is. */
+  run: { status: StatusId; tokens: string } | null
 }
 
 export interface FlowNode {
@@ -42,6 +46,8 @@ export interface FlowView {
   labels?: Record<string, string>
   /** The last `/validate` issue list, which the badges and edge colours are drawn from. */
   issues?: readonly Issue[]
+  /** Per-node state from the run event stream, keyed by node id. */
+  runNodes?: Record<string, NodeRunState>
 }
 
 export function toFlowNodes(dsl: EditorDsl, view: FlowView): FlowNode[] {
@@ -67,9 +73,14 @@ export function toFlowNodes(dsl: EditorDsl, view: FlowView): FlowNode[] {
       unconnectedHandles: nodeIssues
         .map((issue) => handleOf(issue))
         .filter((handle): handle is string => handle !== null),
+      run: runOf(view.runNodes?.[node.id]),
     },
   }
   })
+}
+
+function runOf(node: NodeRunState | undefined): { status: StatusId; tokens: string } | null {
+  return node === undefined ? null : { status: statusOfNodeRun(node.status), tokens: node.tokens }
 }
 
 /** The severity colour an edge is drawn in, or undefined when it has no issues. */

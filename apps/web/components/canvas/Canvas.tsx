@@ -25,6 +25,7 @@ import { validateDraft } from "@/lib/engine/validate"
 import { inputSchema, needsInputs } from "@/lib/run/inputs"
 import { createGraphStore, type GraphState } from "@/store/graph"
 import { createSaveStore, type SaveState } from "@/store/save"
+import type { StreamState } from "@/lib/run/events"
 import { createRunStore } from "@/store/run"
 import { createValidationStore, workflowIssues, type Issue } from "@/store/validation"
 
@@ -32,6 +33,8 @@ import { NodePanel } from "@/components/panel/NodePanel"
 import { ConflictDialog } from "@/components/save/ConflictDialog"
 import { StatusBar } from "@/components/save/StatusBar"
 import { RunDialog } from "@/components/run/RunDialog"
+import { useRunStream } from "@/components/run/useRunStream"
+import { RunStatusBar } from "@/components/run/RunStatusBar"
 import { Banner } from "@/components/validation/Banner"
 import { RunButton } from "@/components/validation/RunButton"
 
@@ -71,6 +74,7 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
   useAutosave(state.dsl, save.changed)
   useValidate(state.dsl, workflowId, validation.validate)
   useRunInUrl(run.runId)
+  const stream = useRunStream(run.runId)
 
   // The engine's own verdict, when it disagreed with the editor's last `/validate`. Shown as badges
   // like any other issue, because that is where they can be acted on. Memoised: it feeds the node and
@@ -100,8 +104,8 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
     [validation.nodes],
   )
   const nodes = useMemo(
-    () => toFlowNodes(state.dsl, { labels, handles, issues }),
-    [state.dsl, labels, handles, issues],
+    () => toFlowNodes(state.dsl, { labels, handles, issues, runNodes: stream.nodes }),
+    [state.dsl, labels, handles, issues, stream.nodes],
   )
   // The panel opens on exactly one node; a multi-select has nothing single to configure.
   const selected =
@@ -213,7 +217,15 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
         >
           <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="transparent" />
         </ReactFlow>
-        <Toolbar state={state} save={save} issues={issues} onRun={onRun} onAutoLayout={onAutoLayout} />
+        <Toolbar
+          state={state}
+          save={save}
+          issues={issues}
+          runId={run.runId}
+          stream={stream}
+          onRun={onRun}
+          onAutoLayout={onAutoLayout}
+        />
       </div>
       {selected !== undefined ? (
         <NodePanel
@@ -281,12 +293,16 @@ function Toolbar({
   state,
   save,
   issues,
+  runId,
+  stream,
   onRun,
   onAutoLayout,
 }: {
   state: GraphState
   save: SaveState
   issues: readonly Issue[]
+  runId: string | null
+  stream: StreamState
   onRun: () => void
   onAutoLayout: () => Promise<void>
 }) {
@@ -314,6 +330,11 @@ function Toolbar({
       <div className="pointer-events-auto border border-ink-600 bg-ink-800 px-2 py-1.5" style={{ borderRadius: "var(--radius)" }}>
         <StatusBar state={save} />
       </div>
+      {runId === null ? null : (
+        <div className="pointer-events-auto border border-ink-600 bg-ink-800 px-2 py-1.5" style={{ borderRadius: "var(--radius)" }}>
+          <RunStatusBar stream={stream} />
+        </div>
+      )}
       <RunButton issues={issues} nodeCount={state.dsl.nodes.length} onRun={onRun} />
       {state.lastError !== null ? (
         <p
