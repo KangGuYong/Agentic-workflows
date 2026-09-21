@@ -150,6 +150,62 @@ body {
   background-size: var(--grid-size) var(--grid-size);
 }
 
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Task 19 — 계기판 방향이 실제로 보이는 첫 화면들.
+
+   캔버스는 모눈이 질감을 맡지만, 목록·시크릿 화면은 Task 19 전까지 단색이었다.
+   계획의 시각 디자인 절이 "배경은 단색으로 때우지 않는다"고 한 곳이 바로 여기다.
+   질감은 계측기 앞판에서 가져온다 — 아주 옅은 주사선과 위쪽 가장자리의 빛 번짐.
+   대비는 의도적으로 임계에 가깝다: 보이라고 넣은 것이 아니라 **표면이 평평하지
+   않다는 느낌**을 주려고 넣은 것이고, 읽는 데 방해가 되면 실패한 것이다. */
+.panel-surface {
+  background-color: var(--ink-900);
+  background-image:
+    /* 위쪽 가장자리의 빛: 앞판이 조명 아래 있다는 신호 */
+    radial-gradient(120% 60% at 50% -10%, color-mix(in srgb, var(--fg) 4%, transparent), transparent 70%),
+    /* 주사선: 3px 주기의 1px 음각 */
+    repeating-linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--fg) 1.6%, transparent) 0 1px,
+      transparent 1px 3px
+    );
+}
+
+/* 음각 괘선. 위는 그림자, 아래는 옅은 빛 — 1px 홈이 파인 것처럼 읽힌다. */
+.rule-engraved {
+  border-bottom: 1px solid color-mix(in srgb, var(--ink-600) 80%, transparent);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--fg) 3%, transparent);
+}
+
+/* 전원이 들어온 계측기의 단 하나뿐인 호박색 신호. 장식이 아니라 "지금 살아 있다"이다. */
+.signal-live {
+  animation: signal-breathe 3.2s ease-in-out infinite;
+}
+
+@keyframes signal-breathe {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
+/* 화면이 들어올 때의 모션. 계측기 바늘이 자리를 잡듯 아주 짧게, 한 번만.
+   행마다 지연을 주는 것은 인라인 `--row` 로 한다(개수를 CSS가 알 필요가 없다). */
+.panel-enter {
+  animation: panel-enter 260ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  animation-delay: calc(var(--row, 0) * 28ms);
+}
+
+@keyframes panel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

@@ -30,7 +30,8 @@ const COLOURS: Record<SaveState["status"], string> = {
 /** `savedAt` is a timestamp and `now` is a parameter, so this is pure and a test needs no clock. */
 export function savedAtText(savedAt: number | null, now: number): string | null {
   if (savedAt === null) return null
-  const seconds = Math.max(0, Math.round((now - savedAt) / 1000))
+  // Negative when the two clocks disagree, which the `< 60` branch answers for anyway -- no clamp.
+  const seconds = Math.round((now - savedAt) / 1000)
   if (seconds < 60) return "방금"
   const minutes = Math.floor(seconds / 60)
   if (minutes < 60) return `${minutes}분 전`

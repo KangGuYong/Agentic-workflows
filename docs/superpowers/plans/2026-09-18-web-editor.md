@@ -582,15 +582,15 @@ The hardest UI in this plan. 3 설계 §6.
 
 ## Task 19: The workflow list and shell
 
-- [ ] 이 화면이 제품의 미학 방향이 처음 드러나는 곳이다. 시각 디자인 절을 다시 읽고 Task 1의 방향을 여기서 완성한다.
-- [ ] `/` lists workflows (`GET /workflows`) with name, revision, updated time; 새 워크플로 creates one and navigates to it.
-- [ ] Rename in place (`PUT` with `name`).
-- [ ] Delete with a confirmation; 409 `WORKFLOW_HAS_ACTIVE_RUNS` → 실행 중인 워크플로는 삭제할 수 없습니다.
-- [ ] A secrets screen: list names (`GET /secrets`), add/replace a value (`PUT /secrets/{name}`), delete. **The value input is write-only** — after saving, show only the name and updated time. The API cannot return a value; make sure the UI never implies it could.
-- [ ] Secret name validation mirrors the engine's `^[A-Z][A-Z0-9_]{0,63}$` with a Korean explanation, so a bad name is caught before the request.
+- [x] 이 화면이 제품의 미학 방향이 처음 드러나는 곳이다. 시각 디자인 절을 다시 읽고 Task 1의 방향을 여기서 완성한다.
+- [x] `/` lists workflows (`GET /workflows`) with name, revision, updated time; 새 워크플로 creates one and navigates to it.
+- [x] Rename in place (`PUT` with `name`).
+- [x] Delete with a confirmation; 409 `WORKFLOW_HAS_ACTIVE_RUNS` → 실행 중인 워크플로는 삭제할 수 없습니다.
+- [x] A secrets screen: list names (`GET /secrets`), add/replace a value (`PUT /secrets/{name}`), delete. **The value input is write-only** — after saving, show only the name and updated time. The API cannot return a value; make sure the UI never implies it could.
+- [x] Secret name validation mirrors the engine's `^[A-Z][A-Z0-9_]{0,63}$` with a Korean explanation, so a bad name is caught before the request.
 
 **Verification**
-- [ ] Commit: `feat(web): workflow list and secret management screens`
+- [x] Commit: `feat(web): workflow list and secret management screens`
 
 ---
 
@@ -2096,3 +2096,83 @@ API가 그 자리에서 끝내고(`cancelled`), 워커가 쥐고 있는 실행�
 
 **검증**: `pnpm test` 689 passed (51 files), `e2e` 10 passed, `typecheck`·`lint` clean,
 `build` 성공, `test:bundle` 통과.
+
+---
+
+### Task 19 — 워크플로 목록과 시크릿
+
+`app/page.tsx`(목록), `app/workflows/[id]/page.tsx`(편집기가 여기로 옮겨왔다), `app/secrets/page.tsx`,
+`components/{shell,workflows,secrets}/`, `lib/engine/{workflows,secrets}.ts`,
+`lib/secrets/name.ts`, `lib/format/time.ts`, 그리고 `globals.css`의 계기판 표면.
+
+**편집기를 `/`에서 `/workflows/[id]`로 옮겼다.** Task 12는 목록이 없어서 "가장 최근 것을 연다"로 때웠다.
+이제 경로가 어느 워크플로인지 말하고, 없는 id는 `notFound()`다 — 조용히 남의 워크플로를 여는 대신.
+
+**처음 만든 화면은 방향이 안 보였다.** 계획이 "이 화면이 제품의 미학 방향이 처음 드러나는 곳"이라고
+적어둔 태스크인데, 브라우저로 열어보니 **그냥 어두운 표**였다. 캔버스에는 모눈과 호박색 신호와 음각
+괘선이 있는데 목록에는 아무것도 없었다. 계획의 시각 디자인 절이 "배경은 단색으로 때우지 않는다"고 한
+곳이 정확히 여기다. 세 가지를 더했다.
+
+- **계기판 표면**: 위쪽 가장자리의 아주 옅은 빛(앞판이 조명 아래 있다는 신호)과 3px 주기의 주사선.
+  대비는 **의도적으로 임계에 가깝다** — 보이라고 넣은 것이 아니라 표면이 평평하지 않다는 느낌을 주려고
+  넣은 것이고, 읽는 데 방해가 되면 실패한 것이다.
+- **음각 괘선**: 위는 그림자, 아래는 옅은 빛. 1px 홈이 파인 것처럼 읽힌다.
+- **모션**: 화면이 들어올 때 260ms, 행마다 28ms 지연. `prefers-reduced-motion`은 기존 규칙이 이미 끈다.
+  그리고 헤더의 **단 하나뿐인 호박색 신호**가 3.2초 주기로 호흡한다 — 장식이 아니라 "지금 살아 있다"이다.
+
+**시크릿 화면의 규칙은 "값은 쓰기 전용"이 아니라 "쓰기 전용으로 *보여야* 한다"이다.**
+API에는 값을 돌려주는 엔드포인트가 없고 앞으로도 없다. 그래서 화면이 다르게 암시하면 안 된다 —
+값 자리에 `••••••`를 두지 않는다(그건 "여기 있는데 가렸을 뿐"으로 읽힌다), "보기" 버튼도, 뭔가 들어 있는
+척하는 placeholder도 없다. 보여주는 것은 **이름, 언제 바뀌었는지, 그리고 비어 있는 입력칸** 뿐이고,
+그 칸은 옛 값이 사는 곳이 아니라 **새 값을 넣는 곳**이다. 클라이언트에 `getSecret` 같은 함수를 아예 두지
+않았다 — 그런 이름의 함수가 있으면 값을 보여줄 수 있다고 믿는 UI를 부른다.
+저장한 뒤에는 입력칸을 **즉시 비운다**: 남겨두면 DOM에도, 브라우저 자동완성에도, 그 뒤에 찍은 스크린샷에도
+시크릿이 남는다.
+
+**이름 규칙을 여기서도 검사한다.** 엔진은 형식이 틀린 이름에 **404**로 답한다 — 경로 세그먼트가 자원의
+정체이고, 존재할 수 없는 이름은 존재하지 않는 이름과 구별되지 않으니 API로서는 옳다. 그런데 이름을 치고
+있는 사람에게 "찾을 수 없습니다"는 **소문자가 문제라는 말을 하지 않는다.** 같은 정규식을 여기서 돌리되
+판정이 아니라 이유를 말하고, 고칠 수 있으면 고친 이름을 제안한다.
+
+**Task 9의 결함이 그대로 재발했다.** 도움말을 `<label>` 안에 넣어서 컨트롤의 접근성 이름이 오염됐고,
+`getByLabelText("값")`이 필드를 못 찾았다. Task 9 주석에 적어둔 바로 그 실수를 다시 했다 —
+같은 방식으로(도움말을 밖으로 빼고 `aria-describedby`) 고쳤고, 이번에는 주석에 **왜 두 번째인지** 적었다.
+
+**이름 바꾸기는 초안을 함께 보낸다.** `PUT /workflows/{id}`는 행을 통째로 바꾼다. 이름만 보내면
+**초안이 날아간다.** 그래서 먼저 읽고, 읽은 초안과 revision을 그대로 실어 보낸다. 테스트가 본문에
+`draftDsl`이 들어 있는지를 단언한다.
+
+**목록은 카드가 아니라 표다.** 같은 세 가지 사실을 가진 것들의 목록은 표다 — 이름·버전·시각이 매번 같은
+자리에 있어야 한 열을 따라 훑을 수 있고, 그게 목록이 있는 이유다. (계획의 시각 디자인 절이 스킬의
+"카드 금지"를 뒤집은 것과 같은 판단이다: 도구 UI에서는 밀도와 가독성이 먼저다.)
+
+**Mutation 16/16 잡힘**
+
+| 변형 | 결과 |
+|---|---|
+| 이름에 소문자 허용 / 길이 상한 없음 | killed |
+| 시작 규칙·소문자 규칙을 설명 안 함 | killed |
+| 값 하한·상한 미적용 | killed |
+| 여전히 틀린 이름을 제안 | killed |
+| 못 읽는 시각이 Invalid Date로 / 시간 단위 미사용 | killed |
+| 형식이 깨진 행을 그대로 렌더 | killed |
+| 실행 중 거절을 실패로 / 204를 성공 아님으로 | killed |
+| 이름 바꾸기가 초안을 안 보냄 | killed |
+| 시크릿 이름 미이스케이프 | killed |
+| **상대 시각의 음수 클램프 제거** | survived → **죽은 코드여서 삭제** |
+
+마지막이 또 죽은 코드였다. `seconds < 60` 분기가 **모든 음수를 이미 처리하므로** `Math.max(0, …)`은
+도달하지 못한다. 같은 모양이 Task 12의 `savedAtText`에도 있어서 **둘 다 지웠다** — 하나만 지우면
+같은 보장을 두 방식으로 표현한 상태가 남는다.
+
+**실제 엔진으로 확인.** 목록에서 워크플로 3개, 이름 바꾸기·삭제 동작, 새 워크플로 → 편집기로 이동.
+시크릿 화면에서 `api key`를 치면 "소문자를 쓸 수 없습니다"와 `API_KEY로 고치기`가 뜨고, 저장하면
+"다시 볼 수 없습니다"가 뜨며 **DOM 어디에도 값이 남지 않는다**(확인함).
+
+**남은 공백.**
+- **목록에 검색·정렬이 없다.** 워크플로가 수십 개가 되면 필요하다. 지금은 엔진이 최신순으로 준다.
+- **시크릿을 쓰는 워크플로를 역으로 찾을 수 없다.** 삭제 경고가 "실행에 실패합니다"라고만 말하고
+  어느 워크플로인지는 못 말한다. 엔진에 그 질의가 없다.
+
+**검증**: `pnpm test` 749 passed (57 files), `e2e` 10 passed, `typecheck`·`lint` clean,
+`build` 성공(`/`, `/secrets`, `/workflows/[id]`), `test:bundle` 통과.
