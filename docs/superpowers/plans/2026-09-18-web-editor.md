@@ -451,19 +451,19 @@ The hardest UI in this plan. 3 설계 §6.
 
 ## Task 11: The schema editor
 
-- [ ] Form mode: a table of fields (이름, 타입, 필수, 설명). Types offered: 문자열, 숫자, 정수, 참/거짓, 목록, 객체 — the engine's accepted `type` values, no more.
-- [ ] Nested object/array: one level at a time, with a breadcrumb.
-- [ ] JSON mode toggle with a plain textarea, for someone who knows what they are doing.
-- [ ] Switching form → JSON always works. JSON → form works only if the JSON is inside the supported subset; otherwise the toggle is disabled with a Korean explanation, and the JSON stays authoritative. **Never silently drop a keyword the form cannot represent.**
-- [ ] Validation comes from `/validate` only (3 설계 §7). Do not reimplement `schema_problems`.
+- [x] Form mode: a table of fields (이름, 타입, 필수, 설명). Types offered: 문자열, 숫자, 정수, 참/거짓, 목록, 객체 — the engine's accepted `type` values, no more.
+- [x] Nested object/array: one level at a time, with a breadcrumb.
+- [x] JSON mode toggle with a plain textarea, for someone who knows what they are doing.
+- [x] Switching form → JSON always works. JSON → form works only if the JSON is inside the supported subset; otherwise the toggle is disabled with a Korean explanation, and the JSON stays authoritative. **Never silently drop a keyword the form cannot represent.**
+- [x] Validation comes from `/validate` only (3 설계 §7). Do not reimplement `schema_problems`.
 
 **Tests**
-- [ ] Adding two fields and marking one required produces `{type: "object", properties: {...}, required: ["a"]}`.
-- [ ] Loading a schema with `anyOf` disables the form toggle and keeps the JSON intact through a round trip.
-- [ ] Removing the last field produces `{type: "object", properties: {}}`, not `{}`.
+- [x] Adding two fields and marking one required produces `{type: "object", properties: {...}, required: ["a"]}`.
+- [x] Loading a schema with `anyOf` disables the form toggle and keeps the JSON intact through a round trip.
+- [x] Removing the last field produces `{type: "object", properties: {}}`, not `{}`.
 
 **Verification**
-- [ ] Commit: `feat(web): a form editor for the engine's JSON Schema subset`
+- [x] Commit: `feat(web): a form editor for the engine's JSON Schema subset`
 
 ---
 
@@ -1440,3 +1440,90 @@ NO-OP으로 빠졌다. 구분자를 바꿔 따로 돌렸다. **"NO-OP"을 출력
 
 **검증**: `pnpm test` 293 passed (22 files), `e2e` 5 passed (chromium), `typecheck`·`lint` clean,
 `build` 성공, `test:bundle` 통과, 실제 엔진에 붙은 브라우저에서 자동완성 → 칩 → 규칙 펼치기까지 확인.
+
+---
+
+### Task 11 — 스키마 에디터
+
+`lib/schema/model.ts`(스키마 ↔ 폼 모델 양방향), `lib/schema/edit.ts`(경로 기반 편집 연산),
+`components/panel/SchemaEditor.tsx`, 그리고 `JsonSchemaField`가 textarea 대신 이것을 렌더한다.
+
+**모델은 파생값이 아니라 상태다. 이게 이 태스크에서 제일 중요한 결정이다.** 처음에는 `value` prop에서
+`useMemo(() => toModel(value))`로 뽑았다. 테스트 하나가 실패해서 알았다 — **폼 모델은 JSON Schema가
+담을 수 없는 것을 담는다.** 이름이 같은 필드 둘, 아직 비어 있는 이름, 타이핑 도중의 이름. 매 키 입력마다
+`toSchema`로 왕복하면 그것들이 파괴된다. JSON 객체는 같은 키 둘 중 **마지막 하나만** 남기므로,
+`b`를 `a`로 고쳐 치는 순간 필드가 **조용히 사라지고**, 계속 쳐서 `ab`가 되어도 돌아오지 않는다.
+
+그래서 모델을 `useState`에 두고, 함께 저장한 `mirror`(그 모델이 만들어낸 스키마)와 들어온 `value`를
+비교한다. 부모가 우리 출력을 되돌려준 것은 외부 변경이 아니고, 되돌리기나 다른 노드 선택은 외부 변경이다.
+이 구분을 못 하면 둘 중 하나는 반드시 깨진다.
+
+**내가 쓴 왕복 테스트가 내 구현의 무단 삭제를 잡았다.** 루트의 `description`을 읽기는 하는데 쓰지는
+않고 있었다 — 이 모듈이 막으려는 바로 그것이다. 필드의 설명은 자기 행에 살지만 루트의 설명은 행이 없다.
+**거부하지 않고 표현했다**: 표 위에 설명 칸을 하나 뒀다.
+
+**표현할 수 없으면 고쳐 쓰지 않고 거부한다.** 엔진이 받는 부분집합(`engine/jsondata.py::schema_problems`)은
+폼이 그릴 수 있는 것보다 넓다. `anyOf`·`oneOf`, `enum`, `const`, 수치·길이 범위, `additionalProperties`,
+`title`, 타입 배열, `items: true`, `items` 없는 배열, 없는 프로퍼티를 가리키는 `required` — 전부 합법이고
+전부 폼에 칸이 없다. 이런 스키마는 **폼 토글이 비활성화되고, 이유를 적고, JSON이 권위를 갖는다.**
+모르는 키워드를 조용히 떨어뜨리는 폼 편집기는 폼 편집기가 없는 것보다 나쁘다 — 손실이 실행 전까지
+보이지 않기 때문이다.
+
+예외는 **하나**뿐이고 그것도 의미가 같다: `required: []`는 없는 것과 정확히 같은 값을 받아들이므로
+생략한다. 테스트가 그 하나를 명시적으로 못 박고, 위 목록 전부는 `toModel(...) === null`을 단언한다.
+
+**`null` 타입은 일부러 안 넣었다.** 엔진의 `_TYPES`에는 있지만, "null만 될 수 있는 필드"는 사람이
+선언하려는 것이 아니다. 계획이 적은 여섯 가지가 형식 칸의 전부이고, `null`을 쓴 스키마는 JSON 모드로 간다.
+
+**패널 안에 `+ 항목 추가` 버튼이 둘이었다.** 하나는 자유 형식 맵에 키를 더하는 것(Task 9), 하나는
+데이터 형식에 필드를 더하는 것. 같은 글자, 다른 뜻, 같은 화면. 테스트가 둘 중 어느 것인지 가릴 수 없었고
+**사람도 가릴 수 없다.** 스키마 쪽을 `+ 필드 추가`로 바꿨다.
+
+**`<label htmlFor>`이 `<div>`를 가리키고 있었다.** 스키마 에디터는 입력 하나가 아니라 입력들의 묶음이다.
+`<fieldset>`과 `<legend>`로 바꾸고, 테스트도 `getByRole("group", { name: ... })`로 바꿨다.
+
+**Mutation 변형 하나가 실행 전체를 멈춰 세웠다.** `freeName`의 이름 탐색이 `for (let n = 1; ; n += 1)`
+이었는데, 변형이 후보를 고정값으로 바꾸자 **끝나지 않는 동기 루프**가 됐다. vitest의 테스트 타임아웃은
+이것을 끊지 못한다 — 이벤트 루프를 양보하지 않으니 타이머가 돌 기회가 없다. 20분을 기다리다 알았다.
+두 가지를 고쳤다.
+
+1. **제품 코드의 탐색에 경계를 줬다.** 필드가 `n`개면 `field1..field(n+1)` 중 하나는 반드시 비어 있다
+   (비둘기집). 그 경계까지만 돈다. 사용자 지시가 "모든 대기에 경계를 둔다"이고, **끝을 증명할 수 없는
+   루프는 대기와 같다.**
+2. **하네스의 변형마다 `timeout 120`을 걸었다.** 변형은 코드를 망가뜨리려고 만드는 것이므로,
+   망가진 코드가 멈추지 않는 경우를 하네스가 감당해야 한다.
+
+**Mutation이 죽은 코드도 찾아냈다.** `updateFields`의 "해석되지 않는 경로는 무시" 가드를 지워도 아무
+테스트가 깨지지 않았다. 살펴보니 두 분기가 모두 도달 불가능이다 — 빈 경로는 `updateAt`이 따로 처리하고,
+범위 밖 인덱스는 `fields.map`이 이미 아무 행과도 맞지 않는다. **테스트를 더하지 않고 가드를 지웠다.**
+
+**Mutation 20/20 잡힘** (셋은 테스트 추가 후, 하나는 코드 삭제로)
+
+| 변형 | 결과 |
+|---|---|
+| 빈 `required` 배열을 기록 | killed |
+| 루트가 `type`을 잃음 | killed |
+| 빈 스키마가 폼을 못 염 | killed |
+| 루트 타입을 아무거나 허용 | killed |
+| 객체·스칼라 키워드를 조용히 버림 (각각) | killed |
+| **배열 키워드를 조용히 버림** | 처음엔 survived → 테스트 추가 후 killed |
+| 없는 프로퍼티를 가리키는 `required` 허용 | killed |
+| **객체가 아닌 `items` 허용** | 처음엔 survived → 테스트 추가 후 killed |
+| 필드·루트 설명 누락 (각각) | killed |
+| 목록이 경로에 투명하지 않음 | killed |
+| 객체↔목록 전환이 하위 필드를 버림 | killed |
+| 잃을 것이 없는데 경고 / 빈 객체에 경고 | killed |
+| **낡은 경로가 무시되지 않음** | survived → **죽은 코드여서 삭제** |
+| 목록이 아닌 필드에 항목 타입 설정 | killed |
+| 새 필드 이름이 충돌 | killed |
+| 중복 이름 미검출 | killed |
+| **`trail`이 잎을 지나쳐 계속 걸음** | 처음엔 survived → 테스트 추가 후 killed |
+
+**남은 공백.**
+- `enum`·범위 같은 **표현 가능한데 폼에 없는** 것들이 있다. 지금은 JSON으로 보낸다. 넣는다면 형식 칸이
+  아니라 행마다 "제약" 서랍을 다는 쪽이 맞아 보이는데, 계획에 없으므로 넓히지 않았다.
+- `/validate` 메시지를 `field`가 가리키는 행에 붙이는 것은 **Task 13**이다. 여기서는 엔진이 볼 수 없는
+  것 하나(중복 이름)만 폼이 직접 말한다.
+
+**검증**: `pnpm test` 348 passed (25 files), `typecheck`·`lint` clean, 실제 엔진에 붙은 브라우저에서
+폼으로 스키마 작성 → 중첩 진입 → JSON 전환까지 확인.

@@ -277,7 +277,9 @@ describe("the shape of the generated form", () => {
     show(node("llm_1", "llm"), LLM_TYPE)
     await screen.findByTestId("template-editor")
 
-    expect(screen.queryByRole("button", { name: /항목 추가/ })).toBeNull()
+    // Exactly this label: the schema editor's own add button says 필드 추가, because "add a key to this
+    // map" and "add a field to this data format" are different things and were sharing one word.
+    expect(screen.queryByRole("button", { name: "+ 항목 추가" })).toBeNull()
   })
 
   it("still offers one on the map that is genuinely open", () => {
@@ -293,8 +295,9 @@ describe("the shape of the generated form", () => {
     show(node("llm_1", "llm"), LLM_TYPE)
     await screen.findByTestId("template-editor")
 
-    const schemaField = screen.getByLabelText("출력 형식")
-    expect(schemaField.tagName).toBe("TEXTAREA")
+    // A group of controls, named by its legend -- the schema editor is a form, not one input.
+    const schemaField = screen.getByRole("group", { name: "출력 형식" })
+    expect(schemaField).toBeInTheDocument()
     // And *only* that: `ui:field` replaces how the value is edited but leaves RJSF's branch selector
     // rendered beside it, which is why the schema is collapsed before the form ever sees it.
     expect(screen.queryByRole("combobox")).toBeNull()

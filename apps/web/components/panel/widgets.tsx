@@ -3,8 +3,10 @@
 import type { FieldProps, RegistryFieldsType, RegistryWidgetsType, WidgetProps } from "@rjsf/utils"
 
 import type { TemplateContext } from "@/lib/template/context"
+import type { JsonSchema } from "@/lib/template/schema"
 
-import { CONTROL as FIELD, TEMPLATE_WIDGETS } from "./templates"
+import { TEMPLATE_WIDGETS } from "./templates"
+import { SchemaEditor } from "./SchemaEditor"
 import { TemplateEditor } from "./TemplateEditor"
 
 /** Custom RJSF widgets for the two field kinds its defaults cannot render.
@@ -34,51 +36,30 @@ export function TemplateWidget({ id, value, disabled, readonly, onChange, onBlur
 
 const EMPTY_CONTEXT: TemplateContext = { nodes: [], guaranteed: null }
 
-/** The schema field.
+/** The schema field for `start.inputs` and `llm.outputSchema`.
  *
  * A **field**, not a widget. The engine declares these as `anyOf: [{type: object}, {type: null}]` --
  * optional -- and RJSF renders any `anyOf` with its own option selector before it ever looks at
  * `ui:widget`. Registered as a widget, this never appeared: the panel showed a bare number input
- * holding the selected branch index instead.
+ * holding the selected branch index instead. (`collapseOptionalSchemas` removes the selector too; the
+ * field is what puts the editor there.)
  */
 export function JsonSchemaField({ schema, fieldPathId, formData, disabled, readonly, onChange, uiSchema }: FieldProps) {
   const id = fieldPathId.$id
-  const text = formData === undefined || formData === null ? "" : JSON.stringify(formData, null, 2)
   const title = uiSchema?.["ui:title"] ?? schema.title ?? ""
 
   return (
-    <div className="mb-4">
-      {title === "" ? null : (
-        <label htmlFor={id} className="instrument-label mb-1 block">
-          {title}
-        </label>
-      )}
-      <textarea
+    <fieldset className="mb-4">
+      {title === "" ? null : <legend className="instrument-label mb-1">{title}</legend>}
+      <SchemaEditor
         id={id}
-        rows={6}
-        aria-describedby={`${id}-help`}
-        className={`${FIELD} font-mono text-xs`}
-        style={{ borderRadius: "var(--radius)" }}
-        defaultValue={text}
+        value={formData === null ? undefined : (formData as JsonSchema | undefined)}
         disabled={disabled === true || readonly === true}
-        onBlur={(event) => {
-          // Parsed on blur, not on every keystroke: half-typed JSON is invalid JSON, and reporting that
-          // on each character would make the field unusable.
-          try {
-            // A field's `onChange` carries the path, unlike a widget's: it writes into the form data
-            // itself rather than into one already-located slot.
-            const next = event.target.value.trim() === "" ? undefined : JSON.parse(event.target.value)
-            onChange(next, fieldPathId.path)
-          } catch {
-            // Left as typed. The engine's `/validate` is the authority on whether a schema is usable,
-            // and Task 11 replaces this textarea with a form that cannot produce invalid JSON at all.
-          }
-        }}
+        // A field's `onChange` carries the path, unlike a widget's: it writes into the form data itself
+        // rather than into one already-located slot.
+        onChange={(next) => onChange(next, fieldPathId.path)}
       />
-      <p id={`${id}-help`} className="mt-1 text-xs text-fg-faint">
-        JSON 형식으로 입력합니다. 저장할 때 형식을 확인합니다.
-      </p>
-    </div>
+    </fieldset>
   )
 }
 
