@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import type { EditorDsl } from "./document"
-import { MAX_IMPORT_BYTES, exportFileName, importedName, parseImport, serialize } from "./transfer"
+import { MAX_IMPORT_BYTES, exportFileName, importedName, parseImport, readWorkflowFile, serialize } from "./transfer"
 
 const DSL: EditorDsl = {
   version: "1",
@@ -145,5 +145,37 @@ describe("importedName", () => {
   it("falls back for a nameless file", () => {
     expect(importedName(".json")).toBe("가져온 워크플로")
     expect(importedName("")).toBe("가져온 워크플로")
+  })
+})
+
+describe("readWorkflowFile", () => {
+  function file(name: string, body: string, size?: number) {
+    const made = new File([body], name, { type: "application/json" })
+    if (size !== undefined) Object.defineProperty(made, "size", { value: size })
+    return made
+  }
+
+  it("reads a workflow file", async () => {
+    const result = await readWorkflowFile(file("a.json", serialize(DSL)))
+
+    expect(result.ok && result.dsl).toEqual(DSL)
+  })
+
+  it("refuses an oversized file without reading it", async () => {
+    // The whole reason `File.size` is checked separately: a huge file must never become a huge string.
+    const read = vi.spyOn(File.prototype, "text")
+
+    const result = await readWorkflowFile(file("huge.json", "{}", MAX_IMPORT_BYTES + 1))
+
+    expect(result.ok).toBe(false)
+    expect(read).not.toHaveBeenCalled()
+    read.mockRestore()
+  })
+
+  it("passes a bad document's reason through", async () => {
+    expect(await readWorkflowFile(file("a.json", "{ nope }"))).toEqual({
+      ok: false,
+      reason: "JSON 형식이 아닙니다.",
+    })
   })
 })

@@ -10,7 +10,6 @@ import {
   type EdgeChange,
   type NodeChange as RfNodeChange,
 } from "@xyflow/react"
-import { useRouter } from "next/navigation"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useStore } from "zustand"
 
@@ -18,6 +17,7 @@ import "@xyflow/react/dist/style.css"
 
 import { downloadText } from "@/lib/browser/download"
 import { emptyDsl, type EditorDsl } from "@/lib/dsl/document"
+import { describeInsert } from "@/lib/dsl/insert"
 import { exportFileName, serialize } from "@/lib/dsl/transfer"
 import { sizeChanges, toFlowEdges, toFlowNodes, type NodeChange, type Size } from "@/lib/dsl/flow"
 import { anyNodeVisible } from "@/lib/dsl/viewport"
@@ -25,7 +25,7 @@ import type { NodeType } from "@/lib/palette"
 import { saveDraft } from "@/lib/engine/save"
 import { cancelRun, resumeRun, type Decision } from "@/lib/engine/resume"
 import { startRun } from "@/lib/engine/run"
-import { importWorkflowFile } from "@/lib/engine/import"
+import { readWorkflowFile } from "@/lib/engine/import"
 import { validateDraft } from "@/lib/engine/validate"
 import { inputSchema, needsInputs } from "@/lib/run/inputs"
 import { createGraphStore, type GraphState } from "@/store/graph"
@@ -85,9 +85,9 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
   const runStore = useRunStore(workflowId)
   const run = useStore(runStore)
   const [askingInputs, setAskingInputs] = useState(false)
-  const router = useRouter()
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
+  const [importNote, setImportNote] = useState<string | null>(null)
   useAutosave(state.dsl, save.changed)
   useValidate(state.dsl, workflowId, validation.validate)
   // The run this tab is watching: the one started here, or the one the URL named on load. A `?run=`
@@ -219,22 +219,32 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
     downloadText(exportFileName(workflowName ?? "workflow"), serialize(state.dsl))
   }, [state.dsl, workflowName])
 
-  /** Importing from the editor makes a **new** workflow and opens it; this one is left alone.
+  /** Place a file's nodes into **this** workflow, as one undoable step.
    *
-   * The button is here because someone looking at 내보내기 expects its pair beside it, not because the
-   * meaning changes: replacing the open document with a picked file would be destructive, and autosave
-   * would commit it within the second, before 되돌리기 could be reached.
+   * Not a replacement of the document and not a new workflow: the file's nodes are added, the way
+   * dropping one from the palette adds one. `되돌리기` takes the whole file back out in one press,
+   * which is what makes this safe to try.
+   *
+   * The file's 시작/끝 nodes never come -- the engine fixes their ids, so a document holds exactly one
+   * of each -- and a node whose id is already here is renamed with every reference to it rewritten.
+   * Both are reported, because a rename silently changing `{{ llm_1.text }}` under someone is the
+   * kind of thing they need told.
    */
   const onImport = useCallback(
     async (file: File) => {
       setImportError(null)
+      setImportNote(null)
       setImporting(true)
-      const result = await importWorkflowFile(file)
+      const read = await readWorkflowFile(file)
       setImporting(false)
-      if (result.outcome === "ok") router.push(`/workflows/${result.id}`)
-      else setImportError(result.message)
+      if (!read.ok) {
+        setImportError(read.reason)
+        return
+      }
+      const result = state.insertDocument(read.dsl)
+      setImportNote(describeInsert(result))
     },
-    [router],
+    [state],
   )
 
   const onAutoLayout = useCallback(async () => {
@@ -311,6 +321,7 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
           onImport={(file) => void onImport(file)}
           importing={importing}
           importError={importError}
+          importNote={importNote}
         />
       </div>
       {selected !== undefined ? (
@@ -424,6 +435,7 @@ function Toolbar({
   onImport,
   importing,
   importError,
+  importNote,
 }: {
   state: GraphState
   save: SaveState
@@ -437,6 +449,7 @@ function Toolbar({
   onImport: (file: File) => void
   importing: boolean
   importError: string | null
+  importNote: string | null
 }) {
   return (
     <div className="pointer-events-none absolute left-4 top-4 flex flex-col items-start gap-2">
@@ -470,7 +483,7 @@ function Toolbar({
         </button>
         <ImportButton
           busy={importing}
-          title="JSON 파일에서 새 워크플로를 만듭니다. 이 워크플로는 그대로 둡니다"
+          title="JSON 파일의 노드를 이 워크플로에 놓습니다. 되돌리기로 한 번에 취소할 수 있습니다"
           className="px-2 py-1 text-xs disabled:opacity-35"
           style={{ borderRadius: "var(--radius)" }}
           onPick={onImport}
@@ -514,6 +527,18 @@ function Toolbar({
           role="alert"
         >
           {importError}
+        </p>
+      )}
+      {/* What an import actually did: how many nodes, which were left behind, which were renamed. A
+          rename rewrites references, so it changes documents someone already wrote -- not something to
+          do quietly. */}
+      {importNote === null ? null : (
+        <p
+          className="pointer-events-auto border border-ink-600 bg-ink-800 px-2 py-1 text-xs text-fg-muted"
+          style={{ borderRadius: "var(--radius)" }}
+          role="status"
+        >
+          {importNote}
         </p>
       )}
     </div>

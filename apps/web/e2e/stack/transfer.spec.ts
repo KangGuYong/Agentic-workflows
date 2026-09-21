@@ -25,7 +25,9 @@ test.afterEach(async ({ request }) => {
 
 test("an example file imports, opens, and exports back to the same document", async ({ page }) => {
   await page.goto("/")
-  await expect(page.getByRole("button", { name: "새 워크플로" })).toBeVisible({ timeout: 20_000 })
+  // The import control, not the 새 워크플로 button: a workflow *named* "새 워크플로" is a perfectly
+  // ordinary row, and then that locator matches two things and the spec fails for nothing.
+  await expect(page.locator("input[aria-label='워크플로 파일']")).toBeAttached({ timeout: 20_000 })
 
   // 1. Import creates a workflow and opens it. The file picker is hidden behind the 가져오기 button;
   //    `setInputFiles` drives the input directly, which is what a real pick ends up doing.
@@ -57,7 +59,9 @@ test("an example file imports, opens, and exports back to the same document", as
 
 test("a file that is not a workflow is refused, and nothing is created", async ({ page }) => {
   await page.goto("/")
-  await expect(page.getByRole("button", { name: "새 워크플로" })).toBeVisible({ timeout: 20_000 })
+  // The import control, not the 새 워크플로 button: a workflow *named* "새 워크플로" is a perfectly
+  // ordinary row, and then that locator matches two things and the spec fails for nothing.
+  await expect(page.locator("input[aria-label='워크플로 파일']")).toBeAttached({ timeout: 20_000 })
   const before = await page.locator("tbody tr").count()
 
   await page.setInputFiles("input[aria-label='워크플로 파일']", {
@@ -75,11 +79,11 @@ test("a file that is not a workflow is refused, and nothing is created", async (
   await expect(page.locator("tbody tr")).toHaveCount(before)
 })
 
-test("importing from the editor opens a new workflow and leaves the open one alone", async ({ page, request }) => {
-  // The whole point of the editor's 가져오기: it is the pair of 내보내기 in the toolbar, but it still
-  // *creates*. Replacing the document on screen would be destructive, and autosave commits within the
-  // second -- before 되돌리기 could be reached.
-  const mine = await createWorkflow(request, `e2e-open-${Date.now()}`, {
+test("importing in the editor places the file's nodes into the open workflow", async ({ page, request }) => {
+  // The editor's 가져오기 is not the list's: it adds to the document on screen. The file's 시작/끝 are
+  // left behind (the engine fixes their ids, so a document holds one of each), and 되돌리기 takes the
+  // whole file back out in one press.
+  const mine = await createWorkflow(request, `e2e-insert-${Date.now()}`, {
     version: "1",
     nodes: [startNode({ name: { type: "string" } }), endNode({ greeting: "{{ start.name }}" })],
     edges: [{ id: "edge_1", source: "start", target: "end" }],
@@ -91,15 +95,39 @@ test("importing from the editor opens a new workflow and leaves the open one alo
 
   await page.setInputFiles("input[aria-label='워크플로 파일']", EXAMPLE)
 
-  // A *different* workflow, opened in place of this one -- not this one rewritten.
-  await page.waitForURL((url) => /\/workflows\/[0-9a-f-]+$/.test(url.pathname) && !url.pathname.endsWith(openId ?? ""), {
-    timeout: 20_000,
-  })
-  importedId = page.url().split("/").pop() ?? null
-  expect(importedId).not.toBe(openId)
+  // Same workflow, more nodes: the example's three middle nodes, not its 시작/끝.
+  await expect(page).toHaveURL(new RegExp(`/workflows/${openId}$`))
   await expect(page.locator(".react-flow__node")).toHaveCount(5, { timeout: 20_000 })
+  await expect(page.locator(".react-flow__node", { hasText: "모으기" })).toHaveCount(1)
+  await expect(page.locator(".react-flow__node", { hasText: "시작" })).toHaveCount(1)
+  await expect(page.locator(".react-flow__node", { hasText: "끝" })).toHaveCount(1)
 
-  // The workflow that was open still has its own two nodes.
+  // And it says what it did, including what it left behind.
+  await expect(page.getByRole("status").filter({ hasText: "놓았습니다" })).toContainText("제외했습니다", {
+    timeout: 10_000,
+  })
+
+  // One 되돌리기 takes the whole file back out.
+  await page.getByRole("button", { name: "되돌리기" }).click()
+  await expect(page.locator(".react-flow__node")).toHaveCount(2, { timeout: 10_000 })
+})
+
+test("importing twice renames the second copy instead of colliding", async ({ page, request }) => {
+  const mine = await createWorkflow(request, `e2e-twice-${Date.now()}`, {
+    version: "1",
+    nodes: [startNode({ name: { type: "string" } }), endNode({ greeting: "{{ start.name }}" })],
+    edges: [{ id: "edge_1", source: "start", target: "end" }],
+  })
+  openId = mine.id
+
   await page.goto(editorPath(openId))
   await expect(page.locator(".react-flow__node")).toHaveCount(2, { timeout: 20_000 })
+
+  await page.setInputFiles("input[aria-label='워크플로 파일']", EXAMPLE)
+  await expect(page.locator(".react-flow__node")).toHaveCount(5, { timeout: 20_000 })
+  await page.setInputFiles("input[aria-label='워크플로 파일']", EXAMPLE)
+  await expect(page.locator(".react-flow__node")).toHaveCount(8, { timeout: 20_000 })
+
+  // Ids are what every reference names, so a collision would be a silently broken document.
+  await expect(page.getByRole("status").filter({ hasText: "이름을 바꿨습니다" })).toBeVisible({ timeout: 10_000 })
 })

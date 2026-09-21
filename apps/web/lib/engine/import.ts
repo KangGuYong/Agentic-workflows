@@ -1,13 +1,13 @@
-import { MAX_IMPORT_BYTES, importedName, parseImport } from "@/lib/dsl/transfer"
+import { importedName, readWorkflowFile } from "@/lib/dsl/transfer"
 
 import { createWorkflow, putWorkflow } from "./workflows"
 
 /** Turning a picked file into a workflow (Task 23).
  *
- * Shared by the list and the editor so there is one answer to "what does importing do", not two that
- * drift. Both screens offer it and both mean the same thing: **a new workflow**, never a replacement
- * of whatever is open. A file picker is one mis-click from the wrong file, and overwriting a draft
- * with it would be destructive with no undo; creating means the worst case is one workflow to delete.
+ * This is the **list**'s import: a file becomes a workflow of its own. The editor's import is a
+ * different thing -- it places the file's nodes into the document already open (`lib/dsl/insert.ts`)
+ * -- and both start from the same `readWorkflowFile`, so a file either screen accepts is a file the
+ * other accepts too.
  */
 
 export type ImportOutcome =
@@ -18,15 +18,7 @@ export type ImportOutcome =
   | { outcome: "partial"; id: string; name: string; message: string }
 
 export async function importWorkflowFile(file: File): Promise<ImportOutcome> {
-  // The `File`'s own size first, so a 200MB file never becomes a 200MB string. `parseImport` checks
-  // the text's byte length too; this one is about never reading it.
-  if (file.size > MAX_IMPORT_BYTES) {
-    return { outcome: "rejected", message: `파일이 너무 큽니다 (최대 ${Math.floor(MAX_IMPORT_BYTES / 1024)}KB).` }
-  }
-
-  const text = await file.text().catch(() => null)
-  if (text === null) return { outcome: "rejected", message: "파일을 읽지 못했습니다." }
-  const read = parseImport(text)
+  const read = await readWorkflowFile(file)
   if (!read.ok) return { outcome: "rejected", message: read.reason }
 
   const name = importedName(file.name)
@@ -47,3 +39,5 @@ export async function importWorkflowFile(file: File): Promise<ImportOutcome> {
   }
   return { outcome: "ok", id: created.value.id, name }
 }
+
+export { readWorkflowFile }

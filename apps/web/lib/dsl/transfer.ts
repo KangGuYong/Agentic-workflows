@@ -95,3 +95,17 @@ export function importedName(fileName: string): string {
   const base = fileName.replace(/\.[^.]*$/, "").replace(/\s+/g, " ").trim().slice(0, 80).trim()
   return base === "" ? "가져온 워크플로" : base
 }
+
+/** Read a picked file as a workflow document.
+ *
+ * The `File`'s own size is checked **before** its text is read, so a 200MB file never becomes a 200MB
+ * string; `parseImport` then checks the text's byte length, because that is what the engine limits.
+ */
+export async function readWorkflowFile(file: File): Promise<ImportResult> {
+  if (file.size > MAX_IMPORT_BYTES) {
+    return { ok: false, reason: `파일이 너무 큽니다 (최대 ${Math.floor(MAX_IMPORT_BYTES / 1024)}KB).` }
+  }
+  const text = await file.text().catch(() => null)
+  if (text === null) return { ok: false, reason: "파일을 읽지 못했습니다." }
+  return parseImport(text)
+}
