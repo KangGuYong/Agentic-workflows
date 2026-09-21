@@ -569,14 +569,14 @@ The hardest UI in this plan. 3 설계 §6.
 
 ## Task 18: Restoring a run after a reload
 
-- [ ] On mount with `?run=`, fetch `GET /runs/{id}` and `GET /runs/{id}/nodes` **before** opening the stream (3 설계 §8.3).
-- [ ] Terminal run → render the final state and never open a stream.
-- [ ] Active run → paint node state from `nodes`, then open the stream from the beginning; the engine replays stored events and the editor's per-node state is idempotent under replay.
-- [ ] Test: replaying `node_started` then `node_finished` twice leaves one finished node, not two rows of state.
-- [ ] `?run=` pointing at a deleted or unknown run → 404 → clear the parameter and show 실행을 찾을 수 없습니다.
+- [x] On mount with `?run=`, fetch `GET /runs/{id}` and `GET /runs/{id}/nodes` **before** opening the stream (3 설계 §8.3).
+- [x] Terminal run → render the final state and never open a stream.
+- [x] Active run → paint node state from `nodes`, then open the stream from the beginning; the engine replays stored events and the editor's per-node state is idempotent under replay.
+- [x] Test: replaying `node_started` then `node_finished` twice leaves one finished node, not two rows of state.
+- [x] `?run=` pointing at a deleted or unknown run → 404 → clear the parameter and show 실행을 찾을 수 없습니다.
 
 **Verification**
-- [ ] Commit: `feat(web): restore run state across reloads`
+- [x] Commit: `feat(web): restore run state across reloads`
 
 ---
 
@@ -2018,4 +2018,81 @@ API가 그 자리에서 끝내고(`cancelled`), 워커가 쥐고 있는 실행�
 - **취소는 툴바에만 있다.** 노드 단위 취소는 엔진에 없다.
 
 **검증**: `pnpm test` 656 passed (49 files), `e2e` 10 passed, `typecheck`·`lint` clean,
+`build` 성공, `test:bundle` 통과.
+
+---
+
+### Task 18 — 새로고침 후 실행 복원
+
+`lib/run/restore.ts`(순수 복원), `lib/engine/runDetail.ts`,
+`components/run/useRestoredRun.ts`, `useRunStream`의 시작 상태 인자, 그리고 캔버스의 `?run=` 처리.
+
+**타입 기본값이 이 태스크의 핵심 버그를 만들 뻔했다.** `useRunStream(runId, restored)`에서
+`restored`는 세 가지 뜻이다: `undefined`는 **아직 가져오는 중**, `null`은 **복원할 것이 없음**(이 세션에서
+시작한 실행), 값은 복원된 상태. 처음에는 `restored = null`을 기본값으로 뒀는데, **기본 매개변수는 명시적
+`undefined`에도 발동한다.** 즉 `useRunStream(id, 로딩중)`이 조용히 "복원할 것 없음"이 되어 곧바로 스트림을
+열고, 첫 라이브 프레임이 **실행이 일어난 적 없다고 말하는 빈 상태 위에** 칠해진다 — 이 인자가 막으려던
+바로 그 경쟁이다. 기본값을 없애고 필수로 만들었다. 그러자 **타입체커가 호출부를 잡아줬다.**
+
+**끝난 실행에는 스트림을 아예 열지 않는다.** 열면 저장된 이벤트를 전부 재생해서 **이미 화면에 있는
+상태에 도달하고**, 그 다음 서버가 곧바로 닫는 스트림에 `EventSource`가 영원히 재연결한다.
+
+**살아 있는 실행은 칠한 다음 연결한다.** 엔진이 저장된 이벤트를 재생하므로 노드별 상태가 **재생에 대해
+멱등**이어야 한다. `node_started` → `node_finished`를 두 번 먹여도 노드 하나가 남고 최종 상태가 같다는
+것을 테스트가 못 박는다.
+
+**토큰은 복원하지 않는다.** 전송 id가 없고 저장되지 않는 값이다(설계 7.3). 출력에서 만들어내는 것은
+없는 글자를 지어내는 것이다.
+
+**404와 연결 실패를 구분한다.** `?run=`은 북마크와 공유 링크에서 살아남고, 그 실행은 삭제됐을 수 있다.
+404면 파라미터를 지우고 말한다. 엔진이 닿지 않는 것뿐이면 **지우지 않는다** — 아마 아직 돌고 있는 실행의
+유일한 참조를 버리는 일이다.
+
+**`react-hooks/set-state-in-effect`를 두 번 만났고, 두 번 다 파생값이 답이었다.**
+
+처음에는 "가져오는 중" 플래그를 상태로 뒀다가 lint에 걸려 `queueMicrotask`로 우회했는데, **그게 버그를
+되살렸다**: 마이크로태스크가 돌기 전 한 프레임 동안 `state`가 `null`이라 스트림이 열린다. 린터를 속이려다
+막으려던 경쟁을 다시 만든 것이다. 저장한 답이 **이 실행의 것인지**로 파생시키도록 고쳤다.
+
+두 번째는 404일 때 `setUrlRunId(null)`이었다. 이것도 파생으로 바꿨다 —
+`watching = run.runId ?? (restored.gone ? null : urlRunId)`. 그러면 **없는 것이 확실한 실행을 보고 있는
+렌더가 한 프레임도 없다.** URL에서 파라미터를 지우는 것만 이펙트에 남겼는데, 그건 상태가 아니라 DOM이다.
+
+**Mutation 18/18 잡힘** (하나는 테스트 보강 후, 하나는 등가)
+
+| 변형 | 결과 |
+|---|---|
+| 모르는 상태를 그대로 사용 / 끝난 실행이 안 끝남 | killed |
+| **회차를 무시하고 최신을 고름** | 처음엔 survived → 테스트 보강 후 killed |
+| 첫 시도가 이김 | killed |
+| 출력에서 토큰을 지어냄 | killed |
+| 기본값 완료 사실을 잃음 / 실패 노드가 오류를 잃음 | killed |
+| 끝난 실행이 취소 중이라고 함 | killed |
+| 대상 없는 승인을 복원 | killed |
+| 끝난 실행에 스트림을 염 | killed |
+| 404를 실패와 구분 못 함 / 네트워크 오류를 없는 실행으로 | killed |
+| status 없는 응답 수용 / `cancelRequested` 기본이 참 | killed |
+| 복원 중에 연결 / 끝난 실행에 연결 / 복원 상태를 버림 | killed |
+| 복원된 종료 상태를 라이브로 취급 | **등가** |
+
+첫 생존자가 기록할 값이 있다. 원래 테스트는 "회차가 높은 행"을 **배열의 앞에** 뒀는데, 그러면 회차 비교를
+지워도 결과가 같다 — **이긴 행이 우연히 먼저 있었을 뿐**이다. API가 어떤 순서로 주든 상관없어야 하므로
+**두 순서 모두** 단언하도록 고쳤다. 같은 이유로 "최신 시도" 테스트도 양쪽 순서로 바꿨다.
+
+마지막 등가 변형은 `finished.current` 초기화인데, 끝난 실행은 그 위의 조기 반환에서 이미 걸러져 소스가
+만들어지지 않으므로 그 값이 읽히지 않는다.
+
+**실제 엔진으로 확인.**
+- 끝난 실행 URL로 새로고침 → `실패` 복원, 노드가 `성공`/`실패`로 칠해짐, **SSE 연결 0회**.
+- 승인 대기 중에 새로고침 → `승인 대기` 복원, **승인 대화상자가 다시 열림**, 노드 `성공`/`승인 대기`,
+  **SSE 연결 1회**. 복원된 payload의 대상으로 승인을 보내 `성공`까지 확인.
+- 없는 실행 id → "실행을 찾을 수 없습니다" 표시, URL에서 `?run=` 제거됨.
+
+**남은 공백.**
+- **탭 두 개가 같은 실행을 보면 각자 스트림을 연다.** 엔진은 그래도 되지만 연결이 둘이다.
+  `BroadcastChannel`로 묶는 것이 맞아 보이는데 계획에 없다.
+- 실행의 `outputs`를 어디에도 보여주지 않는다. `GET /runs/{id}`가 주는데 끝 노드 기록에서 볼 수 있어서
+  중복이라 넘겼다.
+
+**검증**: `pnpm test` 689 passed (51 files), `e2e` 10 passed, `typecheck`·`lint` clean,
 `build` 성공, `test:bundle` 통과.

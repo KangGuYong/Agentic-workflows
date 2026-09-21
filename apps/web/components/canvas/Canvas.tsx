@@ -37,6 +37,7 @@ import { RunDialog } from "@/components/run/RunDialog"
 import { ApprovalDialog } from "@/components/run/ApprovalDialog"
 import { TracePanel } from "@/components/run/TracePanel"
 import { useNodeRuns } from "@/components/run/useNodeRuns"
+import { useRestoredRun } from "@/components/run/useRestoredRun"
 import { useRunStream } from "@/components/run/useRunStream"
 import { RunStatusBar } from "@/components/run/RunStatusBar"
 import { Banner } from "@/components/validation/Banner"
@@ -53,6 +54,8 @@ export interface CanvasProps {
   workflowId?: string
   initialDsl?: EditorDsl
   initialRevision?: number
+  /** `?run=` from the URL, which a reload has to restore before any stream opens (3 설계 §8.3). */
+  initialRunId?: string
 }
 
 export function Canvas(props: CanvasProps) {
@@ -63,7 +66,7 @@ export function Canvas(props: CanvasProps) {
   )
 }
 
-function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasProps) {
+function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRunId }: CanvasProps) {
   // One store per editor screen, created once. React Flow renders a view of its document; it never
   // holds the document itself (3 설계 §5.1).
   const [store] = useState(() => createGraphStore(initialDsl ?? emptyDsl()))
@@ -77,10 +80,22 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
   const [askingInputs, setAskingInputs] = useState(false)
   useAutosave(state.dsl, save.changed)
   useValidate(state.dsl, workflowId, validation.validate)
+  // The run this tab is watching: the one started here, or the one the URL named on load. A `?run=`
+  // the engine does not have drops out here rather than being cleared into state -- deriving it means
+  // there is never a render in which the canvas watches a run that is known to be gone.
+  const urlRunId = initialRunId ?? null
+  const restored = useRestoredRun(run.runId === null ? urlRunId : null)
+  const watching = run.runId ?? (restored.gone ? null : urlRunId)
   useRunInUrl(run.runId)
-  const stream = useRunStream(run.runId)
-  const trace = useNodeRuns(run.runId, stream.finished)
-  const approval = useApproval(run.runId, stream.waitingFor)
+  const stream = useRunStream(watching, run.runId === null ? restored.state : null)
+
+  // Keeping a `?run=` that 404s would retry the same fetch on every reload and leave a status bar
+  // describing nothing. This is a URL edit, not a state change.
+  useEffect(() => {
+    if (restored.gone) clearRunFromUrl()
+  }, [restored.gone])
+  const trace = useNodeRuns(watching, stream.finished)
+  const approval = useApproval(watching, stream.waitingFor)
 
   // The engine's own verdict, when it disagreed with the editor's last `/validate`. Shown as badges
   // like any other issue, because that is where they can be acted on. Memoised: it feeds the node and
@@ -91,8 +106,8 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
   )
 
   async function onCancel() {
-    if (run.runId === null) return
-    const result = await cancelRun(run.runId)
+    if (watching === null) return
+    const result = await cancelRun(watching)
     // "cancelled" means the API ended it and `run_cancelled` is already on the way; "requested" means
     // a worker holds it and will stop at its next heartbeat. Either way the 취소 중 label clears on the
     // event, never on a timer -- saying it stopped while a node is still finishing would be a lie.
@@ -236,7 +251,7 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
           state={state}
           save={save}
           issues={issues}
-          runId={run.runId}
+          runId={watching}
           stream={stream}
           onRun={onRun}
           onCancel={onCancel}
@@ -251,7 +266,7 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
           issues={issues}
           state={state}
           trace={
-            run.runId === null ? undefined : (
+            watching === null ? undefined : (
               <TracePanel
                 nodeId={selected.id}
                 runs={trace.runs}
@@ -265,6 +280,20 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
         />
       ) : null}
       <ConflictDialog state={save} />
+      {restored.gone || restored.error !== null ? (
+        <p
+          role="status"
+          className="absolute bottom-4 left-4 border px-3 py-2 text-xs"
+          style={{
+            borderRadius: "var(--radius)",
+            borderColor: restored.gone ? "var(--st-waiting)" : "var(--st-failed)",
+            color: restored.gone ? "var(--st-waiting)" : "var(--st-failed)",
+            background: "var(--ink-800)",
+          }}
+        >
+          {restored.gone ? "실행을 찾을 수 없습니다. 삭제되었거나 만료된 실행입니다." : restored.error}
+        </p>
+      ) : null}
       {stream.waitingFor === null ? null : (
         <ApprovalDialog
           waiting={stream.waitingFor}
@@ -488,6 +517,14 @@ function useRunStore(workflowId: string | undefined) {
     ),
   )
   return runStore
+}
+
+/** Drop `?run=` when it names a run the engine does not have. */
+function clearRunFromUrl() {
+  const url = new URL(window.location.href)
+  if (!url.searchParams.has("run")) return
+  url.searchParams.delete("run")
+  window.history.replaceState(null, "", url)
 }
 
 /** Put the run in the URL (3 설계 §8.3), so reloading the tab comes back to the same run.

@@ -56,8 +56,12 @@ function Unreadable({ name, reason }: { name: string; reason: string }) {
   )
 }
 
-export default async function Page({ searchParams }: { searchParams: Promise<{ workflow?: string }> }) {
-  const { workflow } = await searchParams
+export default async function Page({
+  searchParams,
+}: {
+  searchParams: Promise<{ workflow?: string; run?: string }>
+}) {
+  const { workflow, run } = await searchParams
   const [{ nodeTypes }, opened] = await Promise.all([
     engineFetch<{ nodeTypes: NodeType[] }>("/node-types"),
     openWorkflow(workflow),
@@ -78,6 +82,7 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ w
       workflowId={opened.view.id}
       initialDsl={read.dsl}
       initialRevision={opened.view.revision}
+      initialRunId={run}
     />
   )
 }

@@ -1,7 +1,7 @@
 import { act, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { RunEvent } from "@/lib/run/events"
+import { emptyStream, type RunEvent, type StreamState } from "@/lib/run/events"
 
 import { useRunStream } from "./useRunStream"
 
@@ -51,8 +51,14 @@ class FakeEventSource {
   }
 }
 
-function Probe({ runId }: { runId: string | null }) {
-  const stream = useRunStream(runId)
+function Probe({
+  runId,
+  restored = null,
+}: {
+  runId: string | null
+  restored?: StreamState | null | undefined
+}) {
+  const stream = useRunStream(runId, restored)
   return (
     <div>
       <span data-testid="status">{stream.status}</span>
@@ -62,6 +68,12 @@ function Probe({ runId }: { runId: string | null }) {
       <span data-testid="tokens">{stream.nodes["llm_1"]?.tokens ?? ""}</span>
     </div>
   )
+}
+
+/** The hook with `restored` genuinely undefined, which a JSX default would otherwise swallow. */
+function Loading({ runId }: { runId: string }) {
+  const stream = useRunStream(runId, undefined)
+  return <span data-testid="status">{stream.status}</span>
 }
 
 function text(id: string) {
@@ -230,5 +242,75 @@ describe("a dropped connection", () => {
 
     expect(text("disconnected")).toBe("false")
     expect(FakeEventSource.last?.closed).toBe(true)
+  })
+})
+
+describe("restoring before connecting", () => {
+  it("opens nothing while the restore is still in flight", () => {
+    // Connecting now would race the fetch and paint the first live frame onto state that says the run
+    // never happened.
+    render(<Loading runId="r1" />)
+
+    expect(FakeEventSource.opened).toHaveLength(0)
+  })
+
+  it("connects once the restore arrives", () => {
+    const { rerender } = render(<Loading runId="r1" />)
+    rerender(<Probe runId="r1" restored={{ ...emptyStream(), status: "running" }} />)
+
+    expect(FakeEventSource.opened).toHaveLength(1)
+    expect(text("status")).toBe("running")
+  })
+
+  it("starts from the restored state rather than from nothing", () => {
+    render(
+      <Probe
+        runId="r1"
+        restored={{
+          ...emptyStream(),
+          status: "running",
+          nodes: { llm_1: { status: "failed", attempt: 2, tokens: "", error: null, defaulted: false } },
+        }}
+      />,
+    )
+
+    expect(text("llm")).toBe("failed")
+  })
+
+  it("opens no stream at all for a run that already ended", () => {
+    // Replaying every stored event would arrive at the state already painted, and `EventSource` would
+    // then reconnect to a stream the server closes at once, forever.
+    render(<Probe runId="r1" restored={{ ...emptyStream(), status: "succeeded", finished: true }} />)
+
+    expect(FakeEventSource.opened).toHaveLength(0)
+    expect(text("status")).toBe("succeeded")
+    expect(text("finished")).toBe("true")
+  })
+
+  it("starts from nothing when there is nothing to restore", () => {
+    // A run started in this session: `null` means "no restore needed", unlike `undefined`.
+    render(<Probe runId="r1" restored={null} />)
+
+    expect(FakeEventSource.opened).toHaveLength(1)
+    expect(text("status")).toBe("queued")
+  })
+
+  it("applies replayed events onto the restored state without doubling it", () => {
+    render(
+      <Probe
+        runId="r1"
+        restored={{
+          ...emptyStream(),
+          status: "running",
+          nodes: { llm_1: { status: "succeeded", attempt: 1, tokens: "", error: null, defaulted: false } },
+        }}
+      />,
+    )
+    act(() => {
+      FakeEventSource.last?.send({ type: "node_started", seq: 2, nodeId: "llm_1", attempt: 1 })
+      FakeEventSource.last?.send({ type: "node_finished", seq: 3, nodeId: "llm_1", attempt: 1 })
+    })
+
+    expect(text("llm")).toBe("succeeded")
   })
 })

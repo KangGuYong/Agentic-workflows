@@ -47,16 +47,30 @@ type Action =
   | { kind: "event"; event: RunEvent }
   | { kind: "disconnected" }
   | { kind: "cancelling" }
-  | { kind: "reset" }
+  | { kind: "reset"; to: StreamState }
 
 function reduce(state: StreamState, action: Action): StreamState {
-  if (action.kind === "reset") return emptyStream()
+  if (action.kind === "reset") return action.to
   if (action.kind === "disconnected") return markDisconnected(state)
   if (action.kind === "cancelling") return markCancelling(state)
   return applyEvent(state, action.event)
 }
 
-export function useRunStream(runId: string | null): StreamState & { markCancelling: () => void } {
+/**
+ * @param runId   the run to watch, or null for none
+ * @param restored the state a reload rebuilt before this hook ran (3 설계 §8.3); `undefined` while that
+ *                 is still being fetched, which is **not** the same as "nothing to restore" -- opening a
+ *                 stream then would paint the first live frame onto a canvas that says the run never
+ *                 happened. A run started in this session passes `null`, meaning "start from nothing".
+ *
+ * Required, with no default. A default fires on an explicit `undefined`, so `useRunStream(id, loading)`
+ * would silently mean "nothing to restore" for exactly the argument that means "not yet" -- and the
+ * race this parameter exists to prevent would be back.
+ */
+export function useRunStream(
+  runId: string | null,
+  restored: StreamState | null | undefined,
+): StreamState & { markCancelling: () => void } {
   const [state, dispatch] = useReducer(reduce, undefined, emptyStream)
   // Owned entirely by the effect below: the handlers need to know whether the run ended, and `state`
   // there is whatever it was when the connection opened. Writing it during render is both a React rule
@@ -65,8 +79,16 @@ export function useRunStream(runId: string | null): StreamState & { markCancelli
 
   useEffect(() => {
     if (runId === null) return
-    dispatch({ kind: "reset" })
-    finished.current = false
+    // Still restoring. Connecting now would race the fetch and paint live frames onto empty state.
+    if (restored === undefined) return
+
+    const start = restored ?? emptyStream()
+    dispatch({ kind: "reset", to: start })
+    finished.current = start.finished
+
+    // A run that already ended needs no stream: opening one replays every stored event to arrive at
+    // the state just painted, and `EventSource` then reconnects to a stream the server closes at once.
+    if (start.finished) return
 
     const source = new EventSource(`/api/engine/runs/${encodeURIComponent(runId)}/events`)
 
@@ -98,7 +120,7 @@ export function useRunStream(runId: string | null): StreamState & { markCancelli
     }
 
     return () => source.close()
-  }, [runId])
+  }, [runId, restored])
 
   const requestCancel = useCallback(() => dispatch({ kind: "cancelling" }), [])
 
