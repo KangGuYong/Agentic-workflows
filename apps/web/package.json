@@ -18,6 +18,8 @@
     "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/state": "^6.7.5",
     "@codemirror/view": "^6.43.12",
+    "@ibm/plex-mono": "^2.5.0",
+    "@ibm/plex-sans-kr": "^1.1.0",
     "@rjsf/core": "^6.10.1",
     "@rjsf/utils": "^6.10.1",
     "@rjsf/validator-ajv8": "^6.10.1",

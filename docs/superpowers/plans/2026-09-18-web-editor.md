@@ -596,15 +596,15 @@ The hardest UI in this plan. 3 설계 §6.
 
 ## Task 20: The web container
 
-- [ ] `apps/web/Dockerfile`: multi-stage, `node:22-bookworm-slim`, `next build` with `output: "standalone"`, non-root uid 10001 — same posture as the engine image.
-- [ ] `deploy/docker-compose.yml`: a `web` service with `ENGINE_API_URL=http://api:8000`, `ENGINE_API_TOKEN=${ENGINE_API_TOKEN:?}`, `ports: ["${WEB_PORT:-3000}:3000"]`, `depends_on: {api: {condition: service_healthy}}`.
-- [ ] Healthcheck hits `/api/health` (no token needed; it does not touch the engine).
-- [ ] `deploy/.env.example` gains `WEB_PORT` with a comment.
-- [ ] `HTTP_ALLOWLIST` in `.env.example` gains a commented line showing `http://web:3000` for the E2E workflow.
-- [ ] Verify: `docker compose config -q` is silent; `docker compose up -d` brings up five services; the editor loads in a browser and lists workflows.
+- [x] `apps/web/Dockerfile`: multi-stage, `node:22-bookworm-slim`, `next build` with `output: "standalone"`, non-root uid 10001 — same posture as the engine image.
+- [x] `deploy/docker-compose.yml`: a `web` service with `ENGINE_API_URL=http://api:8000`, `ENGINE_API_TOKEN=${ENGINE_API_TOKEN:?}`, `ports: ["${WEB_PORT:-3000}:3000"]`, `depends_on: {api: {condition: service_healthy}}`.
+- [x] Healthcheck hits `/api/health` (no token needed; it does not touch the engine).
+- [x] `deploy/.env.example` gains `WEB_PORT` with a comment.
+- [x] `HTTP_ALLOWLIST` in `.env.example` gains a commented line showing `http://web:3000` for the E2E workflow.
+- [x] Verify: `docker compose config -q` is silent; `docker compose up -d` brings up five services; the editor loads in a browser and lists workflows.
 
 **Verification**
-- [ ] Commit: `feat(deploy): add the web container to the compose stack`
+- [x] Commit: `feat(deploy): add the web container to the compose stack`
 
 ---
 
@@ -2176,3 +2176,63 @@ API에는 값을 돌려주는 엔드포인트가 없고 앞으로도 없다. 그
 
 **검증**: `pnpm test` 749 passed (57 files), `e2e` 10 passed, `typecheck`·`lint` clean,
 `build` 성공(`/`, `/secrets`, `/workflows/[id]`), `test:bundle` 통과.
+
+---
+
+### Task 20 — web 컨테이너
+
+`apps/web/{Dockerfile,.dockerignore}`, `next.config.ts`의 `output: "standalone"`,
+`app/api/health/route.ts`, compose의 `web` 서비스, `.env.example`의 `WEB_PORT`와 `HTTP_ALLOWLIST` 주석.
+
+**컨테이너를 처음 빌드하자 온프렘 제품의 실제 결함이 드러났다.**
+
+`next/font/google`은 **빌드 시점에 fonts.googleapis.com에서 받아온다.** 즉 구글에 닿지 못하는 망에서는
+`next build`가 실패한다 — **이 제품이 배포되는 바로 그 망이다.** 개발 기계는 관대한 프록시 뒤에 있어서
+한 번도 보이지 않았고, `docker build`가 처음으로 그것을 보여줬다.
+
+`next/font/local`과 IBM의 OFL 패키지(`@ibm/plex-sans-kr`, `@ibm/plex-mono`)로 바꿨다. 빌드가 이미
+패키지 레지스트리에는 닿아야 하므로 **의존성을 하나 더 만든 것이 아니라 구글 의존성을 없앤 것이다.**
+
+바꾸면서 Task 1의 계산도 뒤집혔다. 계획은 구글이 한글 서체를 ~100개 unicode-range 조각으로 쪼개는 것을
+전제하고 `preload: false`로 376개 preload 링크를 3개로 줄였다. 그런데 **완성본 한글 woff2는 무게당
+438KB뿐이다** — 쪼개는 장치(와 그것이 만드는 preload 문제)가 아끼는 것보다 비싸다. 무게당 파일 하나로
+가면서 빌드 산출물이 **391개 3.9MB → 5개 1.4MB**가 됐다. 실제로 쓰는 무게만 남겼다(본문 400, 굵게 600,
+배지 700, 등폭 400·500 — `font-*` 클래스를 세어서 확인했다).
+
+**`/api/health`는 엔진을 건드리지 않는다.** 건드리면 엔진이 죽었을 때 이 컨테이너가 unhealthy로 보고되고,
+Docker가 **멀쩡히 동작하는 프로세스를 재시작한다** — 정작 고장난 쪽은 그대로 둔 채. 토큰도 요구하지
+않는다: 설정 실수로 실패할 수 있는 liveness probe는 거짓말하는 probe다. 대신 POST는 본문을 되돌려준다 —
+Task 21의 워크플로가 `http_request`로 여기를 치고 응답을 확인한다.
+
+**샌드박스 우회는 커밋하지 않았다.** 이 환경은 자체 CA로 TLS를 가로채서 pnpm이 `SELF_SIGNED_CERT_IN_CHAIN`을
+본다. `Dockerfile.sandbox`에 `NODE_EXTRA_CA_CERTS`만 얹어 빌드를 검증하고 **지웠다** — 샌드박스 전용
+신뢰 저장소를 출하 이미지에 구워 넣는 것은 다른 사람의 배포를 망치는 일이다. (`apt-get`으로 CA를 설치하려
+했더니 프록시가 Debian 저장소를 403으로 막았는데, Node는 `NODE_EXTRA_CA_CERTS` 하나면 되므로 apt가
+애초에 필요 없었다.)
+
+**이미지 자세는 엔진과 같게 맞췄다.** 멀티스테이지, `node:22-bookworm-slim`, uid 10001 비루트,
+빌드 인자로 비밀을 넘기지 않는다(넘기면 이미지 히스토리에 남는다). `instrumentation.ts`의 엔진 환경
+검증은 **시작 시점**이지 빌드 시점이 아니므로 빌드에 토큰이 필요 없다.
+`outputFileTracingRoot`를 앱 디렉터리로 고정했다 — 없으면 Next가 잠금 파일을 찾아 위로 올라가며
+엔진 트리까지 standalone 번들에 끌어온다.
+
+**실제 스택으로 확인.** `docker compose config -q` 조용함, `up -d`로 **다섯 서비스**가 뜨고 web이
+healthy. 컨테이너가 서비스하는 편집기를 브라우저로 열어 목록 3개 → 편집기 진입 → 캔버스와 노드 3개까지
+확인했고, **구글 폰트 요청 0건**을 함께 확인했다.
+
+**Mutation 3/3 잡힘** (health 라우트; Dockerfile과 compose는 변형 대상이 아니라 실제 빌드로 검증했다)
+
+| 변형 | 결과 |
+|---|---|
+| liveness 응답이 캐시 가능해짐 | killed |
+| JSON이 아닌 본문에 예외 | killed |
+| 본문을 되돌려주지 않음 | killed |
+
+**남은 공백.**
+- **`pnpm-lock.yaml`이 워크스페이스 루트가 아니라 `apps/web`에 있다.** 지금 구조에서는 맞지만, 나중에
+  앱이 둘이 되면 루트로 올려야 하고 Dockerfile의 `COPY`도 따라가야 한다.
+- 이미지에 `HEALTHCHECK`를 넣지 않고 compose에 뒀다. 엔진 이미지와 같은 선택이다 — 검사 방식이
+  배포 방식에 달렸고, 이미지는 그것을 모른다.
+
+**검증**: `pnpm test` 753 passed (58 files), `e2e` 10 passed, `typecheck`·`lint` clean,
+`build` 성공, `test:bundle` 통과, `docker compose up -d`로 5개 서비스 healthy.
