@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { createWorkflow, deleteWorkflow, listWorkflows, renameWorkflow } from "./workflows"
+import { createWorkflow, deleteWorkflow, listWorkflows, putWorkflow } from "./workflows"
 
 function reply(status: number, body?: unknown) {
   return new Response(body === undefined ? null : JSON.stringify(body), {
@@ -82,19 +82,19 @@ describe("createWorkflow", () => {
   })
 })
 
-describe("renameWorkflow", () => {
+describe("putWorkflow", () => {
   it("PUTs the name with the draft and revision, because PUT replaces the row", async () => {
     const draft = { version: "1", nodes: [], edges: [] }
     answer(reply(200, { revision: 4 }))
 
-    expect(await renameWorkflow("wf_1", "새 이름", draft, 3)).toEqual({ outcome: "ok", value: 4 })
+    expect(await putWorkflow("wf_1", "새 이름", draft, 3)).toEqual({ outcome: "ok", value: 4 })
     expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ name: "새 이름", draftDsl: draft, revision: 3 })
   })
 
   it("reports a 409 as blocked, not as a failure to retry", async () => {
     answer(reply(409, { error: { code: "REVISION_CONFLICT", message: "다른 곳에서 먼저 저장했습니다" } }))
 
-    expect(await renameWorkflow("wf_1", "x", {}, 3)).toEqual({
+    expect(await putWorkflow("wf_1", "x", {}, 3)).toEqual({
       outcome: "blocked",
       message: "다른 곳에서 먼저 저장했습니다",
     })
@@ -102,7 +102,7 @@ describe("renameWorkflow", () => {
 
   it("escapes the id", async () => {
     answer(reply(200, { revision: 1 }))
-    await renameWorkflow("../secrets", "x", {}, 0)
+    await putWorkflow("../secrets", "x", {}, 0)
 
     expect(calls[0]?.url).toBe("/api/engine/workflows/..%2Fsecrets")
   })

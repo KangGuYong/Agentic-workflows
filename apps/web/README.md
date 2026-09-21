@@ -59,7 +59,8 @@ pnpm e2e        # Playwright. 아래 참고
 |---|---|
 | `app/api/engine/[...path]/` | BFF 프록시 — 토큰을 쓰는 유일한 곳 |
 | `lib/engine/` | 엔진 API 타입과 클라이언트 (`server-only`) |
-| `lib/dsl/` | DSL 문서 모델, 편집 커맨드, undo/redo — 순수 TS |
+| `lib/dsl/` | DSL 문서 모델, 편집 커맨드, undo/redo, 파일 입출력 규칙 — 순수 TS |
+| `lib/browser/` | 브라우저에만 있는 동작(파일 저장) — 순수 TS가 아닌 것들 |
 | `lib/template/` | `{{ }}` 파서와 자동완성 후보 — 순수 TS |
 | `lib/design/` | 색·상태 토큰의 TS 쪽 정본 |
 | `store/` | Zustand 슬라이스 |

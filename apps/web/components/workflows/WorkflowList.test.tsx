@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { MAX_IMPORT_BYTES } from "@/lib/dsl/transfer"
 import type { WorkflowSummary } from "@/lib/engine/workflows"
 
 import { WorkflowList } from "./WorkflowList"
@@ -149,5 +150,120 @@ describe("deleting", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("실행 중인 워크플로는 삭제할 수 없습니다")
     confirm.mockRestore()
+  })
+})
+
+describe("import and export", () => {
+  /** jsdom has no object URLs and no real downloads. Capturing the anchor is how the filename and the
+   * blob's contents become observable -- both are what a person actually gets. */
+  function captureDownload() {
+    const saved: { name: string; text: Promise<string> }[] = []
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: (blob: Blob) => {
+        saved.push({ name: "", text: blob.text() })
+        return "blob:stub"
+      },
+      revokeObjectURL: () => {},
+    })
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        const last = saved.at(-1)
+        if (last !== undefined) last.name = this.download
+      })
+    return { saved, click }
+  }
+
+  function file(name: string, body: string) {
+    return new File([body], name, { type: "application/json" })
+  }
+
+  const DSL = { version: "1", nodes: [{ id: "start", type: "start", position: { x: 0, y: 0 } }], edges: [] }
+
+  it("creates a new workflow from a picked file and opens it", async () => {
+    // Creating, never replacing: a file picker is one mis-click from the wrong file, and the worst
+    // case here is one workflow to delete.
+    answer(json(201, { id: "wf_new", name: "01-hello", revision: 1 }), json(200, { revision: 2 }))
+    render(<WorkflowList initial={[ROW]} />)
+
+    await userEvent.upload(screen.getByLabelText("워크플로 파일"), file("01-hello.json", JSON.stringify(DSL)))
+
+    expect(calls[0]?.url).toBe("/api/engine/workflows")
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ name: "01-hello" })
+    expect(JSON.parse(String(calls[1]?.init?.body))).toMatchObject({ name: "01-hello", revision: 1 })
+    expect(push).toHaveBeenCalledWith("/workflows/wf_new")
+  })
+
+  it("refuses an oversized file without reading it into memory", async () => {
+    // The point of checking `File.size` when `parseImport` already counts bytes: a 200MB file must
+    // never become a 200MB string first. Spying on `text()` is the only way to see that it did not.
+    const read = vi.spyOn(File.prototype, "text")
+    const huge = file("huge.json", "{}")
+    Object.defineProperty(huge, "size", { value: MAX_IMPORT_BYTES + 1 })
+    render(<WorkflowList initial={[ROW]} />)
+
+    await userEvent.upload(screen.getByLabelText("워크플로 파일"), huge)
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("너무 큽니다")
+    expect(read).not.toHaveBeenCalled()
+    expect(calls).toHaveLength(0)
+    read.mockRestore()
+  })
+
+  it("refuses a file that is not a workflow, and creates nothing", async () => {
+    render(<WorkflowList initial={[ROW]} />)
+
+    await userEvent.upload(screen.getByLabelText("워크플로 파일"), file("notes.json", "{ nope }"))
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("JSON 형식이 아닙니다")
+    // The important half: a bad file must not leave an empty workflow behind.
+    expect(calls).toHaveLength(0)
+    expect(push).not.toHaveBeenCalled()
+  })
+
+  it("says the workflow was left empty when the document could not be saved", async () => {
+    // The create succeeded and the save did not. Deleting it here would make an import that half
+    // happened vanish; naming it is what lets someone find and remove it.
+    answer(json(201, { id: "wf_new", name: "x", revision: 1 }), json(409, { error: { message: "충돌" } }))
+    render(<WorkflowList initial={[ROW]} />)
+
+    await userEvent.upload(screen.getByLabelText("워크플로 파일"), file("x.json", JSON.stringify(DSL)))
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("비어 있는 채로 만들어졌습니다")
+    expect(push).not.toHaveBeenCalled()
+  })
+
+  it("downloads a row's stored draft under the workflow's name", async () => {
+    const { saved, click } = captureDownload()
+    answer(json(200, { id: "wf_1", name: "주문 처리", revision: 3, draftDsl: DSL }))
+    render(<WorkflowList initial={[ROW]} />)
+
+    await userEvent.click(screen.getByRole("button", { name: "내보내기" }))
+
+    expect(click).toHaveBeenCalled()
+    expect(saved[0]?.name).toBe("주문 처리.json")
+    expect(JSON.parse(await (saved[0]?.text ?? Promise.resolve("null")))).toEqual(DSL)
+  })
+
+  it("writes the file indented, so an exported workflow is one someone can read", async () => {
+    const { saved } = captureDownload()
+    answer(json(200, { id: "wf_1", name: "주문 처리", revision: 3, draftDsl: DSL }))
+    render(<WorkflowList initial={[ROW]} />)
+
+    await userEvent.click(screen.getByRole("button", { name: "내보내기" }))
+
+    expect(await (saved[0]?.text ?? Promise.resolve(""))).toContain('\n  "nodes"')
+  })
+
+  it("reports a draft it could not fetch instead of saving an empty file", async () => {
+    const { click } = captureDownload()
+    answer(json(500, { error: { message: "엔진에 연결할 수 없습니다" } }))
+    render(<WorkflowList initial={[ROW]} />)
+
+    await userEvent.click(screen.getByRole("button", { name: "내보내기" }))
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("엔진에 연결할 수 없습니다")
+    expect(click).not.toHaveBeenCalled()
   })
 })
