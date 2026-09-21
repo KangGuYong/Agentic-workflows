@@ -20,14 +20,18 @@ import { toFlowEdges, toFlowNodes, type NodeChange } from "@/lib/dsl/flow"
 import { anyNodeVisible } from "@/lib/dsl/viewport"
 import type { NodeType } from "@/lib/palette"
 import { saveDraft } from "@/lib/engine/save"
+import { startRun } from "@/lib/engine/run"
 import { validateDraft } from "@/lib/engine/validate"
+import { inputSchema, needsInputs } from "@/lib/run/inputs"
 import { createGraphStore, type GraphState } from "@/store/graph"
 import { createSaveStore, type SaveState } from "@/store/save"
-import { createValidationStore, workflowIssues, type ValidationState } from "@/store/validation"
+import { createRunStore } from "@/store/run"
+import { createValidationStore, workflowIssues, type Issue } from "@/store/validation"
 
 import { NodePanel } from "@/components/panel/NodePanel"
 import { ConflictDialog } from "@/components/save/ConflictDialog"
 import { StatusBar } from "@/components/save/StatusBar"
+import { RunDialog } from "@/components/run/RunDialog"
 import { Banner } from "@/components/validation/Banner"
 import { RunButton } from "@/components/validation/RunButton"
 
@@ -61,8 +65,26 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
   const save = useStore(saveStore)
   const validationStore = useValidationStore(workflowId)
   const validation = useStore(validationStore)
+  const runStore = useRunStore(workflowId)
+  const run = useStore(runStore)
+  const [askingInputs, setAskingInputs] = useState(false)
   useAutosave(state.dsl, save.changed)
   useValidate(state.dsl, workflowId, validation.validate)
+  useRunInUrl(run.runId)
+
+  // The engine's own verdict, when it disagreed with the editor's last `/validate`. Shown as badges
+  // like any other issue, because that is where they can be acted on. Memoised: it feeds the node and
+  // edge mappings, which would otherwise rebuild on every render.
+  const issues: readonly Issue[] = useMemo(
+    () => (run.rejected.length > 0 ? [...validation.issues, ...run.rejected] : validation.issues),
+    [validation.issues, run.rejected],
+  )
+
+  function onRun() {
+    // Nothing to ask for: a dialog with no fields is a dialog asking nothing.
+    if (!needsInputs(state.dsl)) void run.start({}, save.revision)
+    else setAskingInputs(true)
+  }
   const { screenToFlowPosition, fitView, getViewport } = useReactFlow()
   const surface = useRef<HTMLDivElement>(null)
 
@@ -78,8 +100,8 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
     [validation.nodes],
   )
   const nodes = useMemo(
-    () => toFlowNodes(state.dsl, { labels, handles, issues: validation.issues }),
-    [state.dsl, labels, handles, validation.issues],
+    () => toFlowNodes(state.dsl, { labels, handles, issues }),
+    [state.dsl, labels, handles, issues],
   )
   // The panel opens on exactly one node; a multi-select has nothing single to configure.
   const selected =
@@ -87,7 +109,7 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
       ? state.dsl.nodes.find((node) => node.id === state.selection.nodes[0])
       : undefined
   const byType = useMemo(() => new Map(types.map((item) => [item.type, item])), [types])
-  const edges = useMemo(() => toFlowEdges(state.dsl, { issues: validation.issues }), [state.dsl, validation.issues])
+  const edges = useMemo(() => toFlowEdges(state.dsl, { issues }), [state.dsl, issues])
 
   const onNodesChange = useCallback(
     (changes: RfNodeChange[]) => {
@@ -191,18 +213,31 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
         >
           <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="transparent" />
         </ReactFlow>
-        <Toolbar state={state} save={save} validation={validation} onAutoLayout={onAutoLayout} />
+        <Toolbar state={state} save={save} issues={issues} onRun={onRun} onAutoLayout={onAutoLayout} />
       </div>
       {selected !== undefined ? (
         <NodePanel
           node={selected}
           nodeType={byType.get(selected.type)}
           types={types}
-          issues={validation.issues}
+          issues={issues}
           state={state}
         />
       ) : null}
       <ConflictDialog state={save} />
+      {inputSchema(state.dsl) === null ? null : (
+        <RunDialog
+          schema={inputSchema(state.dsl) ?? {}}
+          open={askingInputs}
+          starting={run.starting}
+          error={run.error}
+          onSubmit={(inputs) => {
+            setAskingInputs(false)
+            void run.start(inputs, save.revision)
+          }}
+          onCancel={() => setAskingInputs(false)}
+        />
+      )}
     </div>
   )
 }
@@ -245,12 +280,14 @@ function useAutosave(dsl: EditorDsl, changed: () => void) {
 function Toolbar({
   state,
   save,
-  validation,
+  issues,
+  onRun,
   onAutoLayout,
 }: {
   state: GraphState
   save: SaveState
-  validation: ValidationState
+  issues: readonly Issue[]
+  onRun: () => void
   onAutoLayout: () => Promise<void>
 }) {
   return (
@@ -277,7 +314,7 @@ function Toolbar({
       <div className="pointer-events-auto border border-ink-600 bg-ink-800 px-2 py-1.5" style={{ borderRadius: "var(--radius)" }}>
         <StatusBar state={save} />
       </div>
-      <RunButton issues={validation.issues} nodeCount={state.dsl.nodes.length} />
+      <RunButton issues={issues} nodeCount={state.dsl.nodes.length} onRun={onRun} />
       {state.lastError !== null ? (
         <p
           className="pointer-events-auto border px-2 py-1 text-xs"
@@ -290,7 +327,7 @@ function Toolbar({
     </div>
     {/* Problems that belong to no node: a badge on an arbitrary one would send someone to fix a node
         that is fine. */}
-    <Banner issues={workflowIssues(validation.issues)} />
+    <Banner issues={workflowIssues(issues)} />
     </div>
   )
 }
@@ -327,6 +364,33 @@ function useValidate(dsl: EditorDsl, workflowId: string | undefined, validate: (
 }
 
 const VALIDATE_DELAY_MS = 700
+
+/** The run slice, bound to this workflow. */
+function useRunStore(workflowId: string | undefined) {
+  const [runStore] = useState(() =>
+    createRunStore((body) =>
+      workflowId === undefined
+        ? Promise.resolve({ outcome: "failed" as const, message: "열린 워크플로가 없습니다" })
+        : startRun(workflowId, body),
+    ),
+  )
+  return runStore
+}
+
+/** Put the run in the URL (3 설계 §8.3), so reloading the tab comes back to the same run.
+ *
+ * `replaceState`, not a navigation: the run did not change which page this is, and pushing a history
+ * entry would make the browser's back button undo a run, which it cannot.
+ */
+function useRunInUrl(runId: string | null) {
+  useEffect(() => {
+    if (runId === null) return
+    const url = new URL(window.location.href)
+    if (url.searchParams.get("run") === runId) return
+    url.searchParams.set("run", runId)
+    window.history.replaceState(null, "", url)
+  }, [runId])
+}
 
 function ToolbarButton({
   label,

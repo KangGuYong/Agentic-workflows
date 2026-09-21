@@ -510,18 +510,18 @@ The hardest UI in this plan. 3 설계 §6.
 
 ## Task 14: Starting a run
 
-- [ ] 실행 button → dialog with a form generated from the `start` node's `inputs` schema (reuse Task 11's renderer in read-and-fill mode).
-- [ ] Submit → `POST /workflows/{id}/runs` with `{inputs, revision}` and a **fresh UUID** `Idempotency-Key` per submission.
-- [ ] 202 → put `?run=<runId>` in the URL (3 설계 §8.3) and open the run panel.
-- [ ] 409 `REVISION_CONFLICT` → the draft moved under us; show the conflict dialog from Task 12.
-- [ ] 422 `VALIDATION_FAILED` → render `details.issues` as badges; this can happen if validation is stale.
+- [x] 실행 button → dialog with a form generated from the `start` node's `inputs` schema (~~reuse Task 11's renderer in read-and-fill mode~~ → **RJSF. Task 11은 스키마를 편집하지 값을 채우지 않는다 — Task 14 주석.**).
+- [x] Submit → `POST /workflows/{id}/runs` with `{inputs, revision}` and a **fresh UUID** `Idempotency-Key` per submission.
+- [x] 202 → put `?run=<runId>` in the URL (3 설계 §8.3) and open the run panel.
+- [x] 409 `REVISION_CONFLICT` → the draft moved under us; show the conflict dialog from Task 12 **— 단, 이 409는 상대 초안을 싣지 않아 따로 가져와야 한다(Task 14 주석).**
+- [x] 422 `VALIDATION_FAILED` → render `details.issues` as badges; this can happen if validation is stale.
 
 **Tests**
-- [ ] Two rapid submissions send two different idempotency keys (the engine dedupes a *retried* request, not two deliberate runs).
-- [ ] A failed submission does not put `?run=` in the URL.
+- [x] Two rapid submissions send two different idempotency keys (the engine dedupes a *retried* request, not two deliberate runs).
+- [x] A failed submission does not put `?run=` in the URL.
 
 **Verification**
-- [ ] Commit: `feat(web): start a run from a generated input form`
+- [x] Commit: `feat(web): start a run from a generated input form`
 
 ---
 
@@ -1713,4 +1713,81 @@ DB에 있던 초안들은 **`position`이 없다.** 당연한 일이다: 위치�
   Task 14 이후 실제로 부담이 되는지 보고 합치는 편이 낫다고 판단했다.
 
 **검증**: `pnpm test` 462 passed (35 files), `e2e` 10 passed, `typecheck`·`lint` clean,
+`build` 성공, `test:bundle` 통과.
+
+---
+
+### Task 14 — 실행 시작
+
+`lib/engine/run.ts`(네 갈래 응답), `lib/run/inputs.ts`(시작 노드의 입력 스키마), `store/run.ts`,
+`components/run/RunDialog.tsx`, 그리고 캔버스의 `?run=` 동기화.
+
+**계획이 잘못 짚은 것 둘.**
+
+1. **"Task 11의 렌더러를 read-and-fill 모드로 재사용"은 할 수 없다.** Task 11의 렌더러는 *스키마를
+   편집한다*. 실행 대화상자가 하는 일은 그 스키마에 맞춰 *값을 채우는* 것이고, 그건 RJSF가 이미 하는
+   일이다 — 설정 패널이 노드 타입의 `configSchema`에 대해 하는 것과 같은 일이다. 스키마 편집기를 여기
+   재사용했다면 **폼 엔진을 하나 더 쓰는 셈**이었다. RJSF를 썼고 Task 9의 템플릿을 그대로 쓴다.
+2. **실행의 409는 저장의 409와 모양이 다르다.** 계획은 "Task 12의 충돌 대화상자를 보여준다"고 했는데,
+   `create_run`의 409는 `details.currentRevision`만 싣는다 — `draftDsl`이 없다. 그 대화상자는 **두 초안
+   중 하나를 고르는** 것이므로, 상대 초안이 없으면 고를 것이 없다. `GET /workflows/{id}`로 따로 가져온다.
+   가져오지 못하면 `draftDsl: null`로 보고한다 — 덮어쓰기는 제안할 수 있고 불러오기는 못 하는 상태가,
+   아무 일 없는 척하는 것보다 낫다.
+
+**멱등 키는 제출마다 새로 만든다.** 엔진은 이 키로 중복을 제거한다(`run_db.find_by_idempotency_key`).
+그것이 **재시도된 요청**을 안전하게 만드는 장치인데, 키를 재사용하면 **의도적인 두 번의 실행이 하나로
+합쳐진다.** 더블클릭은 한 번 실행되어야 하고, 일부러 두 번 누른 것은 두 번 실행되어야 한다 — 둘은 다른
+일이다. 테스트가 두 제출의 키가 다르다는 것과 그것이 UUID라는 것을 각각 단언한다.
+
+스토어는 **진행 중일 때 두 번째 누름을 무시한다.** 느린 네트워크에서의 조급한 더블클릭과 의도적인 두
+번째 실행을 스토어는 구별할 수 없고, 구별할 수 없을 때는 안전한 쪽으로 읽는다.
+
+**422는 배지로 돌려보낸다.** 검증이 낡을 수 있다 — 에디터의 마지막 `/validate`는 깨끗했는데 엔진의
+것은 아닌 경우다. 그때 받은 `details.issues`를 Task 13의 이슈 목록에 합쳐서 **캔버스의 배지로** 띄운다.
+대화상자 안의 문장 하나보다, 고칠 수 있는 자리에 있는 편이 낫다.
+
+**대화상자의 검증은 표시용이 아니다.** 설정 패널은 반쯤 친 값 때문에 편집을 막지 않지만(엔진이 권위),
+실행은 다르다 — 필수 입력이 빠진 실행을 보내면 왕복 한 번을 버리고 오류가 읽기 더 어려운 곳에 뜬다.
+그래서 여기서는 RJSF의 검증이 제출을 막는다. Esc로 닫히는 것도 저장 충돌 대화상자와 다르다:
+여기서 닫는다고 잃는 것이 없다.
+
+**`?run=`은 `replaceState`로 넣는다**(3 설계 §8.3). 실행은 페이지를 바꾸지 않았고, 히스토리 항목을
+쌓으면 브라우저 뒤로 가기가 실행을 취소하는 것처럼 보인다 — 취소할 수 없는데도.
+
+**lint가 진짜 버그를 하나 잡았다.** `issues`를 병합한 뒤 `useMemo`의 의존성만 바꾸고 **본문은
+`validation.issues`로 남겨뒀다.** 422의 이슈가 패널과 엣지에는 가고 **노드 배지에는 영영 안 가는**
+상태였다. exhaustive-deps 경고가 아니었으면 브라우저에서 422를 일부러 만들기 전까지 몰랐을 것이다.
+
+**Mutation 17/17 잡힘**
+
+| 변형 | 결과 |
+|---|---|
+| 멱등 키 재사용 / 미전송 | killed |
+| 형식이 틀린 202 수용 | killed |
+| 409·422를 인식 못 함 (각각) | killed |
+| revision 없는 409를 충돌로 | killed |
+| 상대 초안을 안 가져옴 | killed |
+| 422가 이슈를 잃음 | killed |
+| 워크플로 id 미이스케이프 | killed |
+| 스키마가 아닌 config를 스키마로 / 빈 스키마를 선언으로 | killed |
+| 아무 노드의 `inputs`나 읽음 | killed |
+| 프로퍼티 없는 스키마가 입력을 물음 | killed |
+| 진행 중 두 번째 누름이 또 실행 | killed |
+| 이전 시도의 불만을 안 지움 | killed |
+| 실행 id를 버림 / 거절이 이슈를 잃음 | killed |
+
+**실제 엔진으로 확인.** 실행 버튼 → 대화상자 → `issue`에 "이슈 42" 입력 → 202,
+URL에 `?run=7b476af8-...`. 엔진 쪽에서 `start` 노드가 `{"issue":"이슈 42"}`로 성공한 것까지 확인했다 —
+한글이 그대로 건너갔다. 그 다음 `http_1`이 그 문자열을 URL로 써서 `HTTP_BLOCKED`로 실패했는데,
+이건 그 워크플로의 내용과 내가 넣은 엉터리 입력 탓이지 에디터 탓이 아니다.
+
+**확인 과정에서 만든 흔적을 지웠다.** Task 12 검증 때 실제 워크플로에 남긴 LLM 노드 둘을 지우고
+저장했다 — 내가 실수로 넣은 것이라 원래대로 되돌린 것이고, 그래야 검증이 통과해 실행을 시험할 수 있었다.
+
+**남은 공백.**
+- **실행이 시작된 뒤 아무 일도 일어나지 않는다.** 노드 색도, 진행도, 실패 표시도 없다 — 전부 Task 15의
+  이벤트 스트림이 한다. 지금은 URL에 `?run=`이 붙는 것이 유일한 증거다.
+- **`?run=`으로 다시 들어와도 아무것도 복원되지 않는다.** Task 18의 몫이다.
+
+**검증**: `pnpm test` 497 passed (39 files), `e2e` 10 passed, `typecheck`·`lint` clean,
 `build` 성공, `test:bundle` 통과.
