@@ -1,0 +1,77 @@
+{
+  "version": "1",
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "label": "알림 요청",
+      "position": { "x": 80, "y": 200 },
+      "config": {
+        "inputs": {
+          "type": "object",
+          "properties": {
+            "channel": { "type": "string", "description": "보낼 채널 이름" },
+            "text": { "type": "string", "description": "보낼 내용" }
+          },
+          "required": ["channel", "text"]
+        }
+      }
+    },
+    {
+      "id": "payload",
+      "type": "template",
+      "label": "요청 본문",
+      "position": { "x": 360, "y": 200 },
+      "config": {
+        "template": "{\"channel\": {{ start.channel }}, \"text\": {{ start.text }}}",
+        "format": "json"
+      }
+    },
+    {
+      "id": "notify",
+      "type": "http_request",
+      "label": "알림 전송",
+      "position": { "x": 640, "y": 200 },
+      "config": {
+        "method": "POST",
+        "url": "https://api.example.com/v1/messages",
+        "headers": {
+          "Authorization": "Bearer {{ secret.NOTIFY_TOKEN }}",
+          "Content-Type": "application/json"
+        },
+        "body": "{{ payload.data }}",
+        "bodyFormat": "json",
+        "sendIdempotencyKey": true
+      },
+      "policy": { "timeoutSec": 20 }
+    },
+    {
+      "id": "receipt",
+      "type": "template",
+      "label": "전송 기록",
+      "position": { "x": 940, "y": 200 },
+      "config": {
+        "template": "{{ start.channel }} 채널로 전송했습니다 (HTTP {{ notify.status }}).",
+        "format": "text"
+      }
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "label": "끝",
+      "position": { "x": 1220, "y": 200 },
+      "config": {
+        "outputs": {
+          "status": "{{ notify.status }}",
+          "receipt": "{{ receipt.text }}"
+        }
+      }
+    }
+  ],
+  "edges": [
+    { "id": "e1", "source": "start", "target": "payload" },
+    { "id": "e2", "source": "payload", "target": "notify" },
+    { "id": "e3", "source": "notify", "target": "receipt" },
+    { "id": "e4", "source": "receipt", "target": "end" }
+  ]
+}
