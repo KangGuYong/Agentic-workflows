@@ -8,12 +8,14 @@ import { useState } from "react"
 import type { EditorNode, NodeConfig, Policy } from "@/lib/dsl/document"
 import { effectivePolicy, policyOverride } from "@/lib/dsl/policy"
 import { forcedSingleAttempt } from "@/lib/panel/retry"
-import { buildUiSchema } from "@/lib/panel/uiSchema"
+import { buildUiSchema, collapseOptionalSchemas, hasTemplateField } from "@/lib/panel/uiSchema"
 import type { NodeType } from "@/lib/palette"
+import { templateContext } from "@/lib/template/context"
 import type { GraphState } from "@/store/graph"
 
 import { TEMPLATES } from "./templates"
-import { WIDGETS } from "./widgets"
+import { TemplateHelp } from "./TemplateHelp"
+import { FIELDS, WIDGETS } from "./widgets"
 
 /** The right-hand panel for the selected node (3 설계 §5.3, §5.4).
  *
@@ -26,10 +28,13 @@ type Tab = "settings" | "policy" | "label"
 export function NodePanel({
   node,
   nodeType,
+  types = [],
   state,
 }: {
   node: EditorNode
   nodeType: NodeType | undefined
+  /** Every node type, for the labels the template editor shows in its completion list. */
+  types?: readonly NodeType[]
   state: GraphState
 }) {
   const [tab, setTab] = useState<Tab>("settings")
@@ -48,7 +53,9 @@ export function NodePanel({
       </nav>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-        {active === "settings" ? <Settings node={node} nodeType={nodeType} state={state} /> : null}
+        {active === "settings" ? (
+          <Settings node={node} nodeType={nodeType} types={types} state={state} />
+        ) : null}
         {active === "policy" && nodeType != null ? (
           <PolicyTab node={node} nodeType={nodeType} state={state} />
         ) : null}
@@ -97,10 +104,12 @@ function Tabs({
 function Settings({
   node,
   nodeType,
+  types,
   state,
 }: {
   node: EditorNode
   nodeType: NodeType | undefined
+  types: readonly NodeType[]
   state: GraphState
 }) {
   if (nodeType === undefined) {
@@ -108,12 +117,17 @@ function Settings({
   }
   return (
     <Form
-      schema={nodeType.configSchema}
+      schema={collapseOptionalSchemas(nodeType)}
       uiSchema={buildUiSchema(nodeType)}
       formData={node.config ?? {}}
       validator={validator}
       widgets={WIDGETS}
+      fields={FIELDS}
       templates={TEMPLATES}
+      // The template editor needs the other nodes to complete against, which no part of this node's
+      // schema describes. `null` analysis is honest: `/validate` is wired up in Task 13, and until then
+      // the editor completes node ids without claiming anything about guarantees.
+      formContext={{ template: templateContext(state.dsl, types, null, node.id) }}
       // RJSF's validation is display-only here: the engine's `/validate` is the authority, and blocking
       // an edit because a half-typed value does not match ajv would make the panel unusable.
       liveValidate={false}
@@ -122,8 +136,10 @@ function Settings({
       onChange={(event: IChangeEvent) => state.setNodeConfig(node.id, event.formData as NodeConfig)}
       onBlur={() => state.endEdit()}
     >
-      {/* RJSF renders a submit button unless given children; there is nothing to submit. */}
-      <></>
+      {/* RJSF renders a submit button unless given children; there is nothing to submit. The template
+          rules go here rather than under each template field: they are about the language, and two
+          copies of them in a 320px panel is clutter. */}
+      {hasTemplateField(nodeType) ? <TemplateHelp /> : <></>}
     </Form>
   )
 }

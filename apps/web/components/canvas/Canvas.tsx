@@ -162,7 +162,7 @@ function Editor({ types }: { types: NodeType[] }) {
         <Toolbar state={state} onAutoLayout={onAutoLayout} />
       </div>
       {selected !== undefined ? (
-        <NodePanel node={selected} nodeType={byType.get(selected.type)} state={state} />
+        <NodePanel node={selected} nodeType={byType.get(selected.type)} types={types} state={state} />
       ) : null}
     </div>
   )

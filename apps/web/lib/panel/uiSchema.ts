@@ -9,6 +9,8 @@ import type { NodeType } from "@/lib/palette"
 
 export interface FieldUi {
   "ui:widget"?: string
+  /** For a property RJSF would otherwise render itself, such as an `anyOf`. See `JsonSchemaField`. */
+  "ui:field"?: string
   "ui:title"?: string
   "ui:help"?: string
 }
@@ -84,11 +86,63 @@ export function buildUiSchema(nodeType: NodeType): UiSchema {
 
   for (const [name, property] of Object.entries(properties)) {
     const field: FieldUi = {}
-    if (schemaFields.has(name)) field["ui:widget"] = "jsonSchema"
+    // A field, not a widget: the engine declares these as `anyOf: [object, null]`, and RJSF renders an
+    // `anyOf` with its own option selector without ever consulting `ui:widget`.
+    if (schemaFields.has(name)) field["ui:field"] = "jsonSchema"
     else if (isTemplate(property)) field["ui:widget"] = "template"
     const title = TITLES[name]
     if (title !== undefined) field["ui:title"] = title
     if (Object.keys(field).length > 0) ui[name] = field
   }
   return ui
+}
+
+/** Whether this node type has any template field at all, which decides if the rules are worth showing. */
+export function hasTemplateField(nodeType: NodeType): boolean {
+  const properties = (nodeType.configSchema.properties ?? {}) as Record<string, unknown>
+  return Object.values(properties).some(isTemplate)
+}
+
+/** The config schema with the optional-object `anyOf` on schema fields collapsed away.
+ *
+ * `ui:field` replaces how a field's *value* is edited, but RJSF still renders its own branch selector
+ * for an `anyOf` alongside it -- so the panel showed the schema editor with a stray
+ * "출력 형식 option 2" dropdown under it. There is nothing for a person to choose there: the branches
+ * are "an object" and "nothing", and an empty editor already means nothing.
+ *
+ * Only `anyOf: [<object>, {type: "null"}]` is collapsed, and only on a declared schema field. Any other
+ * `anyOf` is left for RJSF to render, because dropping a branch the editor cannot represent would
+ * silently narrow what the tenant is allowed to save.
+ */
+export function collapseOptionalSchemas(nodeType: NodeType): Record<string, unknown> {
+  const schemaFields = SCHEMA_FIELDS[nodeType.type]
+  const properties = nodeType.configSchema.properties as Record<string, unknown> | undefined
+  if (schemaFields === undefined || properties === undefined) return nodeType.configSchema
+
+  const collapsed: Record<string, unknown> = { ...properties }
+  for (const name of schemaFields) {
+    const objectBranch = optionalObjectBranch(properties[name])
+    if (objectBranch !== undefined) collapsed[name] = objectBranch
+  }
+  return { ...nodeType.configSchema, properties: collapsed }
+}
+
+/** The object branch of `anyOf: [<object>, {type: "null"}]`, or undefined if that is not the shape. */
+function optionalObjectBranch(property: unknown): Record<string, unknown> | undefined {
+  if (typeof property !== "object" || property === null) return undefined
+  const branches = (property as Record<string, unknown>)["anyOf"]
+  if (!Array.isArray(branches) || branches.length !== 2) return undefined
+
+  const objects = branches.filter(
+    (branch): branch is Record<string, unknown> =>
+      typeof branch === "object" && branch !== null && (branch as Record<string, unknown>)["type"] === "object",
+  )
+  const nulls = branches.filter(
+    (branch) =>
+      typeof branch === "object" && branch !== null && (branch as Record<string, unknown>)["type"] === "null",
+  )
+  if (objects.length !== 1 || nulls.length !== 1) return undefined
+  // Keep the property's own title: it is what the label reads.
+  const { anyOf: _dropped, ...rest } = property as Record<string, unknown>
+  return { ...rest, ...objects[0] }
 }

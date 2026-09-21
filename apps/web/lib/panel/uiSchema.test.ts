@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import type { NodeType } from "@/lib/palette"
 
-import { buildUiSchema, SCHEMA_FIELDS, type FieldUi } from "./uiSchema"
+import { buildUiSchema, collapseOptionalSchemas, SCHEMA_FIELDS, type FieldUi } from "./uiSchema"
 
 /** `ui:order` shares the index signature with the field entries, so a field read narrows here. */
 function field(ui: ReturnType<typeof buildUiSchema>, name: string): FieldUi | undefined {
@@ -39,12 +39,16 @@ describe("buildUiSchema", () => {
     expect(field(ui, "model")?.["ui:widget"]).toBeUndefined()
   })
 
-  it("routes the schema-shaped properties to the schema widget", () => {
+  it("routes the schema-shaped properties to the schema *field*, not a widget", () => {
+    // `ui:field`, deliberately. The engine declares these as `anyOf: [{object}, {null}]`, and RJSF
+    // renders an `anyOf` with its own option selector without ever consulting `ui:widget` -- which is
+    // why the panel showed a bare number input holding the branch index instead of the editor.
     const start = buildUiSchema(nodeType("start", { inputs: { type: "object" } }))
     const llm = buildUiSchema(nodeType("llm", { outputSchema: { type: "object" } }))
 
-    expect(field(start, "inputs")?.["ui:widget"]).toBe("jsonSchema")
-    expect(field(llm, "outputSchema")?.["ui:widget"]).toBe("jsonSchema")
+    expect(field(start, "inputs")?.["ui:field"]).toBe("jsonSchema")
+    expect(field(llm, "outputSchema")?.["ui:field"]).toBe("jsonSchema")
+    expect(field(llm, "outputSchema")?.["ui:widget"]).toBeUndefined()
   })
 
   it("only treats a schema field as one on the node type that owns it", () => {
@@ -52,7 +56,7 @@ describe("buildUiSchema", () => {
     // `inputs` that is not a JSON Schema must not get the schema editor.
     const other = buildUiSchema(nodeType("merge", { inputs: { type: "string" } }))
 
-    expect(field(other, "inputs")?.["ui:widget"]).toBeUndefined()
+    expect(field(other, "inputs")?.["ui:field"]).toBeUndefined()
     expect(Object.keys(SCHEMA_FIELDS)).toContain("start")
   })
 
@@ -89,5 +93,42 @@ describe("buildUiSchema", () => {
     for (const type of ["llm", "http_request", "condition", "future"]) {
       expect(buildUiSchema(nodeType(type, {})) ["ui:order"]?.at(-1)).toBe("*")
     }
+  })
+})
+
+describe("collapseOptionalSchemas", () => {
+  const OPTIONAL = { anyOf: [{ type: "object", additionalProperties: true }, { type: "null" }], title: "Outputschema" }
+
+  it("collapses an optional schema field to its object branch", () => {
+    // RJSF renders a branch selector for any `anyOf`, even beside a `ui:field`. There is nothing to
+    // choose: the branches are "an object" and "nothing", and an empty editor already means nothing.
+    const collapsed = collapseOptionalSchemas(nodeType("llm", { outputSchema: OPTIONAL }))
+    const property = (collapsed.properties as Record<string, Record<string, unknown>>)["outputSchema"]
+
+    expect(property?.["anyOf"]).toBeUndefined()
+    expect(property?.["type"]).toBe("object")
+    expect(property?.["title"]).toBe("Outputschema")
+  })
+
+  it("leaves an anyOf that is not the optional-object shape alone", () => {
+    // Dropping a branch the editor cannot represent would silently narrow what the tenant may save.
+    const other = { anyOf: [{ type: "string" }, { type: "number" }] }
+    const collapsed = collapseOptionalSchemas(nodeType("start", { inputs: other }))
+
+    expect((collapsed.properties as Record<string, Record<string, unknown>>)["inputs"]?.["anyOf"]).toEqual(
+      other.anyOf,
+    )
+  })
+
+  it("leaves a property that is not a declared schema field alone", () => {
+    const collapsed = collapseOptionalSchemas(nodeType("llm", { other: OPTIONAL }))
+
+    expect((collapsed.properties as Record<string, Record<string, unknown>>)["other"]?.["anyOf"]).toHaveLength(2)
+  })
+
+  it("returns the schema untouched for a node type with no schema fields", () => {
+    const type = nodeType("merge", { mode: { type: "string" } })
+
+    expect(collapseOptionalSchemas(type)).toBe(type.configSchema)
   })
 })

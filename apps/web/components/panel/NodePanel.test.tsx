@@ -33,8 +33,15 @@ const LLM_TYPE: NodeType = {
   isBranch: false,
   sideEffects: false,
   configSchema: {
+    // As the engine sends it: pydantic closes every model, and an optional schema field arrives as an
+    // `anyOf` with a null branch.
     type: "object",
-    properties: { model: { type: "string" }, prompt: { type: "string", "x-template": true } },
+    additionalProperties: false,
+    properties: {
+      model: { type: "string" },
+      prompt: { type: "string", "x-template": true },
+      outputSchema: { anyOf: [{ type: "object", additionalProperties: true }, { type: "null" }], default: null },
+    },
   },
   defaultPolicy: {
     timeoutSec: 120,
@@ -230,5 +237,94 @@ describe("the label tab", () => {
     await userEvent.type(screen.getByLabelText("라벨"), "요")
 
     expect(store.getState().dsl.nodes[0]?.label).toBe("요")
+  })
+})
+
+describe("the template field", () => {
+  it("renders the template editor, not a plain textarea", async () => {
+    show(node("llm_1", "llm"), LLM_TYPE)
+
+    // `prompt` carries `x-template`, so `buildUiSchema` routes it to the template widget.
+    expect(await screen.findByTestId("template-editor")).toBeInTheDocument()
+  })
+
+  it("puts the engine's template rules under it, collapsed", async () => {
+    show(node("llm_1", "llm"), LLM_TYPE)
+    await screen.findByTestId("template-editor")
+
+    const help = screen.getByText("템플릿 작성 규칙")
+    expect(help).toBeInTheDocument()
+    // Collapsed: seven rules pushing the canvas off the screen is not what someone editing their tenth
+    // template needs.
+    expect(help.closest("details")?.open).toBe(false)
+  })
+
+  it("does not render it for a field that is not a template", () => {
+    // `model` is a plain string. A CodeMirror instance per string field would be absurd.
+    show(node("llm_1", "llm"), {
+      ...LLM_TYPE,
+      configSchema: { type: "object", properties: { model: { type: "string" } } },
+    })
+
+    expect(screen.queryByTestId("template-editor")).toBeNull()
+  })
+})
+
+describe("the shape of the generated form", () => {
+  it("offers no add button on a closed schema", async () => {
+    // Pydantic emits `additionalProperties: false` on every model. Reading that as "a free-form map"
+    // put a dead + 항목 추가 button under every settings form.
+    show(node("llm_1", "llm"), LLM_TYPE)
+    await screen.findByTestId("template-editor")
+
+    expect(screen.queryByRole("button", { name: /항목 추가/ })).toBeNull()
+  })
+
+  it("still offers one on the map that is genuinely open", () => {
+    // The control: `http_request.headers` is `dict[str, str]`.
+    show(node("http_request_1", "http_request", { config: { method: "GET" } }), HTTP_TYPE)
+
+    expect(screen.getByRole("button", { name: /항목 추가/ })).toBeInTheDocument()
+  })
+
+  it("renders the schema editor for an optional schema field, not RJSF's anyOf selector", async () => {
+    // `outputSchema` is `anyOf: [{object}, {null}]`. RJSF renders an anyOf with its own option selector
+    // before it consults `ui:widget`, so the panel showed a number input holding the branch index.
+    show(node("llm_1", "llm"), LLM_TYPE)
+    await screen.findByTestId("template-editor")
+
+    const schemaField = screen.getByLabelText("출력 형식")
+    expect(schemaField.tagName).toBe("TEXTAREA")
+    // And *only* that: `ui:field` replaces how the value is edited but leaves RJSF's branch selector
+    // rendered beside it, which is why the schema is collapsed before the form ever sees it.
+    expect(screen.queryByRole("combobox")).toBeNull()
+  })
+
+  it("shows the template rules once, not once per template field", async () => {
+    // `llm` has two template fields in the engine (system and prompt). Two copies of a seven-rule
+    // explainer in a 320px panel is clutter.
+    show(node("llm_1", "llm"), {
+      ...LLM_TYPE,
+      configSchema: {
+        type: "object",
+        properties: {
+          system: { type: "string", "x-template": true },
+          prompt: { type: "string", "x-template": true },
+        },
+      },
+    })
+    await screen.findAllByTestId("template-editor")
+
+    expect(screen.getAllByText("템플릿 작성 규칙")).toHaveLength(1)
+  })
+
+  it("shows no template rules for a node type that has no template field", () => {
+    show(node("merge_1", "merge"), {
+      ...LLM_TYPE,
+      type: "merge",
+      configSchema: { type: "object", properties: { mode: { type: "string" } } },
+    })
+
+    expect(screen.queryByText("템플릿 작성 규칙")).toBeNull()
   })
 })

@@ -54,7 +54,11 @@ function ObjectFieldTemplate({
   // A free-form map (`dict[str, str]` in the engine, `additionalProperties` here) is only usable if
   // there is a way to add a key. Dropping this button left `http_request` unable to set a header at
   // all -- which is most of what that node is for.
-  const canAdd = schema.additionalProperties !== undefined && disabled !== true && readonly !== true
+  //
+  // `!== undefined` is not the test: pydantic emits `additionalProperties: false` on every model, which
+  // means the opposite -- no extra keys allowed. That put a dead button under every settings form.
+  const open = schema.additionalProperties
+  const canAdd = (open === true || typeof open === "object") && disabled !== true && readonly !== true
 
   return (
     <div>

@@ -423,29 +423,29 @@ The hardest UI in this plan. 3 설계 §6.
 
 **Tests first** (`lib/template/parse.test.ts`, `lib/template/complete.test.ts`):
 
-- [ ] `ranges("a {{ b.c }} d")` returns one range with the right offsets and the inner text `b.c`.
-- [ ] Unclosed `{{` produces no range (so a chip never swallows the rest of the document while typing).
-- [ ] `{{` inside a Jinja comment or a `{% %}` block is not a reference.
-- [ ] `candidates(prefix, variables, schemas)`:
+- [x] `ranges("a {{ b.c }} d")` returns one range with the right offsets and the inner text `b.c`.
+- [x] Unclosed `{{` produces no range (so a chip never swallows the rest of the document while typing).
+- [x] `{{` inside a Jinja comment or a `{% %}` block is not a reference.
+- [x] `candidates(prefix, variables, schemas)`:
   - after `{{ ` → one candidate per node in `variables`, plus the not-guaranteed ones marked
   - after `{{ llm_1.` → the properties of `llm_1`'s `outputSchema`
   - after `{{ llm_1.text` → no further candidates for a `string`
   - a node id that is not in `variables` still yields candidates, flagged `guaranteed: false`
-- [ ] The insert text is the node **id**; the display label is the node **label**.
+- [x] The insert text is the node **id**; the display label is the node **label**.
 
 **Implementation**
-- [ ] CodeMirror 6 in a controlled React wrapper. `EditorView` is created once; document changes are applied through transactions, never by recreating the view (recreating it loses IME composition and the cursor).
-- [ ] `autocompletion({ override: [source] })` with the source built from the validation slice.
-- [ ] `Decoration.replace` over each reference range with a chip widget — **except** when the selection intersects the range, so a chip under the cursor opens back into text.
-- [ ] A `ViewPlugin` recomputes decorations on document and selection change.
-- [ ] The collapsible Korean help text from 3 설계 §6.2, below the editor.
+- [x] CodeMirror 6 in a controlled React wrapper. `EditorView` is created once; document changes are applied through transactions, never by recreating the view (recreating it loses IME composition and the cursor).
+- [x] `autocompletion({ override: [source] })` with the source built from ~~the validation slice~~ → **그 슬라이스의 *모양*. 왜 아직 값이 없는지는 Task 10 주석.**
+- [x] `Decoration.replace` over each reference range with a chip widget — **except** when the selection intersects the range, so a chip under the cursor opens back into text.
+- [x] A `ViewPlugin` recomputes decorations on document and selection change.
+- [x] The collapsible Korean help text from 3 설계 §6.2, below the editor.
 
 **IME test — do not skip this**
-- [ ] A Playwright test (this one does need a browser) types Korean via `page.keyboard.insertText` **and** via a composition sequence, and asserts the document contains the composed text once, not twice, and that no chip decoration was applied mid-composition.
-- [ ] If CodeMirror + IME + decorations fight, fall back per 3 설계 §12: drop the chips, keep autocomplete and highlighting. Record the decision in the post-review note.
+- [x] A Playwright test (this one does need a browser) types Korean via `page.keyboard.insertText` **and** via a composition sequence, and asserts the document contains the composed text once, not twice, and that no chip decoration was applied mid-composition.
+- [x] ~~If CodeMirror + IME + decorations fight, fall back per 3 설계 §12: drop the chips~~ → **싸우지 않았다. 칩 유지.** Record the decision in the post-review note.
 
 **Verification**
-- [ ] Commit: `feat(web): template editor with variable autocomplete`
+- [x] Commit: `feat(web): template editor with variable autocomplete`
 
 ---
 
@@ -1316,3 +1316,127 @@ config 필드를 하나 추가하는 것만으로 패널이 통째로 빈 화면
 
 **검증**: `pnpm test` 218 passed (18 files), `typecheck`·`lint` clean, `build` 성공,
 실제 엔진에 붙은 브라우저에서 설정 탭·실행 정책 탭 스크린샷 확인.
+
+---
+
+### Task 10 — 템플릿 입력
+
+`lib/template/parse.ts`(`ranges`·`openReferenceAt`), `lib/template/complete.ts`(`candidates`·`typedAt`),
+`lib/template/schema.ts`(엔진 타입 규칙), `lib/template/context.ts`(문서 + `/validate` → 자동완성 재료),
+`components/panel/{TemplateEditor,TemplateHelp}.tsx`, 그리고 Playwright 설정과 픽스처.
+
+**칩은 유지했다.** 3 설계 §12의 대비책(IME와 싸우면 칩을 버린다)은 쓰지 않았다. CodeMirror 6은
+composition 중에 DOM을 건드리지 않으면 멀쩡하고, "커서가 든 칩은 펼친다"는 규칙이 그것을 이미 보장한다 —
+커서가 있는 범위에는 장식을 얹지 않으므로, 조합 중인 글자 위에 `Decoration.replace`가 올라갈 일이 없다.
+
+**계획의 순서가 틀렸다 — Task 10은 없는 슬라이스를 읽는다.** 계획은 자동완성 소스를 "validation
+슬라이스"에서 만들라고 했는데, 그 슬라이스는 Task 13에서 생기고 `/validate`는
+`POST /workflows/{id}/validate`다 — **DB에 있는 워크플로 id가 필요하다.** 그 id는 Task 12(자동 저장)와
+Task 19(워크플로 목록) 전에는 존재하지 않는다. 그래서 *모양*만 만들었다: `templateContext(dsl, types,
+analysis, nodeId)`가 `analysis`를 받고, 지금은 `null`을 넘긴다. Task 13이 값을 채우면 나머지는 그대로
+동작한다.
+
+`null`은 `[]`가 아니다. 빈 배열은 "엔진이 아무것도 보장하지 않는다"는 뜻이고, 그러면 모든 후보에
+회색 "기본값 필요"가 붙는다 — 아무것도 모르면서 경고하는 셈이다. `null`은 "아직 안 물어봤다"이고
+아무 표시도 하지 않는다. 테스트가 둘을 구분해서 못 박는다.
+
+**엔진 타입 규칙을 한 번 복제했고, 그게 이 에디터의 유일한 복제다.** `lib/template/schema.ts`는
+`engine/dsl/types.py`의 `kinds_of`·`resolve_path`를 옮긴 것이다. 자동완성은 점(`.`)을 찍는 순간
+"여기 뒤에 뭐가 올 수 있나"에 답해야 하고, 글자마다 엔진에 왕복하는 것은 답이 아니다. 대신 **각 테스트가
+따라가는 엔진 함수 이름을 적어서**, 엔진이 규칙을 바꾸면 여기가 깨지도록 했다.
+
+바로 그 덕을 봤다. `additionalProperties` 처리에서 **내 기대값이 틀렸다** — 엔진은
+`properties` 키가 있을 때만 `additionalProperties`를 따라가고, 없으면 "객체, 내용 모름"(`{}`)으로
+떨어진다. 추측하지 않고 엔진을 직접 돌려서 확인했고, 구현이 아니라 테스트를 고쳤다.
+
+**IME 테스트를 처음엔 쓸모없게 썼다. 대조군을 돌려서 알았다.** 네 개가 다 통과하길래 확인 삼아
+편집기를 두 군데 망가뜨려 봤다.
+
+| 망가뜨린 것 | 결과 |
+|---|---|
+| composition 중 문서 되쓰기 가드 제거 | **4 passed** |
+| 커서가 든 칩을 펼치는 규칙 제거 | **4 passed** |
+
+둘 다 통과했다 — 그 테스트들은 아무것도 검사하고 있지 않았다. 이유가 각각 달랐다.
+
+1. **가드 쪽**: 픽스처의 부모가 `onChange`를 동기로 반영하니 `value`와 문서가 항상 같고, 되쓰기 분기에
+   애초에 닿지 않는다. 그래서 픽스처에 `?lag=1`을 넣었다 — 한 프레임 늦게 커밋하는 부모, 즉 배치·디바운스·
+   스토어 왕복을 하는 모든 부모의 모양이다. 그 조건에서만 가드가 의미를 갖는다. **테스트할 수 없는 방어
+   코드는 죽은 코드와 구분되지 않는다.**
+2. **칩 쪽**: 커서가 늘 참조 바깥에 있어서, 규칙이 있든 없든 칩이 그려졌다. 칩을 만든 뒤 **칩을 클릭해서
+   원문으로 펼쳐지는지** 보는 테스트를 따로 넣었다.
+
+그리고 조합 자체도 손으로 만든 `CompositionEvent` + `textContent` 대입으로 흉내내고 있었는데, 그건
+CodeMirror의 선택 영역을 통째로 부수는 짓이라 결과가 `녕안`으로 뒤집혀 나왔다 — 에디터가 아니라 하네스가
+틀린 것이다. **CDP의 `Input.imeSetComposition`** 으로 바꿨다. 브라우저 자신의 IME 경로다.
+대조군을 다시 돌려서 이번엔 둘 다 **실패**하는 것을 확인했다.
+
+**Playwright는 앱이 아니라 픽스처를 띄운다.** `e2e/fixture`를 Vite로 서빙하고 편집기 하나만 마운트한다.
+앱을 띄우면 Next·엔진·DB가 모두 필요하고, 그러면 실패했을 때 그게 에디터 탓인지 스택이 안 뜬 탓인지
+알 수 없다. 미리 깔린 크로미움은 `PLAYWRIGHT_CHROMIUM_PATH`로 가리킨다 — 환경마다 경로가 다르므로
+설정에 박지 않았다.
+
+**한글로 노드를 찾는 것이 안 됐다.** 토큰 앵커가 `[A-Za-z_]`라 첫 한글 자모에서 매칭이 끊기고 팝업이
+닫혔다. 좁혀야 할 키 입력이 팝업을 닫는 것이다. `\p{L}`로 넓히고(`u` 플래그), CodeMirror의 기본 매처도
+한글을 단어 문자로 보지 않으므로 `filter: false`로 끄고 `candidates`가 거르게 했다. 고른 뒤 문서에
+들어가는 것은 여전히 **노드 id**다 — `typedAt`이 대체할 길이를 돌려주므로 `{{ 번llm_2 }}`가 되지 않는다.
+
+**브라우저로 열어보고 결함 넷을 더 찾았다. 세 번째 태스크 연속으로, 단위 테스트가 구조적으로 못 잡는
+것들이다.**
+
+1. **모든 설정 폼 아래에 죽은 `+ 항목 추가` 버튼이 있었다 — Task 9에서 이미 커밋한 버그다.**
+   pydantic은 모든 모델에 `additionalProperties: false`를 붙이는데, Task 9의 검사는
+   `!== undefined`였다. `false`는 자유 형식 맵의 **반대**다. `true`이거나 객체일 때만으로 고쳤다.
+2. **스키마 편집기가 아예 렌더되지 않았다.** `llm.outputSchema`는 엔진에서 `anyOf: [{object},{null}]`인데,
+   RJSF는 `anyOf`를 **위젯을 보기 전에** 자기 분기 선택기로 렌더한다. 그래서 `ui:widget`이 닿지 않았고,
+   패널에는 분기 번호가 든 숫자 입력(`1`)이 떠 있었다. 위젯이 아니라 **필드**(`ui:field`)로 옮겼다.
+3. **그래도 분기 선택기가 남았다** — "출력 형식 option 2" 드롭다운이 편집기 아래에 따라붙었다.
+   `ui:field`는 값을 편집하는 방식만 갈아끼우지, 선택기를 없애지 않는다. 폼에 주기 전에
+   **스키마에서 접었다**(`collapseOptionalSchemas`). 고를 것이 없는 선택이다 — 분기는 "객체"와 "없음"이고,
+   빈 편집기가 이미 "없음"이다. 접는 것은 **선언된 스키마 필드의 `anyOf: [<object>, {null}]` 한 모양뿐**이다.
+   에디터가 표현 못 하는 분기를 버리면 테넌트가 저장할 수 있는 것이 조용히 좁아진다.
+4. **템플릿 규칙이 템플릿 필드마다 하나씩 붙었다.** `llm`은 템플릿 필드가 둘(system·prompt)이라 320px
+   패널에 일곱 줄짜리 설명이 두 벌 들어갔다. 위젯에서 빼서 폼 바닥에 한 번만 둔다.
+
+**Mutation 20/21 잡힘**
+
+| 변형 | 결과 |
+|---|---|
+| 닫히지 않은 블록이 스캔을 멈추지 않음 | killed |
+| 주석·구문 블록이 불투명하지 않음 (각각) | killed |
+| 문자열 안의 `}}`가 참조를 끝냄 | killed |
+| 여는 대시(`{{-`) 유지 | killed |
+| `openReferenceAt`이 이미 닫힌 참조를 무시 | killed |
+| 필터 뒤에서도 참조를 제안 | killed |
+| `end` 노드를 제안 | killed |
+| id 대신 라벨을 삽입 | killed |
+| 보장 미상(`null`)을 `false`로 보고 | killed |
+| 스칼라에서 끝난 참조에 계속 제안 | killed |
+| 라벨로 거르지 않음 | killed |
+| 선택 프로퍼티 표시 제거 | killed |
+| `integer`가 `number`로 안 감 | killed |
+| `additionalProperties: true`가 미상이 아님 | **처음엔 survived** → 테스트 추가 후 killed |
+| properties 없는 객체가 "없음"으로 떨어짐 | killed |
+| 배열 인덱스가 `items`로 안 들어감 | killed |
+| 모양으로 객체 추론 제거 | killed |
+| 보장 미상이 빈 배열이 됨 | killed |
+| 노드 라벨 무시 | killed |
+| **스캔 재개 위치를 `at + close.length` → `at`** | **survived (등가 변형)** |
+
+마지막은 등가 변형이다. 닫는 구분자(`}}`·`%}`·`#}`)의 문자들은 어느 여는 구분자도 아니므로, 스캐너가
+그 안에서 재개해도 한 글자씩 넘기며 같은 상태로 수렴한다. 구분하는 입력을 만들 수 없어서 둘 다 그대로
+뒀다 — 테스트를 위한 테스트를 더하지 않았다.
+
+(하네스 메모: 내 mutation 스크립트가 `|`를 필드 구분자로 썼는데 sed 식 안의 `||`와 부딪혀 넷이 조용히
+NO-OP으로 빠졌다. 구분자를 바꿔 따로 돌렸다. **"NO-OP"을 출력하게 해둔 덕에 통과로 착각하지 않았다.**)
+
+**남은 공백.**
+- **시크릿 자동완성이 없다.** `{{ secret.NAME }}`은 http_request의 url·headers·body에서만 합법이고
+  (`refs.py::_check_ref`), 이름은 `/secrets`에서 온다. 필드 문맥과 새 엔드포인트가 둘 다 필요해서
+  Task 10 범위가 아니다. 사람이 직접 칠 수는 있고 엔진이 검증한다.
+- **타입 불일치 인라인 표시**(MVP 9장)는 Task 13의 배지가 한다. 여기서는 후보 목록의 회색 글씨로
+  형식을 보여주는 데까지만 했다.
+- **스키마 필드는 아직 textarea다.** Task 11이 폼 편집기로 바꾼다.
+
+**검증**: `pnpm test` 293 passed (22 files), `e2e` 5 passed (chromium), `typecheck`·`lint` clean,
+`build` 성공, `test:bundle` 통과, 실제 엔진에 붙은 브라우저에서 자동완성 → 칩 → 규칙 펼치기까지 확인.
