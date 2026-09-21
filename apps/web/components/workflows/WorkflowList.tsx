@@ -1,14 +1,17 @@
 "use client"
 
 import { useRouter } from "next/navigation"
-import { useState, useSyncExternalStore } from "react"
+import { useRef, useState, useSyncExternalStore } from "react"
 
+import { downloadText } from "@/lib/browser/download"
+import { exportFileName, importedName, parseImport, serialize, MAX_IMPORT_BYTES } from "@/lib/dsl/transfer"
 import { localTime } from "@/lib/format/time"
 import {
   createWorkflow,
   deleteWorkflow,
   listWorkflows,
-  renameWorkflow,
+  openDraft,
+  putWorkflow,
   type WorkflowSummary,
 } from "@/lib/engine/workflows"
 
@@ -41,9 +44,50 @@ export function WorkflowList({ initial }: { initial: WorkflowSummary[] }) {
     else setError(result.message)
   }
 
+  /** Import always makes a **new** workflow; it never replaces an open one.
+   *
+   * A file picker is one mis-click away from the wrong file, and replacing a draft with it would be a
+   * destructive action with no undo. Creating means the worst case is one workflow to delete.
+   */
+  async function onImport(file: File) {
+    setError(null)
+    // The `File`'s own size first, so a huge file is never read into a string at all.
+    if (file.size > MAX_IMPORT_BYTES) {
+      setError(`파일이 너무 큽니다 (최대 ${Math.floor(MAX_IMPORT_BYTES / 1024)}KB).`)
+      return
+    }
+    setBusy(true)
+    const text = await file.text().catch(() => null)
+    const read = text === null ? { ok: false as const, reason: "파일을 읽지 못했습니다." } : parseImport(text)
+    if (!read.ok) {
+      setBusy(false)
+      setError(read.reason)
+      return
+    }
+
+    const name = importedName(file.name)
+    const created = await createWorkflow(name)
+    if (created.outcome !== "ok") {
+      setBusy(false)
+      setError(created.message)
+      return
+    }
+    // Two calls because `POST` takes only a name: the document goes in the `PUT` that follows. If this
+    // one fails the empty workflow is left behind rather than silently removed -- deleting on a failed
+    // save is how an import that actually half-succeeded disappears without a trace.
+    const saved = await putWorkflow(created.value.id, name, read.dsl, created.value.revision)
+    setBusy(false)
+    if (saved.outcome !== "ok") {
+      setError(`${saved.message} '${name}' 워크플로는 비어 있는 채로 만들어졌습니다.`)
+      void refresh()
+      return
+    }
+    router.push(`/workflows/${created.value.id}`)
+  }
+
   return (
     <div>
-      <div className="mb-4 flex items-center">
+      <div className="mb-4 flex items-center gap-2">
         <button
           type="button"
           onClick={() => void onCreate()}
@@ -53,6 +97,7 @@ export function WorkflowList({ initial }: { initial: WorkflowSummary[] }) {
         >
           새 워크플로
         </button>
+        <ImportButton busy={busy} onPick={(file) => void onImport(file)} />
       </div>
 
       {error === null ? null : (
@@ -97,6 +142,45 @@ export function WorkflowList({ initial }: { initial: WorkflowSummary[] }) {
   )
 }
 
+/** A file picker that looks like the buttons beside it.
+ *
+ * A bare `<input type="file">` cannot be styled to match, so the input is hidden and a real button
+ * opens it. Hidden with `sr-only` rather than `display: none`, so it keeps its accessible name and a
+ * screen reader can still reach it directly.
+ *
+ * The value is cleared after each pick: picking the *same* file twice in a row fires no `change` event
+ * otherwise, which looks exactly like the import silently failing.
+ */
+function ImportButton({ busy, onPick }: { busy: boolean; onPick: (file: File) => void }) {
+  const input = useRef<HTMLInputElement>(null)
+
+  return (
+    <>
+      <input
+        ref={input}
+        type="file"
+        accept="application/json,.json"
+        aria-label="워크플로 파일"
+        className="sr-only"
+        onChange={(event) => {
+          const file = event.target.files?.[0]
+          event.target.value = ""
+          if (file !== undefined) onPick(file)
+        }}
+      />
+      <button
+        type="button"
+        onClick={() => input.current?.click()}
+        disabled={busy}
+        className="border border-ink-600 px-3 py-1.5 text-xs text-fg-muted disabled:opacity-40"
+        style={{ borderRadius: "var(--radius)" }}
+      >
+        가져오기
+      </button>
+    </>
+  )
+}
+
 function Row({
   workflow,
   index,
@@ -129,18 +213,30 @@ function Row({
     setBusy(true)
     // `PUT` replaces the row, so the draft has to be fetched and sent back with the new name. Sending
     // an empty document here would wipe the workflow -- the rename is the smallest possible edit.
-    const opened = await fetch(`/api/engine/workflows/${encodeURIComponent(workflow.id)}`)
-      .then((response) => (response.ok ? (response.json() as Promise<{ draftDsl?: unknown; revision?: number }>) : null))
-      .catch(() => null)
-    if (opened === null || typeof opened.revision !== "number") {
+    const opened = await openDraft(workflow.id)
+    if (opened.outcome !== "ok") {
       setBusy(false)
       onError("이름을 바꾸지 못했습니다. 다시 시도해 주세요.")
       return
     }
-    const result = await renameWorkflow(workflow.id, name.trim(), opened.draftDsl ?? {}, opened.revision)
+    const result = await putWorkflow(workflow.id, name.trim(), opened.value.draftDsl ?? {}, opened.value.revision)
     setBusy(false)
     if (result.outcome === "ok") onRenamed()
     else onError(result.message)
+  }
+
+  async function exportFile() {
+    setBusy(true)
+    const opened = await openDraft(workflow.id)
+    setBusy(false)
+    if (opened.outcome !== "ok") {
+      onError(opened.message)
+      return
+    }
+    // The stored draft, written out as-is. Not re-read through `readDocument` first: export should
+    // hand back what is stored, and filling in positions here would change the file a round trip
+    // produces.
+    downloadText(exportFileName(workflow.name), serialize(opened.value.draftDsl))
   }
 
   async function remove() {
@@ -190,6 +286,9 @@ function Row({
       <td className="py-2 text-right">
         <button type="button" onClick={onRename} disabled={busy} className="mr-3 text-xs text-fg-muted underline disabled:opacity-40">
           이름 바꾸기
+        </button>
+        <button type="button" onClick={() => void exportFile()} disabled={busy} className="mr-3 text-xs text-fg-muted underline disabled:opacity-40">
+          내보내기
         </button>
         <button type="button" onClick={() => void remove()} disabled={busy} className="text-xs text-fg-muted underline disabled:opacity-40">
           삭제

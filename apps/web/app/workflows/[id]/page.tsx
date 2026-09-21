@@ -77,6 +77,7 @@ export default async function Page({
     <Canvas
       types={nodeTypes}
       workflowId={opened.view.id}
+      workflowName={opened.view.name}
       initialDsl={read.dsl}
       initialRevision={opened.view.revision}
       initialRunId={run}

@@ -15,7 +15,9 @@ import { useStore } from "zustand"
 
 import "@xyflow/react/dist/style.css"
 
+import { downloadText } from "@/lib/browser/download"
 import { emptyDsl, type EditorDsl } from "@/lib/dsl/document"
+import { exportFileName, serialize } from "@/lib/dsl/transfer"
 import { sizeChanges, toFlowEdges, toFlowNodes, type NodeChange, type Size } from "@/lib/dsl/flow"
 import { anyNodeVisible } from "@/lib/dsl/viewport"
 import type { NodeType } from "@/lib/palette"
@@ -56,6 +58,8 @@ export interface CanvasProps {
   initialRevision?: number
   /** `?run=` from the URL, which a reload has to restore before any stream opens (3 설계 §8.3). */
   initialRunId?: string
+  /** Only for naming an exported file. Absent on the fixtures, which have no workflow behind them. */
+  workflowName?: string
 }
 
 export function Canvas(props: CanvasProps) {
@@ -66,7 +70,7 @@ export function Canvas(props: CanvasProps) {
   )
 }
 
-function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRunId }: CanvasProps) {
+function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRunId, workflowName }: CanvasProps) {
   // One store per editor screen, created once. React Flow renders a view of its document; it never
   // holds the document itself (3 설계 §5.1).
   const [store] = useState(() => createGraphStore(initialDsl ?? emptyDsl()))
@@ -200,6 +204,15 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
     [state],
   )
 
+  /** Write the document **on screen** to a file, not the one last saved.
+   *
+   * They differ while an autosave is in flight or a conflict is unresolved, and what someone means by
+   * "export this" is what they are looking at.
+   */
+  const onExport = useCallback(() => {
+    downloadText(exportFileName(workflowName ?? "workflow"), serialize(state.dsl))
+  }, [state.dsl, workflowName])
+
   const onAutoLayout = useCallback(async () => {
     await state.autoLayout()
     // Auto-layout always reframes: even when a node happens to stay in view, the new arrangement is
@@ -270,6 +283,7 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
           onRun={onRun}
           onCancel={onCancel}
           onAutoLayout={onAutoLayout}
+          onExport={onExport}
         />
       </div>
       {selected !== undefined ? (
@@ -379,6 +393,7 @@ function Toolbar({
   onRun,
   onCancel,
   onAutoLayout,
+  onExport,
 }: {
   state: GraphState
   save: SaveState
@@ -388,6 +403,7 @@ function Toolbar({
   onRun: () => void
   onCancel: () => Promise<void>
   onAutoLayout: () => Promise<void>
+  onExport: () => void
 }) {
   return (
     <div className="pointer-events-none absolute left-4 top-4 flex flex-col items-start gap-2">
@@ -408,6 +424,16 @@ function Toolbar({
           style={{ borderRadius: "var(--radius)" }}
         >
           자동 정렬
+        </button>
+        <button
+          type="button"
+          onClick={onExport}
+          disabled={state.dsl.nodes.length === 0}
+          title="이 워크플로를 JSON 파일로 저장합니다"
+          className="px-2 py-1 text-xs disabled:opacity-35"
+          style={{ borderRadius: "var(--radius)" }}
+        >
+          내보내기
         </button>
       </div>
       <div className="pointer-events-auto border border-ink-600 bg-ink-800 px-2 py-1.5" style={{ borderRadius: "var(--radius)" }}>

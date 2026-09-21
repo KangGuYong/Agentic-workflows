@@ -61,8 +61,13 @@ export async function createWorkflow(name: string): Promise<MutationResult<Workf
     : { outcome: "ok", value: created }
 }
 
-/** Rename. The draft and revision ride along because `PUT` replaces the whole row. */
-export async function renameWorkflow(
+/** Replace a workflow's name **and** draft in one write.
+ *
+ * `PUT` replaces the whole row, so both always travel together: renaming sends the draft back
+ * unchanged, and importing sends the stored name back unchanged. Naming it for one of those two uses
+ * would make the other read like a mistake.
+ */
+export async function putWorkflow(
   id: string,
   name: string,
   draftDsl: unknown,
@@ -78,12 +83,25 @@ export async function renameWorkflow(
     return { outcome: "blocked", message: messageOf(body, "다른 곳에서 먼저 저장했습니다") }
   }
   if (!response.ok) {
-    return { outcome: "failed", message: messageOf(body, `이름을 바꾸지 못했습니다 (${response.status})`) }
+    return { outcome: "failed", message: messageOf(body, `저장하지 못했습니다 (${response.status})`) }
   }
   const next = (body as { revision?: unknown } | null)?.revision
   return typeof next === "number"
     ? { outcome: "ok", value: next }
     : { outcome: "failed", message: "저장 응답을 이해하지 못했습니다" }
+}
+
+/** Read a workflow's stored draft. Used by rename (which must send it back) and by export. */
+export async function openDraft(id: string): Promise<MutationResult<{ draftDsl: unknown; revision: number }>> {
+  const response = await fetch(`/api/engine/workflows/${encodeURIComponent(id)}`)
+  const body: unknown = await response.json().catch(() => null)
+  if (!response.ok) {
+    return { outcome: "failed", message: messageOf(body, `워크플로를 불러오지 못했습니다 (${response.status})`) }
+  }
+  const { draftDsl, revision } = (body ?? {}) as { draftDsl?: unknown; revision?: unknown }
+  return typeof revision === "number"
+    ? { outcome: "ok", value: { draftDsl, revision } }
+    : { outcome: "failed", message: "워크플로 응답을 이해하지 못했습니다" }
 }
 
 export async function deleteWorkflow(id: string): Promise<MutationResult> {
