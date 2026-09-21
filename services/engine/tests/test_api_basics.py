@@ -53,6 +53,16 @@ async def test_node_types_describe_the_registry(api):
     assert types["condition"]["isBranch"] is True and types["start"]["defaultPolicy"] is None
 
 
+async def test_every_node_type_uses_one_of_the_palette_categories(api):
+    """The editor's palette groups by `category`, so a stray spelling becomes a stray group on screen
+    (3 설계 §4.2). Pinned as a set rather than a per-node assertion so a new node type has to choose one
+    of these rather than inventing a sixth group nobody styled."""
+    response = await api.get("/node-types")
+
+    categories = {item["category"] for item in response.json()["nodeTypes"]}
+    assert categories == {"IO", "Logic", "AI", "Human", "Action"}
+
+
 async def test_an_unknown_path_uses_the_error_format(api):
     response = await api.get("/nope")
 
