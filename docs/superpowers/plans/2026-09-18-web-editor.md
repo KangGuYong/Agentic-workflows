@@ -628,18 +628,18 @@ Against the real stack (3 설계 §11). `playwright.config.ts` has `webServer` d
 
 ## Task 22: Documentation and final verification
 
-- [ ] `apps/web/README.md`: how to run in dev against a local engine, the two environment variables, why the proxy exists.
-- [ ] Repo root `README.md`: what the project is, the three subsystems, `docker compose up`, the first-run steps (create a secret, build a workflow, run it).
-- [ ] `services/engine/README.md`: link to the editor's template help section, and note that the engine's template rules are mirrored there.
-- [ ] Update `docs/superpowers/plans/2026-09-11-roadmap.md`: Plan 3 status → written/landed, and record what moved past the MVP.
-- [ ] Final verification, all of it, recorded with real output:
+- [x] `apps/web/README.md`: how to run in dev against a local engine, the two environment variables, why the proxy exists.
+- [x] Repo root `README.md`: what the project is, the three subsystems, `docker compose up`, the first-run steps (create a secret, build a workflow, run it).
+- [x] `services/engine/README.md`: link to the editor's template help section, and note that the engine's template rules are mirrored there.
+- [x] Update `docs/superpowers/plans/2026-09-11-roadmap.md`: Plan 3 status → written/landed, and record what moved past the MVP.
+- [x] Final verification, all of it, recorded with real output:
   - `pnpm test`, `pnpm lint`, `pnpm typecheck`, `pnpm build` in `apps/web`
   - `pnpm test:bundle` (the token-leak grep from Task 2)
   - `uv run pytest -q`, `uv run ruff check .` in `services/engine`
   - `docker compose config -q`
   - `pnpm e2e` against the running stack
   - Every commit carries the trailer: `git log --format='%b' origin/feat/runtime-core..HEAD | grep -c Co-Authored-By`
-- [ ] Commit: `docs: document the editor and how to run the whole stack`
+- [x] Commit: `docs: document the editor and how to run the whole stack`
 
 ---
 
@@ -2295,3 +2295,49 @@ healthy. 컨테이너가 서비스하는 편집기를 브라우저로 열어 목
 **검증**: `pnpm e2e` 15 passed **두 번 연속**(fixture 10 + stack 5), `pnpm test` 758 passed,
 `typecheck`·`lint` clean, `build` 성공, `test:bundle` 통과, 엔진 `pytest` 1377 passed,
 `ruff` clean.
+
+---
+
+### Task 22 — 문서와 최종 검증
+
+저장소 루트 `README.md`를 새로 썼고(없었다), `apps/web/README.md`에 두 E2E 프로젝트·컨테이너·템플릿
+규칙 절을, `services/engine/README.md`에 「Templates」 절을 더해 **양쪽이 서로를 가리키게** 했다.
+편집기의 도움말은 엔진 규칙의 **사본**이고, 사본이라는 사실이 이제 두 문서에 다 적혀 있다.
+
+**README에 쓴 UI 문구를 코드에서 확인했고, 하나가 틀렸다.** 처음에 「시작 노드를 눌러 `입력 스키마`에
+필드를 더한다」라고 썼는데 그런 이름의 라벨은 없다 — 스키마 에디터의 제목은 엔진 설정 스키마의 RJSF
+`title`(`Inputs`)에서 오고, 실제로 눌리는 것은 `+ 필드 추가`다. 화면에 없는 이름을 안내에 적는 것은
+독자를 잃어버리게 하는 일이라 코드에 있는 문구로 고쳤다(`새 워크플로`·`시크릿`·`저장됨`·`실행 기록`은
+모두 확인했다).
+
+**로드맵에 쓴 "워크플로 이름을 바꿀 수 없다"도 틀렸다.** Task 12 때의 메모를 그대로 옮긴 것이었는데
+Task 19가 이름 바꾸기를 넣었다. 다만 `PUT`이 이름과 문서를 함께 받으므로 목록은 워크플로를 먼저 읽어
+초안을 그대로 돌려보낸다 — API가 허용하는 가장 작은 편집이지만 리비전을 하나 쓰고, 편집기가 열려
+있으면 409 경합이 가능하다. 그 사실을 적었다.
+
+**엔진 README의 Deployment 절이 낡아 있었다.** "Postgres, Redis, the API and one or more workers"는
+Task 20이 `web` 서비스를 더하기 전 이야기다. 다섯 서비스로 고쳤다.
+
+**최종 검증 — 전부 실제 출력.**
+
+| 검사 | 결과 |
+|---|---|
+| `apps/web` `pnpm test` | 58 files, **758 passed** |
+| `apps/web` `pnpm typecheck` | clean |
+| `apps/web` `pnpm lint` | clean |
+| `apps/web` `pnpm build` | Compiled successfully, 6 routes |
+| `apps/web` `pnpm test:bundle` | `OK: the engine token cannot reach the browser.` |
+| `apps/web` `pnpm e2e` | **15 passed** (fixture 10 + stack 5), 떠 있는 compose 스택 대상 |
+| `services/engine` `uv run pytest -q` | **1377 passed**, 3 warnings |
+| `services/engine` `uv run ruff check .` | All checks passed |
+| `docker compose -f deploy/docker-compose.yml config -q` | 조용함 |
+
+**트레일러**: `origin/master..HEAD` 24개 커밋 중 **22개가 작성한 커밋이고 전부 트레일러를 달고 있다.**
+나머지 둘(`fca0b57`, `3a6eb9c`)은 병합 커밋이라 본문이 없다 — 계획서의 `grep -c`가 24가 아니라 22를
+내놓는 이유이고, 빠진 것이 아니다.
+
+**남은 공백.**
+- 루트 README의 「처음 한 바퀴」는 문구를 코드와 대조했을 뿐 **문서 자체를 자동으로 검사하지는 않는다.**
+  라벨이 바뀌면 README가 조용히 낡는다. E2E가 같은 문구를 단언하고 있어 완전히 방치된 것은 아니다.
+- 샌드박스에서 web 이미지를 빌드하려면 여전히 CA 우회가 필요하다. 이번에도 `Dockerfile.sandbox.tmp`로
+  검증하고 **지웠다** — Task 20과 같은 이유다.

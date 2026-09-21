@@ -85,8 +85,9 @@ a container healthcheck must send the same bearer token, e.g.
 
 ## Deployment
 
-`deploy/docker-compose.yml` runs the whole engine: Postgres, Redis, the API and one or more workers.
-Ollama is **not** bundled — it already runs on the on-prem GPU host, and `OLLAMA_BASE_URL` points at it.
+`deploy/docker-compose.yml` runs the whole stack: Postgres, Redis, the API, one or more workers and the
+web editor (`apps/web`, published on `WEB_PORT`). Ollama is **not** bundled — it already runs on the
+on-prem GPU host, and `OLLAMA_BASE_URL` points at it.
 (`deploy/docker-compose.dev.yml` is the development stack instead: plaintext credentials, ports published
 to the host, no engine containers.)
 
@@ -100,7 +101,7 @@ python -c "import secrets,string; a=string.ascii_letters+string.digits; print(''
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 
 docker compose up -d --build
-docker compose ps             # postgres/redis/api healthy, worker running
+docker compose ps             # postgres/redis/api/web healthy, worker running
 ```
 
 Every route, `/healthz` included, requires `Authorization: Bearer $ENGINE_API_TOKEN`; the API container's
@@ -137,6 +138,27 @@ and `http_request`.
   reference; the recorded node input keeps an opaque per-run marker, or `[REDACTED]` where the field is a
   credential header; anything the server echoes back comes out `[REDACTED]`. The value itself exists in
   plaintext only inside one `http_request` call.
+
+## Templates
+
+`{{ }}` in a node's config is Jinja-shaped but **not Jinja**: `engine/templates/parser.py` rejects most of
+the language and `engine/templates/env.py` allows a short list of filters. The rules a workflow author
+actually hits:
+
+- Join values by writing them side by side — `{{ a }}{{ b }}`. `~` and string `+` are rejected.
+- Arithmetic is numbers only.
+- Loops cannot nest, and nesting depth is capped at 50.
+- One rendered field is at most 1,000,000 characters.
+- `default(x)` replaces a **missing** value, not `null`. Pass `default(x, true)` when null should count
+  as missing too.
+- In a `template` node with `format: "json"`, each `{{ }}` inserts one JSON **value**: write
+  `{"name": {{ start.name }}}` — no quotes around it, and no `| tojson` (that would double-encode).
+  Build strings in a text template node first.
+- Values — inputs, node outputs, edited approval values, default outputs — nest at most 100 levels.
+
+The editor shows the same list in the node panel under `템플릿 작성 규칙`
+(`apps/web/components/panel/TemplateHelp.tsx`). **That is a copy for readers, not a second source of
+truth**: this module is the rule, and changing it here means changing the editor's help text too.
 
 ## Operations
 
