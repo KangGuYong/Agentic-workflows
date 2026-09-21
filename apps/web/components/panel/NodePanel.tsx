@@ -54,7 +54,13 @@ export function NodePanel({
   const active = (tab === "policy" && !hasPolicy) || (tab === "trace" && !hasTrace) ? "settings" : tab
 
   return (
-    <aside className="flex w-80 shrink-0 flex-col border-l border-ink-600 bg-ink-800">
+    // Named: the page has two complementary landmarks -- the palette and this -- and a screen reader
+    // announces an unnamed one only as "complementary", which tells a reader nothing about which is
+    // which.
+    <aside
+      aria-label="노드 설정"
+      className="flex w-80 shrink-0 flex-col border-l border-ink-600 bg-ink-800"
+    >
       <header className="border-b border-ink-600 px-4 py-3">
         <p className="text-sm font-semibold">{node.label ?? nodeType?.label ?? node.type}</p>
         <p className="instrument-label mt-1">{node.id}</p>

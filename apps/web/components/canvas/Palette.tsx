@@ -16,7 +16,7 @@ export const DRAG_TYPE = "application/x-workflow-node-type"
 
 export function Palette({ types }: { types: NodeType[] }) {
   return (
-    <aside className="w-52 shrink-0 overflow-y-auto border-r border-ink-600 bg-ink-800">
+    <aside aria-label="노드 팔레트" className="w-52 shrink-0 overflow-y-auto border-r border-ink-600 bg-ink-800">
       <p className="instrument-label border-b border-ink-600 px-4 py-3">PALETTE</p>
       {groupByCategory(types).map((group) => (
         <section key={group.category} className="border-b border-ink-600 px-4 py-3">

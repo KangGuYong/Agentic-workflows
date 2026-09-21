@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest"
 import type { NodeRunState } from "@/lib/run/events"
 import type { Issue } from "@/store/validation"
 
-import { movedPositions, toFlowEdges, toFlowNodes } from "./flow"
+import { movedPositions, sizeChanges, toFlowEdges, toFlowNodes } from "./flow"
 import type { EditorDsl } from "./document"
 
 const DSL: EditorDsl = {
@@ -195,5 +195,62 @@ describe("run state on the canvas", () => {
     })
 
     expect(nodes.find((node) => node.id === "llm_1")?.data.run?.status).toBe("default")
+  })
+})
+
+describe("measured sizes", () => {
+  const GRAPH: EditorDsl = {
+    version: "1",
+    nodes: [
+      { id: "start", type: "start", position: { x: 0, y: 0 } },
+      { id: "llm_1", type: "llm", position: { x: 1, y: 1 } },
+    ],
+    edges: [],
+  }
+
+  it("hands a known size back to React Flow", () => {
+    // Without this the node is one React Flow has never measured, which it draws hidden. The canvas
+    // going blank mid-run was this, and no test of the *document* could have caught it.
+    const nodes = toFlowNodes(GRAPH, { measured: { start: { width: 232, height: 77 } } })
+
+    expect(nodes.find((node) => node.id === "start")?.measured).toEqual({ width: 232, height: 77 })
+  })
+
+  it("leaves the key off a node whose size is not known yet", () => {
+    // Absent, not `{width: undefined}`: the node has genuinely not been measured, and saying so is what
+    // makes React Flow measure it.
+    const nodes = toFlowNodes(GRAPH, { measured: { start: { width: 232, height: 77 } } })
+    const llm = nodes.find((node) => node.id === "llm_1")
+
+    expect(llm).not.toHaveProperty("measured")
+  })
+
+  it("keeps sizes apart by node", () => {
+    const nodes = toFlowNodes(GRAPH, {
+      measured: { start: { width: 10, height: 20 }, llm_1: { width: 30, height: 40 } },
+    })
+
+    expect(nodes.map((node) => node.measured)).toEqual([
+      { width: 10, height: 20 },
+      { width: 30, height: 40 },
+    ])
+  })
+
+  it("reads the measurements out of a change list", () => {
+    const sizes = sizeChanges([
+      { id: "start", type: "dimensions", dimensions: { width: 232, height: 77 } },
+      { id: "llm_1", type: "position", position: { x: 5, y: 6 } },
+      { id: "llm_1", type: "select", selected: true },
+    ])
+
+    expect(sizes).toEqual({ start: { width: 232, height: 77 } })
+  })
+
+  it("ignores a dimensions change that carries no dimensions", () => {
+    // Same shape as the position change React Flow sends at the end of a drag: the type is there and
+    // the payload is not, and reading it anyway would write undefined over a real measurement.
+    // `toStrictEqual`, because `toEqual` treats `{start: undefined}` and `{}` as the same object and
+    // writing the undefined through is exactly the mistake being tested for.
+    expect(sizeChanges([{ id: "start", type: "dimensions" }])).toStrictEqual({})
   })
 })

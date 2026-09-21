@@ -612,17 +612,17 @@ The hardest UI in this plan. 3 설계 §6.
 
 Against the real stack (3 설계 §11). `playwright.config.ts` has `webServer` disabled — the stack is started by the operator or CI, not by Playwright, because it needs Postgres and Redis too.
 
-- [ ] `e2e/build-and-run.spec.ts`: place `template` → connect start → template → end → fill the template with `{{ start.name }}` chosen from autocomplete → run with `{"name": "세계"}` → assert the output contains 세계.
-- [ ] `e2e/approval.spec.ts`: a workflow with `human_approval` → run → dialog appears → 승인 → run succeeds → the trace shows `decision: "approve"`.
-- [ ] `e2e/conflict.spec.ts`: two browser contexts on the same workflow → both edit → the second save shows the conflict dialog → 불러오기 replaces the document.
-- [ ] `e2e/reload.spec.ts`: start a run that waits on approval → reload → the dialog is still there and the node colours are restored.
-- [ ] `e2e/validation.spec.ts`: an unconnected handle → red badge → run button disabled → connect it → enabled.
-- [ ] Every `waitFor` has an explicit timeout. No `waitForTimeout` as a synchronisation device.
-- [ ] Each spec creates its own workflow and deletes it at the end, so specs can run in any order.
+- [x] `e2e/build-and-run.spec.ts`: place `template` → connect start → template → end → fill the template with `{{ start.name }}` chosen from autocomplete → run with `{"name": "세계"}` → assert the output contains 세계.
+- [x] `e2e/approval.spec.ts`: a workflow with `human_approval` → run → dialog appears → 승인 → run succeeds → the trace shows `decision: "approve"`.
+- [x] `e2e/conflict.spec.ts`: two browser contexts on the same workflow → both edit → the second save shows the conflict dialog → 불러오기 replaces the document.
+- [x] `e2e/reload.spec.ts`: start a run that waits on approval → reload → the dialog is still there and the node colours are restored.
+- [x] `e2e/validation.spec.ts`: an unconnected handle → red badge → run button disabled → connect it → enabled.
+- [x] Every `waitFor` has an explicit timeout. No `waitForTimeout` as a synchronisation device.
+- [x] Each spec creates its own workflow and deletes it at the end, so specs can run in any order.
 
 **Verification**
-- [ ] `pnpm e2e` passes against a freshly started stack, twice in a row.
-- [ ] Commit: `test(web): end-to-end coverage of the five MVP scenarios`
+- [x] `pnpm e2e` passes against a freshly started stack, twice in a row.
+- [x] Commit: `test(web): end-to-end coverage of the five MVP scenarios`
 
 ---
 
@@ -2236,3 +2236,62 @@ healthy. 컨테이너가 서비스하는 편집기를 브라우저로 열어 목
 
 **검증**: `pnpm test` 753 passed (58 files), `e2e` 10 passed, `typecheck`·`lint` clean,
 `build` 성공, `test:bundle` 통과, `docker compose up -d`로 5개 서비스 healthy.
+
+---
+
+### Task 21 — 다섯 시나리오 end-to-end
+
+`e2e/stack/`에 다섯 개 스펙과 공용 `support.ts`. 컨테이너로 뜬 진짜 스택(web·api·worker·postgres·redis)을
+브라우저로 몰아서 확인한다. 스펙은 워크플로를 **편집기 자신의 BFF 프록시**로 만든다 — 테스트 프로세스에
+토큰이 없어도 되고, 프록시가 깨지면 테스트가 우회하지 않고 같이 깨진다.
+
+**E2E가 유닛 테스트로는 절대 잡을 수 없는 렌더링 결함을 하나 찾았다 — 실행 후 캔버스가 통째로 사라진다.**
+증상은 approval 스펙이 노드를 클릭하지 못하고 60초 타임아웃으로 죽는 것이었다. 같은 시나리오를 8번 돌려
+노드의 인라인 스타일을 찍어 보니 **8번 중 2번, 세 노드 전부가 `visibility: hidden`으로 3초 넘게 그대로**
+있었다. 한 프레임 깜빡임이 아니라 영구히 빈 화면이다.
+
+원인은 React Flow를 controlled로 쓰는 방식에 있었다. `adoptUserNodes`는 노드 객체의 **신원이 바뀌면**
+내부 노드를 다시 만들면서 `measured`를 `userNode.measured`에서만 가져온다(`@xyflow/system` 1692행).
+`toFlowNodes`는 `stream.nodes`나 `issues`가 바뀔 때마다 노드 객체를 새로 만드는데 `measured`를 실어
+보내지 않으므로, 그때마다 모든 노드가 "측정된 적 없는 노드"가 되어 `visibility: hidden`으로 그려지고
+`handleBounds`까지 버려진다(1641행). 보통은 ResizeObserver가 곧 다시 측정하지만 **크기가 그대로면
+콜백이 오지 않는다** — 그래서 영구히 숨은 채로 남는다. controlled 모드에서 React Flow가 치수를
+`dimensions` 변경으로 한 번 알려 주는 것을 `onNodesChange`가 버리고 있던 것이 진짜 빠진 조각이었다.
+
+고친 방법은 그 계약을 지키는 것이다. `sizeChanges()`가 변경 목록에서 치수를 읽고, Canvas가 그것을
+`useState`로 들고(문서가 아니라 **이 브라우저의 레이아웃 사실**이므로 `dsl_hash`에 들어가면 안 된다),
+`toFlowNodes`가 `measured`로 돌려준다. 고치고 나서 10번 중 10번 모두 정상, 스택 스펙 전체 시간도
+1.4분 → 25초로 줄었다(숨은 노드를 기다리던 시간이었다).
+
+**두 번째 드래그가 아무것도 하지 않던 것도 같은 부류의 실제 문제였다.** 노드를 놓으면 그 노드가 선택되고
+320px 노드 패널이 열리는데, 그러면 캔버스가 좁아져 `end` 노드가 패널 **뒤로** 들어간다. DOM에는 있고
+`toBeVisible`도 통과하지만 마우스는 닿지 않는다. 그래서 `connect()`는 드래그 전에 양쪽 핸들 중심에
+`elementFromPoint`를 찍어 **무엇이 가리고 있는지를 이름으로 말하고** 실패한다 — "엣지가 안 생겼다"보다
+훨씬 쓸모 있는 실패다.
+
+**두 `aside`에 이름을 붙였다.** 팔레트와 노드 패널 둘 다 이름 없는 complementary 랜드마크여서 스크린
+리더가 "complementary"를 두 번 읽을 뿐 어느 쪽인지 말해 주지 못했다. 접근성 개선이면서 테스트가 패널을
+가리킬 안정적인 손잡이이기도 하다.
+
+**대기는 전부 UI가 보여 주는 것에 대한 단언이고 모두 상한이 있다.** `waitForTimeout`을 동기화로 쓴 곳은
+없다. 각 스펙은 자기 워크플로를 만들고 지우며, 승인에서 멈춘 실행은 지우기 전에 취소한다(엔진이 실행 중인
+워크플로 삭제를 거부한다).
+
+**Mutation 4/4 잡힘** (`flow.ts`의 새 코드)
+
+| 변형 | 결과 |
+|---|---|
+| `dimensions` 페이로드 검사 제거 | killed (`toStrictEqual` 필요 — `toEqual`은 `{start: undefined}`와 `{}`를 같게 본다) |
+| 읽는 변경 종류를 `position`으로 | killed |
+| 크기를 모를 때도 `measured` 설정 | killed |
+| `view.measured`를 무시 | killed |
+
+**남은 공백.**
+- `measured`는 노드가 지워져도 남는다. 워크플로 하나의 노드 수는 엔진이 제한하고 같은 id가 되살아나면
+  같은 크기이므로 실질적인 문제는 없지만, 지우는 쪽이 더 깔끔하긴 하다.
+- 스택 스펙은 Playwright가 띄우지 않는다. 다섯 컨테이너를 테스트 러너가 올리는 것은 배포를 시작하는
+  일이지 배포를 시험하는 일이 아니다. `docker compose up -d`는 운영자나 CI의 몫이다.
+
+**검증**: `pnpm e2e` 15 passed **두 번 연속**(fixture 10 + stack 5), `pnpm test` 758 passed,
+`typecheck`·`lint` clean, `build` 성공, `test:bundle` 통과, 엔진 `pytest` 1377 passed,
+`ruff` clean.

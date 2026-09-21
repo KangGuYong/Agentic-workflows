@@ -23,11 +23,27 @@ export interface FlowNodeData extends Record<string, unknown> {
   run: { status: StatusId; tokens: string } | null
 }
 
+export interface Size {
+  width: number
+  height: number
+}
+
 export interface FlowNode {
   id: string
   type: "workflow"
   position: XY
   data: FlowNodeData
+  /** The size React Flow last measured this node at, handed straight back to it.
+   *
+   * React Flow is used controlled here, and in controlled mode the node objects it is given are the
+   * whole truth: `adoptUserNodes` rebuilds its internal node from each one whenever the object's
+   * identity changes, taking `measured` from the object and nothing else. A node arriving without it
+   * is treated as never measured -- drawn `visibility: hidden` and with its handle bounds discarded --
+   * until a ResizeObserver callback measures it again. That callback never comes when the size has not
+   * changed, so a graph re-derived mid-run (a node event, a validation response) can go blank and stay
+   * blank. Carrying the measurement back is the contract, not an optimisation.
+   */
+  measured?: Size
 }
 
 export interface FlowEdge {
@@ -48,16 +64,22 @@ export interface FlowView {
   issues?: readonly Issue[]
   /** Per-node state from the run event stream, keyed by node id. */
   runNodes?: Record<string, NodeRunState>
+  /** Sizes React Flow has reported, keyed by node id. See `FlowNode.measured`. */
+  measured?: Record<string, Size>
 }
 
 export function toFlowNodes(dsl: EditorDsl, view: FlowView): FlowNode[] {
   const issues = view.issues ?? []
   return dsl.nodes.map((node) => {
     const nodeIssues = issues.filter((issue) => issue.nodeId === node.id)
+    const size = view.measured?.[node.id]
     return {
     id: node.id,
     type: "workflow" as const,
     position: node.position,
+    // Omitted rather than set to undefined when unknown: React Flow reads `measured?.width`, and an
+    // explicit `{width: undefined}` is the same to it as absent but not to a structural comparison.
+    ...(size === undefined ? {} : { measured: size }),
     data: {
       type: node.type,
       // The node's own label, then the type's, then the bare type. A node type the editor has never
@@ -110,7 +132,22 @@ export interface NodeChange {
   id: string
   type: string
   position?: XY
+  dimensions?: Size
   [key: string]: unknown
+}
+
+/** The sizes React Flow just measured, from the same change list `movedPositions` reads.
+ *
+ * React Flow reports a measurement once, as a change. Dropping it -- which is what handling only
+ * `position` and `select` changes does -- means the next re-derived node claims never to have been
+ * measured, and the canvas can go blank. See `FlowNode.measured`.
+ */
+export function sizeChanges(changes: NodeChange[]): Record<string, Size> {
+  const sizes: Record<string, Size> = {}
+  for (const change of changes) {
+    if (change.type === "dimensions" && change.dimensions !== undefined) sizes[change.id] = change.dimensions
+  }
+  return sizes
 }
 
 export function movedPositions(changes: NodeChange[]): Record<string, XY> {

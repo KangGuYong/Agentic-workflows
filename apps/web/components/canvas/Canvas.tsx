@@ -16,7 +16,7 @@ import { useStore } from "zustand"
 import "@xyflow/react/dist/style.css"
 
 import { emptyDsl, type EditorDsl } from "@/lib/dsl/document"
-import { toFlowEdges, toFlowNodes, type NodeChange } from "@/lib/dsl/flow"
+import { sizeChanges, toFlowEdges, toFlowNodes, type NodeChange, type Size } from "@/lib/dsl/flow"
 import { anyNodeVisible } from "@/lib/dsl/viewport"
 import type { NodeType } from "@/lib/palette"
 import { saveDraft } from "@/lib/engine/save"
@@ -133,9 +133,13 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
         : Object.fromEntries(Object.entries(validation.nodes).map(([id, analysis]) => [id, analysis.handles])),
     [validation.nodes],
   )
+  // React Flow measures each node once and reports it as a change; in controlled mode nothing else
+  // remembers it. Held here rather than in the document: it is a fact about this browser's layout, not
+  // something to save or to put in `dsl_hash`.
+  const [measured, setMeasured] = useState<Record<string, Size>>({})
   const nodes = useMemo(
-    () => toFlowNodes(state.dsl, { labels, handles, issues, runNodes: stream.nodes }),
-    [state.dsl, labels, handles, issues, stream.nodes],
+    () => toFlowNodes(state.dsl, { labels, handles, issues, runNodes: stream.nodes, measured }),
+    [state.dsl, labels, handles, issues, stream.nodes, measured],
   )
   // The panel opens on exactly one node; a multi-select has nothing single to configure.
   const selected =
@@ -148,6 +152,16 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
   const onNodesChange = useCallback(
     (changes: RfNodeChange[]) => {
       state.moveNodes(changes as unknown as NodeChange[])
+      const sizes = sizeChanges(changes as unknown as NodeChange[])
+      // Only when something actually differs: a fresh object every time would re-derive every node on
+      // every change and put the canvas back in the state this is here to prevent.
+      setMeasured((previous) =>
+        Object.entries(sizes).every(
+          ([id, size]) => previous[id]?.width === size.width && previous[id]?.height === size.height,
+        )
+          ? previous
+          : { ...previous, ...sizes },
+      )
       const selected = changes.filter((change) => change.type === "select")
       if (selected.length > 0) {
         const chosen = new Set(state.selection.nodes)
