@@ -1,10 +1,11 @@
 "use client"
 
-import { useEffect, useReducer, useRef } from "react"
+import { useCallback, useEffect, useReducer, useRef } from "react"
 
 import {
   applyEvent,
   emptyStream,
+  markCancelling,
   markDisconnected,
   TERMINAL_EVENTS,
   type RunEvent,
@@ -42,15 +43,20 @@ const EVENT_TYPES = [
   "node_token",
 ]
 
-type Action = { kind: "event"; event: RunEvent } | { kind: "disconnected" } | { kind: "reset" }
+type Action =
+  | { kind: "event"; event: RunEvent }
+  | { kind: "disconnected" }
+  | { kind: "cancelling" }
+  | { kind: "reset" }
 
 function reduce(state: StreamState, action: Action): StreamState {
   if (action.kind === "reset") return emptyStream()
   if (action.kind === "disconnected") return markDisconnected(state)
+  if (action.kind === "cancelling") return markCancelling(state)
   return applyEvent(state, action.event)
 }
 
-export function useRunStream(runId: string | null): StreamState {
+export function useRunStream(runId: string | null): StreamState & { markCancelling: () => void } {
   const [state, dispatch] = useReducer(reduce, undefined, emptyStream)
   // Owned entirely by the effect below: the handlers need to know whether the run ended, and `state`
   // there is whatever it was when the connection opened. Writing it during render is both a React rule
@@ -94,5 +100,7 @@ export function useRunStream(runId: string | null): StreamState {
     return () => source.close()
   }, [runId])
 
-  return state
+  const requestCancel = useCallback(() => dispatch({ kind: "cancelling" }), [])
+
+  return { ...state, markCancelling: requestCancel }
 }

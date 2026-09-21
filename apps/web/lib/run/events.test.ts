@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest"
 
-import { applyEvent, emptyStream, markDisconnected, TERMINAL_EVENTS, type RunEvent, type StreamState } from "./events"
+import {
+  applyEvent,
+  emptyStream,
+  markCancelling,
+  markDisconnected,
+  TERMINAL_EVENTS,
+  type RunEvent,
+  type StreamState,
+} from "./events"
 
 function play(...events: RunEvent[]): StreamState {
   return events.reduce(applyEvent, emptyStream())
@@ -175,5 +183,77 @@ describe("disconnection", () => {
     const dropped = markDisconnected(play({ type: "run_started", seq: 1 }))
 
     expect(applyEvent(dropped, { type: "node_token", nodeId: "llm_1", text: "x" }).disconnected).toBe(false)
+  })
+})
+
+describe("the approval a run is parked on", () => {
+  const WAITING: RunEvent = {
+    type: "run_waiting",
+    seq: 5,
+    payload: { nodeId: "approval_1", execIndex: 1, message: "이 요약을 승인해 주세요", review: { text: "요약" }, allowEdit: true },
+  }
+
+  it("is read out of the run_waiting payload", () => {
+    expect(play({ type: "run_started", seq: 1 }, WAITING).waitingFor).toEqual({
+      nodeId: "approval_1",
+      execIndex: 1,
+      message: "이 요약을 승인해 주세요",
+      review: { text: "요약" },
+      allowEdit: true,
+    })
+  })
+
+  it("is null before anything parks", () => {
+    expect(emptyStream().waitingFor).toBeNull()
+  })
+
+  it("is cleared when the run moves on", () => {
+    // A resumed run is no longer parked, and the approval that payload described cannot be answered.
+    expect(play({ type: "run_started", seq: 1 }, WAITING, { type: "run_resumed", seq: 6 }).waitingFor).toBeNull()
+  })
+
+  it("is cleared when the run ends", () => {
+    expect(play(WAITING, { type: "run_cancelled", seq: 6 }).waitingFor).toBeNull()
+  })
+
+  it("is null for a payload with no target to answer", () => {
+    // `resume` is addressed by (nodeId, execIndex); without them there is nothing to send.
+    for (const payload of [undefined, null, {}, { nodeId: "a" }, { execIndex: 1 }, { nodeId: 1, execIndex: 1 }]) {
+      expect(play({ type: "run_waiting", seq: 5, payload }).waitingFor, JSON.stringify(payload)).toBeNull()
+    }
+  })
+
+  it("defaults allowEdit to false, which is the safer reading", () => {
+    const state = play({ type: "run_waiting", seq: 5, payload: { nodeId: "a", execIndex: 1, message: "확인" } })
+
+    expect(state.waitingFor?.allowEdit).toBe(false)
+  })
+})
+
+describe("cancelling", () => {
+  it("is recorded when asked for", () => {
+    expect(markCancelling(play({ type: "run_started", seq: 1 })).cancelling).toBe(true)
+  })
+
+  it("is not recorded for a run that already ended", () => {
+    expect(markCancelling(play({ type: "run_succeeded", seq: 9 })).cancelling).toBe(false)
+  })
+
+  it("is cleared only by the run actually ending", () => {
+    // Clearing it on a timer would tell someone the run stopped while the worker may still be
+    // finishing a node.
+    const asked = markCancelling(play({ type: "run_started", seq: 1 }))
+
+    const stillGoing = applyEvent(asked, { type: "node_finished", seq: 2, nodeId: "llm_1" })
+    expect(stillGoing.cancelling).toBe(true)
+
+    expect(applyEvent(stillGoing, { type: "run_cancelled", seq: 3 }).cancelling).toBe(false)
+  })
+
+  it("is cleared by any ending, not only by a cancellation", () => {
+    // A run that finished on its own while the cancel was in flight is over either way.
+    const asked = markCancelling(play({ type: "run_started", seq: 1 }))
+
+    expect(applyEvent(asked, { type: "run_succeeded", seq: 2 }).cancelling).toBe(false)
   })
 })

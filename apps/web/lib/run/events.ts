@@ -38,6 +38,15 @@ export interface NodeRunState {
   defaulted: boolean
 }
 
+/** The approval a run is parked on (engine `nodes/human_approval.py`, carried by `run_waiting`). */
+export interface WaitingFor {
+  nodeId: string
+  execIndex: number
+  message: string
+  review?: unknown
+  allowEdit: boolean
+}
+
 export interface StreamState {
   status: RunStatus
   nodes: Record<string, NodeRunState>
@@ -47,10 +56,22 @@ export interface StreamState {
   finished: boolean
   /** Set by a transport error while the run is still going; cleared by the next message. */
   disconnected: boolean
+  /** The approval this run is parked on, or null when it is not parked. */
+  waitingFor: WaitingFor | null
+  /** A cancel has been asked for and the worker has not ended the run yet. */
+  cancelling: boolean
 }
 
 export function emptyStream(): StreamState {
-  return { status: "queued", nodes: {}, lastSeq: null, finished: false, disconnected: false }
+  return {
+    status: "queued",
+    nodes: {},
+    lastSeq: null,
+    finished: false,
+    disconnected: false,
+    waitingFor: null,
+    cancelling: false,
+  }
 }
 
 const RUN_STATUS: Record<string, RunStatus> = {
@@ -88,7 +109,18 @@ export function applyEvent(state: StreamState, event: RunEvent): StreamState {
 
   const runStatus = RUN_STATUS[event.type]
   if (runStatus !== undefined) {
-    return { ...next, status: runStatus, finished: TERMINAL_EVENTS.has(event.type) }
+    const finished = TERMINAL_EVENTS.has(event.type)
+    return {
+      ...next,
+      status: runStatus,
+      finished,
+      // Present only while parked. Anything that moves the run off `waiting` -- a resume, a cancel, the
+      // end -- means the approval this described is no longer answerable.
+      waitingFor: event.type === "run_waiting" ? waitingOf(event) : null,
+      // `run_cancelled` is the only thing that ends a cancel. Clearing it on a timer would tell someone
+      // the run stopped when the worker may still be finishing a node.
+      cancelling: finished ? false : next.cancelling,
+    }
   }
 
   const nodeId = event.nodeId
@@ -126,6 +158,27 @@ export function applyEvent(state: StreamState, event: RunEvent): StreamState {
       // right response is to keep the connection and ignore the frame.
       return next
   }
+}
+
+function waitingOf(event: RunEvent): WaitingFor | null {
+  const payload = event["payload"]
+  if (typeof payload !== "object" || payload === null) return null
+  const { nodeId, execIndex, message, review, allowEdit } = payload as Record<string, unknown>
+  // Without a target there is nothing to answer: `resume` is addressed by (nodeId, execIndex), and the
+  // engine rejects an answer that does not name the approval it is answering.
+  if (typeof nodeId !== "string" || typeof execIndex !== "number") return null
+  return {
+    nodeId,
+    execIndex,
+    message: typeof message === "string" ? message : "",
+    review,
+    allowEdit: allowEdit === true,
+  }
+}
+
+/** Record that a cancel was asked for. Cleared only by the run actually ending. */
+export function markCancelling(state: StreamState): StreamState {
+  return state.finished ? state : { ...state, cancelling: true }
 }
 
 /** Mark the stream as disconnected, without touching anything the run reported. */

@@ -20,6 +20,7 @@ import { toFlowEdges, toFlowNodes, type NodeChange } from "@/lib/dsl/flow"
 import { anyNodeVisible } from "@/lib/dsl/viewport"
 import type { NodeType } from "@/lib/palette"
 import { saveDraft } from "@/lib/engine/save"
+import { cancelRun, resumeRun, type Decision } from "@/lib/engine/resume"
 import { startRun } from "@/lib/engine/run"
 import { validateDraft } from "@/lib/engine/validate"
 import { inputSchema, needsInputs } from "@/lib/run/inputs"
@@ -33,6 +34,7 @@ import { NodePanel } from "@/components/panel/NodePanel"
 import { ConflictDialog } from "@/components/save/ConflictDialog"
 import { StatusBar } from "@/components/save/StatusBar"
 import { RunDialog } from "@/components/run/RunDialog"
+import { ApprovalDialog } from "@/components/run/ApprovalDialog"
 import { TracePanel } from "@/components/run/TracePanel"
 import { useNodeRuns } from "@/components/run/useNodeRuns"
 import { useRunStream } from "@/components/run/useRunStream"
@@ -78,6 +80,7 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
   useRunInUrl(run.runId)
   const stream = useRunStream(run.runId)
   const trace = useNodeRuns(run.runId, stream.finished)
+  const approval = useApproval(run.runId, stream.waitingFor)
 
   // The engine's own verdict, when it disagreed with the editor's last `/validate`. Shown as badges
   // like any other issue, because that is where they can be acted on. Memoised: it feeds the node and
@@ -86,6 +89,15 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
     () => (run.rejected.length > 0 ? [...validation.issues, ...run.rejected] : validation.issues),
     [validation.issues, run.rejected],
   )
+
+  async function onCancel() {
+    if (run.runId === null) return
+    const result = await cancelRun(run.runId)
+    // "cancelled" means the API ended it and `run_cancelled` is already on the way; "requested" means
+    // a worker holds it and will stop at its next heartbeat. Either way the 취소 중 label clears on the
+    // event, never on a timer -- saying it stopped while a node is still finishing would be a lie.
+    if (result.outcome !== "failed") stream.markCancelling()
+  }
 
   function onRun() {
     // Nothing to ask for: a dialog with no fields is a dialog asking nothing.
@@ -227,6 +239,7 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
           runId={run.runId}
           stream={stream}
           onRun={onRun}
+          onCancel={onCancel}
           onAutoLayout={onAutoLayout}
         />
       </div>
@@ -252,6 +265,16 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0 }: CanvasPr
         />
       ) : null}
       <ConflictDialog state={save} />
+      {stream.waitingFor === null ? null : (
+        <ApprovalDialog
+          waiting={stream.waitingFor}
+          open={approval.open}
+          submitting={approval.submitting}
+          error={approval.error}
+          onSubmit={approval.submit}
+          onDismiss={approval.dismiss}
+        />
+      )}
       {inputSchema(state.dsl) === null ? null : (
         <RunDialog
           schema={inputSchema(state.dsl) ?? {}}
@@ -311,6 +334,7 @@ function Toolbar({
   runId,
   stream,
   onRun,
+  onCancel,
   onAutoLayout,
 }: {
   state: GraphState
@@ -319,6 +343,7 @@ function Toolbar({
   runId: string | null
   stream: StreamState
   onRun: () => void
+  onCancel: () => Promise<void>
   onAutoLayout: () => Promise<void>
 }) {
   return (
@@ -351,6 +376,17 @@ function Toolbar({
         </div>
       )}
       <RunButton issues={issues} nodeCount={state.dsl.nodes.length} onRun={onRun} />
+      {runId !== null && !stream.finished ? (
+        <button
+          type="button"
+          onClick={() => void onCancel()}
+          disabled={stream.cancelling}
+          className="pointer-events-auto border border-ink-600 bg-ink-700 px-3 py-1.5 text-xs disabled:opacity-40"
+          style={{ borderRadius: "var(--radius)" }}
+        >
+          {stream.cancelling ? "취소 중" : "취소"}
+        </button>
+      ) : null}
       {state.lastError !== null ? (
         <p
           className="pointer-events-auto border px-2 py-1 text-xs"
@@ -400,6 +436,47 @@ function useValidate(dsl: EditorDsl, workflowId: string | undefined, validate: (
 }
 
 const VALIDATE_DELAY_MS = 700
+
+/** Answering the approval a parked run is waiting on (3 설계 §8.4).
+ *
+ * The dialog opens by itself when a run parks, because an approval nobody notices is a run that never
+ * finishes. Putting it off closes it without answering; it reopens when the next approval arrives.
+ */
+function useApproval(runId: string | null, waiting: StreamState["waitingFor"]) {
+  const [dismissed, setDismissed] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // Keyed by the approval, not a boolean: putting one off must not hide the next one.
+  const key = waiting === null ? null : `${waiting.nodeId}:${waiting.execIndex}`
+
+  async function submit(decision: Decision, comment: string, editedValue?: unknown) {
+    if (runId === null || waiting === null) return
+    setSubmitting(true)
+    const result = await resumeRun(runId, {
+      nodeId: waiting.nodeId,
+      execIndex: waiting.execIndex,
+      decision,
+      ...(comment === "" ? {} : { comment }),
+      ...(editedValue === undefined ? {} : { editedValue }),
+    })
+    setSubmitting(false)
+
+    if (result.outcome === "queued") setError(null)
+    // Stale means someone else answered, or the run moved on. The stream clears `waitingFor` on the
+    // `run_resumed` that follows, so there is nothing to retry -- only something to say.
+    else if (result.outcome === "stale") setError("이미 처리된 승인입니다. 실행 상태를 확인해 주세요.")
+    else setError(result.message)
+  }
+
+  return {
+    open: waiting !== null && dismissed !== key,
+    submitting,
+    error,
+    submit,
+    dismiss: () => setDismissed(key),
+  }
+}
 
 /** The run slice, bound to this workflow. */
 function useRunStore(workflowId: string | undefined) {

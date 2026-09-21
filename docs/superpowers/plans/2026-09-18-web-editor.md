@@ -555,15 +555,15 @@ The hardest UI in this plan. 3 설계 §6.
 
 ## Task 17: Approval and cancellation
 
-- [ ] `waitingFor` present → approval dialog with `message`, `review` (read-only unless `allowEdit`), and 승인 / 반려 buttons plus a comment field.
-- [ ] Submit → `POST /runs/{id}/resume` with `{nodeId, execIndex, decision, comment?, editedValue?}`. **`reviewedAt` is not sent** (3 설계 §8.4) — write a test asserting the request body has no such key.
-- [ ] 409 `RESUME_TARGET_MISMATCH` → 이미 처리된 승인입니다, and refresh the run.
-- [ ] 422 → show the engine's message; it is already Korean.
-- [ ] 취소 button → `POST /runs/{id}/cancel`. Response `cancelled` → done; anything else → show 취소 중 until `run_cancelled` arrives.
-- [ ] Test: the 취소 중 state clears on the `run_cancelled` event and not on a timer.
+- [x] `waitingFor` present → approval dialog with `message`, `review` (read-only unless `allowEdit`), and 승인 / 반려 buttons plus a comment field.
+- [x] Submit → `POST /runs/{id}/resume` with `{nodeId, execIndex, decision, comment?, editedValue?}`. **`reviewedAt` is not sent** (3 설계 §8.4) — write a test asserting the request body has no such key.
+- [x] 409 `RESUME_TARGET_MISMATCH` → 이미 처리된 승인입니다, and refresh the run.
+- [x] 422 → show the engine's message; it is already Korean.
+- [x] 취소 button → `POST /runs/{id}/cancel`. Response `cancelled` → done; anything else → show 취소 중 until `run_cancelled` arrives.
+- [x] Test: the 취소 중 state clears on the `run_cancelled` event and not on a timer.
 
 **Verification**
-- [ ] Commit: `feat(web): approval dialog and run cancellation`
+- [x] Commit: `feat(web): approval dialog and run cancellation`
 
 ---
 
@@ -1942,4 +1942,80 @@ HTTP 노드가 빨간 ✕(실패), 그 뒤 두 노드는 손대지 않은 채로
 - 승인 대기 노드의 `waitingFor`는 **Task 17**이 다룬다. 지금은 상태만 `승인 대기`로 보인다.
 
 **검증**: `pnpm test` 614 passed (47 files), `e2e` 10 passed, `typecheck`·`lint` clean,
+`build` 성공, `test:bundle` 통과.
+
+---
+
+### Task 17 — 승인과 실행 취소
+
+`lib/engine/resume.ts`(resume·cancel), 리듀서의 `waitingFor`·`cancelling`,
+`components/run/ApprovalDialog.tsx`, 캔버스의 취소 버튼과 `useApproval`.
+
+**`reviewedAt`을 보내지 않는다. 그리고 내가 쓴 그 테스트는 처음에 쓸모가 없었다.**
+
+계획이 명시적으로 요구한 것이라 테스트를 먼저 썼다: 요청 본문에 `reviewedAt` 키가 없어야 한다.
+통과했다. 그런데 mutation에서 **허용 키 목록에 `reviewedAt`을 넣어도 테스트가 통과했다.**
+이유는 이랬다 — `ResumeBody` 타입에 그 필드가 없으니 제대로 타입이 붙은 호출자는 애초에 넘기지 않고,
+`!== undefined` 검사에서 조용히 빠진다. **테스트가 통과한 이유가 허용 목록이 아니라 타입이었다.**
+타입은 컴파일타임 약속이고, 이 보장은 런타임에 필요하다. 호출자가 굳이 넣어도 걸러지는지를 보는
+테스트를 따로 넣고 나서야 그 변형이 죽었다.
+
+엔진이 클라이언트가 보낸 값을 **검증 전에 버리는** 이유도 같다: 노드는 위조된 타임스탬프와 진짜를
+구별할 방법이 없다. 보내봐야 무시되지만, 보내면 **이 브라우저의 시계가 검토 시각을 정하는 것처럼
+읽힌다.**
+
+**409 셋을 한 가지로 묶었다.** `RESUME_TARGET_MISMATCH`·`INVALID_STATE_TRANSITION`·`RUN_DATA_EXPIRED`는
+원인이 다르지만 검토자에게는 같은 뜻이다 — **이 승인은 더 이상 당신이 답할 것이 아니다.** 셋을 구분해
+보여주면 사용자가 할 수 있는 일이 늘지 않고 읽을 것만 는다.
+
+**취소 중은 타이머로 풀리지 않는다.** `POST /cancel`은 두 가지로 답한다: 대기·승인 대기 중인 실행은
+API가 그 자리에서 끝내고(`cancelled`), 워커가 쥐고 있는 실행은 요청만 전달된다(`running`).
+후자는 워커가 다음 하트비트에 멈춘다. 그래서 `취소 중` 표시는 **`run_cancelled` 이벤트가 와야** 풀린다.
+시간이 지나서 푸는 것은 노드가 아직 끝나는 중인데 멈췄다고 말하는 것이다.
+어떤 종료든 푼다 — 취소가 날아가는 사이에 스스로 끝난 실행도 끝난 것은 마찬가지다.
+
+**`review` 편집은 노드가 허락했을 때만 연다.** `allowEdit`은 테넌트가 그 단계에 대해 내린 결정이지
+취향이 아니다. 엔진이 같은 규칙으로 검증하고 초대하지 않은 편집을 거절하므로, 그래도 상자를 열어주면
+**422를 만들어 낼 뿐이다.** 읽기 전용일 때는 비활성 textarea가 아니라 **값을 보여주는 방식 그대로**
+보여준다 — 회색 처리된 상자는 아무 일도 하지 않는 클릭을 부른다.
+
+**손대지 않은 값은 되돌려 보내지 않는다.** 원본을 그대로 보내면 "우연히 같은 값으로 고쳤다"와
+구별되지 않는다. 고친 JSON이 깨졌으면 보내지 않고 **친 글자를 화면에 남긴 채** 말한다.
+
+**대화상자는 스스로 열린다.** 아무도 눈치채지 못한 승인은 끝나지 않는 실행이다. "나중에"로 닫을 수
+있지만, 닫힘은 **그 승인 하나**에 대해서만 기억한다 — 불리언이었으면 다음 승인도 함께 숨는다.
+
+**Mutation 16/16 잡힘** (하나는 테스트 보강 후, 하나는 등가)
+
+| 변형 | 결과 |
+|---|---|
+| **`reviewedAt`을 허용 목록에 추가** | **처음엔 survived** → 테스트 보강 후 killed |
+| 409·422를 인식 못 함 / 422의 엔진 메시지를 버림 | killed |
+| 모든 취소 응답을 `cancelled`로 / 두 결과를 뒤바꿈 | killed |
+| run id 미이스케이프 | killed |
+| 실행이 진행해도 승인이 남음 | killed |
+| 대상 없는 승인을 제안 | killed |
+| `allowEdit` 기본값이 참 | killed |
+| `취소 중`이 영영 안 풀림 / 끝난 실행을 취소 중으로 | killed |
+| 허락 안 했는데 편집 상자 제공 | killed |
+| 손대지 않은 값을 편집으로 전송 | killed |
+| 깨진 JSON이 조용히 실패 | killed |
+| 없는 선택 항목을 `undefined`로 전송 | **등가** |
+
+마지막은 진짜 등가다: `JSON.stringify`가 `undefined` 값을 가진 키를 버리므로 전선 위 본문이 같다.
+
+**실제 엔진으로 확인.** 승인 노드가 있는 워크플로를 API로 하나 만들어(`승인 확인용`) 편집기에서 실행했다.
+실행 → `승인 대기` → 대화상자가 스스로 열림 → `allowEdit`이라 편집 상자 제공 → 의견을 적고 승인 →
+`POST /resume` 202 → `성공`. 캔버스에는 승인 노드의 `approve`·`reject` 핸들 두 개가 보인다.
+
+그 워크플로를 만들며 엔진 제약 둘을 확인했다: **끝 노드의 출력 이름은 한글이 안 된다**
+(`출력 이름 형식이 잘못되었습니다`), 그리고 **승인 노드는 `out` 핸들이 없다** — `approve`와 `reject`다.
+둘 다 엔진이 맞고 에디터가 그대로 보여주고 있어서 고칠 것은 없었다.
+
+**남은 공백.**
+- **노드에서 승인 대화상자를 다시 열 방법이 없다.** "나중에"로 닫으면 다음 `run_waiting`까지 길이 없다.
+  실행 기록 탭에 "승인하기" 버튼을 다는 것이 맞아 보이는데, 계획에 없어서 넓히지 않았다.
+- **취소는 툴바에만 있다.** 노드 단위 취소는 엔진에 없다.
+
+**검증**: `pnpm test` 656 passed (49 files), `e2e` 10 passed, `typecheck`·`lint` clean,
 `build` 성공, `test:bundle` 통과.
