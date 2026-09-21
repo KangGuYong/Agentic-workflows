@@ -3,7 +3,7 @@ import { join } from "node:path"
 
 import { expect, test } from "@playwright/test"
 
-import { deleteWorkflow } from "./support"
+import { createWorkflow, deleteWorkflow, editorPath, endNode, startNode } from "./support"
 
 /** Taking a workflow out as a file and bringing one back in (Task 23).
  *
@@ -14,10 +14,13 @@ import { deleteWorkflow } from "./support"
 const EXAMPLE = join(process.cwd(), "..", "..", "examples", "03-parallel.json")
 
 let importedId: string | null = null
+let openId: string | null = null
 
 test.afterEach(async ({ request }) => {
   if (importedId !== null) await deleteWorkflow(request, importedId)
+  if (openId !== null) await deleteWorkflow(request, openId)
   importedId = null
+  openId = null
 })
 
 test("an example file imports, opens, and exports back to the same document", async ({ page }) => {
@@ -70,4 +73,33 @@ test("a file that is not a workflow is refused, and nothing is created", async (
   // Still on the list, and no workflow was left behind by a refused import.
   await expect(page).toHaveURL(/\/$/)
   await expect(page.locator("tbody tr")).toHaveCount(before)
+})
+
+test("importing from the editor opens a new workflow and leaves the open one alone", async ({ page, request }) => {
+  // The whole point of the editor's 가져오기: it is the pair of 내보내기 in the toolbar, but it still
+  // *creates*. Replacing the document on screen would be destructive, and autosave commits within the
+  // second -- before 되돌리기 could be reached.
+  const mine = await createWorkflow(request, `e2e-open-${Date.now()}`, {
+    version: "1",
+    nodes: [startNode({ name: { type: "string" } }), endNode({ greeting: "{{ start.name }}" })],
+    edges: [{ id: "edge_1", source: "start", target: "end" }],
+  })
+  openId = mine.id
+
+  await page.goto(editorPath(openId))
+  await expect(page.locator(".react-flow__node")).toHaveCount(2, { timeout: 20_000 })
+
+  await page.setInputFiles("input[aria-label='워크플로 파일']", EXAMPLE)
+
+  // A *different* workflow, opened in place of this one -- not this one rewritten.
+  await page.waitForURL((url) => /\/workflows\/[0-9a-f-]+$/.test(url.pathname) && !url.pathname.endsWith(openId ?? ""), {
+    timeout: 20_000,
+  })
+  importedId = page.url().split("/").pop() ?? null
+  expect(importedId).not.toBe(openId)
+  await expect(page.locator(".react-flow__node")).toHaveCount(5, { timeout: 20_000 })
+
+  // The workflow that was open still has its own two nodes.
+  await page.goto(editorPath(openId))
+  await expect(page.locator(".react-flow__node")).toHaveCount(2, { timeout: 20_000 })
 })

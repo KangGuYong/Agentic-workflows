@@ -10,6 +10,7 @@ import {
   type EdgeChange,
   type NodeChange as RfNodeChange,
 } from "@xyflow/react"
+import { useRouter } from "next/navigation"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useStore } from "zustand"
 
@@ -24,6 +25,7 @@ import type { NodeType } from "@/lib/palette"
 import { saveDraft } from "@/lib/engine/save"
 import { cancelRun, resumeRun, type Decision } from "@/lib/engine/resume"
 import { startRun } from "@/lib/engine/run"
+import { importWorkflowFile } from "@/lib/engine/import"
 import { validateDraft } from "@/lib/engine/validate"
 import { inputSchema, needsInputs } from "@/lib/run/inputs"
 import { createGraphStore, type GraphState } from "@/store/graph"
@@ -33,6 +35,7 @@ import { createRunStore } from "@/store/run"
 import { createValidationStore, workflowIssues, type Issue } from "@/store/validation"
 
 import { NodePanel } from "@/components/panel/NodePanel"
+import { ImportButton } from "@/components/transfer/ImportButton"
 import { ConflictDialog } from "@/components/save/ConflictDialog"
 import { StatusBar } from "@/components/save/StatusBar"
 import { RunDialog } from "@/components/run/RunDialog"
@@ -82,6 +85,9 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
   const runStore = useRunStore(workflowId)
   const run = useStore(runStore)
   const [askingInputs, setAskingInputs] = useState(false)
+  const router = useRouter()
+  const [importing, setImporting] = useState(false)
+  const [importError, setImportError] = useState<string | null>(null)
   useAutosave(state.dsl, save.changed)
   useValidate(state.dsl, workflowId, validation.validate)
   // The run this tab is watching: the one started here, or the one the URL named on load. A `?run=`
@@ -213,6 +219,24 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
     downloadText(exportFileName(workflowName ?? "workflow"), serialize(state.dsl))
   }, [state.dsl, workflowName])
 
+  /** Importing from the editor makes a **new** workflow and opens it; this one is left alone.
+   *
+   * The button is here because someone looking at 내보내기 expects its pair beside it, not because the
+   * meaning changes: replacing the open document with a picked file would be destructive, and autosave
+   * would commit it within the second, before 되돌리기 could be reached.
+   */
+  const onImport = useCallback(
+    async (file: File) => {
+      setImportError(null)
+      setImporting(true)
+      const result = await importWorkflowFile(file)
+      setImporting(false)
+      if (result.outcome === "ok") router.push(`/workflows/${result.id}`)
+      else setImportError(result.message)
+    },
+    [router],
+  )
+
   const onAutoLayout = useCallback(async () => {
     await state.autoLayout()
     // Auto-layout always reframes: even when a node happens to stay in view, the new arrangement is
@@ -284,6 +308,9 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
           onCancel={onCancel}
           onAutoLayout={onAutoLayout}
           onExport={onExport}
+          onImport={(file) => void onImport(file)}
+          importing={importing}
+          importError={importError}
         />
       </div>
       {selected !== undefined ? (
@@ -394,6 +421,9 @@ function Toolbar({
   onCancel,
   onAutoLayout,
   onExport,
+  onImport,
+  importing,
+  importError,
 }: {
   state: GraphState
   save: SaveState
@@ -404,6 +434,9 @@ function Toolbar({
   onCancel: () => Promise<void>
   onAutoLayout: () => Promise<void>
   onExport: () => void
+  onImport: (file: File) => void
+  importing: boolean
+  importError: string | null
 }) {
   return (
     <div className="pointer-events-none absolute left-4 top-4 flex flex-col items-start gap-2">
@@ -435,6 +468,13 @@ function Toolbar({
         >
           내보내기
         </button>
+        <ImportButton
+          busy={importing}
+          title="JSON 파일에서 새 워크플로를 만듭니다. 이 워크플로는 그대로 둡니다"
+          className="px-2 py-1 text-xs disabled:opacity-35"
+          style={{ borderRadius: "var(--radius)" }}
+          onPick={onImport}
+        />
       </div>
       <div className="pointer-events-auto border border-ink-600 bg-ink-800 px-2 py-1.5" style={{ borderRadius: "var(--radius)" }}>
         <StatusBar state={save} />
@@ -465,6 +505,17 @@ function Toolbar({
           {state.lastError}
         </p>
       ) : null}
+      {/* A refused import says so here rather than nowhere. It is about the file, not the document on
+          screen, which is why it is not a validation badge on some node. */}
+      {importError === null ? null : (
+        <p
+          className="pointer-events-auto border px-2 py-1 text-xs"
+          style={{ borderRadius: "var(--radius)", borderColor: "var(--st-failed)", color: "var(--st-failed)" }}
+          role="alert"
+        >
+          {importError}
+        </p>
+      )}
     </div>
     {/* Problems that belong to no node: a badge on an arbitrary one would send someone to fix a node
         that is fine. */}
