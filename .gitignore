@@ -1,7 +1,46 @@
-.venv/
+# Repository-wide ignores. Sub-trees add their own: apps/web/.gitignore covers Next.js and
+# Playwright. Keep a rule here only when it applies to more than one sub-tree.
+
+# ---- Secrets -----------------------------------------------------------------------------
+# `.env` is the filled-in file and never belongs in git; the `*.example` templates are the
+# documentation and do. The negations have to follow the ignores, or git never reconsiders them.
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# ---- Python ------------------------------------------------------------------------------
 __pycache__/
+*.py[cod]
+.venv/
+venv/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# ---- Node --------------------------------------------------------------------------------
 node_modules/
-.env
+
+# ---- Scratch -----------------------------------------------------------------------------
+# Throwaways that exist to verify something locally and must never ship. This repo has already
+# needed one twice: a Dockerfile carrying the sandbox's CA, which would break someone else's
+# build if it were committed. Naming them `*.tmp.*` makes forgetting harmless.
+*.tmp
+*.tmp.*
+*.log
+
+# ---- Editors and OS ----------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# ---- Claude Code -------------------------------------------------------------------------
+# Project skills under `.claude/` are shared and tracked. These two are per-developer.
+.claude/settings.local.json
+.claude/.credentials.json
