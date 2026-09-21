@@ -1,0 +1,68 @@
+{
+  "version": "1",
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "label": "배포 정보",
+      "position": { "x": 80, "y": 220 },
+      "config": {
+        "inputs": {
+          "type": "object",
+          "properties": {
+            "service": { "type": "string", "description": "서비스 이름" },
+            "version": { "type": "string", "description": "배포 버전" },
+            "author": { "type": "string", "description": "배포한 사람" }
+          },
+          "required": ["service", "version", "author"]
+        }
+      }
+    },
+    {
+      "id": "for_chat",
+      "type": "template",
+      "label": "채팅용 문구",
+      "position": { "x": 380, "y": 100 },
+      "config": {
+        "template": "🚀 {{ start.service }} {{ start.version }} 배포 완료 ({{ start.author }})",
+        "format": "text"
+      }
+    },
+    {
+      "id": "for_email",
+      "type": "template",
+      "label": "메일용 문구",
+      "position": { "x": 380, "y": 340 },
+      "config": {
+        "template": "{{ start.service }} 서비스가 {{ start.version }} 버전으로 배포되었습니다.\n담당자: {{ start.author }}",
+        "format": "text"
+      }
+    },
+    {
+      "id": "collect",
+      "type": "merge",
+      "label": "모으기",
+      "position": { "x": 680, "y": 220 },
+      "config": { "mode": "object" }
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "label": "끝",
+      "position": { "x": 940, "y": 220 },
+      "config": {
+        "outputs": {
+          "chat": "{{ collect.branches.for_chat.text }}",
+          "email": "{{ collect.branches.for_email.text }}"
+        }
+      }
+    }
+  ],
+  "edges": [
+    { "id": "e1", "source": "start", "target": "for_chat" },
+    { "id": "e2", "source": "start", "target": "for_email" },
+    { "id": "e3", "source": "for_chat", "target": "collect" },
+    { "id": "e4", "source": "for_email", "target": "collect" },
+    { "id": "e5", "source": "collect", "target": "end" }
+  ]
+}

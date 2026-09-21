@@ -1,0 +1,83 @@
+{
+  "version": "1",
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "label": "지출 요청",
+      "position": { "x": 80, "y": 200 },
+      "config": {
+        "inputs": {
+          "type": "object",
+          "properties": {
+            "requester": { "type": "string", "description": "신청자" },
+            "purpose": { "type": "string", "description": "사용 목적" },
+            "amount": { "type": "number", "description": "금액 (원)" }
+          },
+          "required": ["requester", "purpose", "amount"]
+        }
+      }
+    },
+    {
+      "id": "summary",
+      "type": "template",
+      "label": "검토 요약",
+      "position": { "x": 340, "y": 200 },
+      "config": {
+        "template": "{{ start.requester }} / {{ start.purpose }} / {{ start.amount }}원",
+        "format": "text"
+      }
+    },
+    {
+      "id": "review",
+      "type": "human_approval",
+      "label": "팀장 승인",
+      "position": { "x": 600, "y": 200 },
+      "config": {
+        "message": "{{ start.requester }}님의 지출 요청을 검토해 주세요.",
+        "review": "{{ summary.text }}",
+        "allowEdit": false
+      }
+    },
+    {
+      "id": "approved",
+      "type": "template",
+      "label": "승인됨",
+      "position": { "x": 880, "y": 100 },
+      "config": {
+        "template": "승인되었습니다. 의견: {{ review.comment | default('없음', true) }}",
+        "format": "text"
+      }
+    },
+    {
+      "id": "rejected",
+      "type": "template",
+      "label": "반려됨",
+      "position": { "x": 880, "y": 300 },
+      "config": {
+        "template": "반려되었습니다. 사유: {{ review.comment | default('없음', true) }}",
+        "format": "text"
+      }
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "label": "끝",
+      "position": { "x": 1160, "y": 200 },
+      "config": {
+        "outputs": {
+          "decision": "{{ review.decision }}",
+          "notice": "{{ approved.text | default('', true) }}{{ rejected.text | default('', true) }}"
+        }
+      }
+    }
+  ],
+  "edges": [
+    { "id": "e1", "source": "start", "target": "summary" },
+    { "id": "e2", "source": "summary", "target": "review" },
+    { "id": "e3", "source": "review", "sourceHandle": "approve", "target": "approved" },
+    { "id": "e4", "source": "review", "sourceHandle": "reject", "target": "rejected" },
+    { "id": "e5", "source": "approved", "target": "end" },
+    { "id": "e6", "source": "rejected", "target": "end" }
+  ]
+}

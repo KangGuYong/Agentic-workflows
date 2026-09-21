@@ -1,0 +1,70 @@
+{
+  "version": "1",
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "label": "주문",
+      "position": { "x": 80, "y": 220 },
+      "config": {
+        "inputs": {
+          "type": "object",
+          "properties": {
+            "customer": { "type": "string", "description": "고객 이름" },
+            "amount": { "type": "number", "description": "주문 금액 (원)" }
+          },
+          "required": ["customer", "amount"]
+        }
+      }
+    },
+    {
+      "id": "is_large",
+      "type": "condition",
+      "label": "고액 주문?",
+      "position": { "x": 360, "y": 220 },
+      "config": {
+        "conditions": [{ "left": "{{ start.amount }}", "op": ">=", "right": "1000000" }],
+        "combinator": "and"
+      }
+    },
+    {
+      "id": "manual",
+      "type": "template",
+      "label": "수동 심사",
+      "position": { "x": 660, "y": 100 },
+      "config": {
+        "template": "{{ start.customer }}님의 {{ start.amount }}원 주문은 담당자 확인이 필요합니다.",
+        "format": "text"
+      }
+    },
+    {
+      "id": "auto",
+      "type": "template",
+      "label": "자동 승인",
+      "position": { "x": 660, "y": 340 },
+      "config": {
+        "template": "{{ start.customer }}님의 {{ start.amount }}원 주문은 자동 승인되었습니다.",
+        "format": "text"
+      }
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "label": "끝",
+      "position": { "x": 960, "y": 220 },
+      "config": {
+        "outputs": {
+          "route": "{{ is_large.result }}",
+          "notice": "{{ manual.text | default('', true) }}{{ auto.text | default('', true) }}"
+        }
+      }
+    }
+  ],
+  "edges": [
+    { "id": "e1", "source": "start", "target": "is_large" },
+    { "id": "e2", "source": "is_large", "sourceHandle": "true", "target": "manual" },
+    { "id": "e3", "source": "is_large", "sourceHandle": "false", "target": "auto" },
+    { "id": "e4", "source": "manual", "target": "end" },
+    { "id": "e5", "source": "auto", "target": "end" }
+  ]
+}
