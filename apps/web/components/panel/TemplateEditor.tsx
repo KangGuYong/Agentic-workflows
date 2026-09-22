@@ -150,6 +150,7 @@ const THEME = EditorView.theme({
 
 export function TemplateEditor({
   id,
+  labelledBy,
   value,
   context,
   disabled = false,
@@ -157,6 +158,9 @@ export function TemplateEditor({
   onBlur,
 }: {
   id: string
+  /** Id of the element that names this editor. CodeMirror's content is a `role=textbox` contenteditable,
+   * which a `<label for>` cannot reach, so the name arrives through `aria-labelledby` instead. */
+  labelledBy?: string
   value: string
   context: TemplateContext
   disabled?: boolean
@@ -187,6 +191,9 @@ export function TemplateEditor({
         extensions: [
           EditorView.lineWrapping,
           THEME,
+          // Read once with the view, like everything else here: the id it derives from is fixed for the
+          // life of the field, so there is nothing to reconfigure.
+          EditorView.contentAttributes.of(labelledBy === undefined ? {} : { "aria-labelledby": labelledBy }),
           editable.current.of(EditorState.readOnly.of(disabled)),
           chipPlugin(() => latest.current.context),
           autocompletion({ override: [completionSource(() => latest.current.context)], icons: false }),

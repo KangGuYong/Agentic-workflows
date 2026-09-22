@@ -5,7 +5,7 @@ import type { FieldProps, RegistryFieldsType, RegistryWidgetsType, WidgetProps }
 import type { TemplateContext } from "@/lib/template/context"
 import type { JsonSchema } from "@/lib/template/schema"
 
-import { TEMPLATE_WIDGETS } from "./templates"
+import { TEMPLATE_WIDGETS, templateLabelId } from "./templates"
 import { SchemaEditor } from "./SchemaEditor"
 import { TemplateEditor } from "./TemplateEditor"
 
@@ -25,6 +25,7 @@ export function TemplateWidget({ id, value, disabled, readonly, onChange, onBlur
   return (
     <TemplateEditor
       id={id}
+      labelledBy={templateLabelId(id)}
       value={typeof value === "string" ? value : ""}
       context={context}
       disabled={disabled === true || readonly === true}
