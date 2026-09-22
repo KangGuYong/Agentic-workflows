@@ -94,7 +94,7 @@ compose에 서비스 `ingester`를 추가한다. 이미지는 `engine:local` 그
   - `knowledgeBase: str` — 지식베이스 id. JSON Schema에 `x-knowledge-base: true` 표시.
   - `query: str` — 템플릿(`string`), 비어 있으면 안 됨.
   - `topK: int` — 1~20, 기본 5.
-  - `minScore: float | None` — 0~1.
+  - `minScore: float` — 0~1, 기본 0(필터 없음). Optional로 두면 pydantic이 `anyOf`를 만들고 RJSF가 분기 선택기를 그리므로 일부러 단일 타입.
 - 실행: 지식베이스를 읽어 모델을 얻고 → `ctx.llm.embed(model, [query])` → 코사인 유사도(`1 - (embedding <=> q)`) 내림차순 top-k,
   `minScore` 미만 제외. 벡터는 노드 밖으로 나가지 않는다.
 - 출력 스키마:
@@ -112,7 +112,7 @@ compose에 서비스 `ingester`를 추가한다. 이미지는 `engine:local` 그
   - `query: str` — 템플릿(`string`).
   - `hits: str` — 템플릿(대상 `array`), 보통 `{{kb_search_1.hits}}`.
   - `topN: int` — 1~20, 기본 3.
-  - `minScore: float | None` — 0~1.
+  - `minScore: float` — 0~1, 기본 0(필터 없음). Optional로 두면 pydantic이 `anyOf`를 만들고 RJSF가 분기 선택기를 그리므로 일부러 단일 타입.
 - 실행: hits가 `text` 문자열을 가진 객체의 배열(최대 100개)인지 확인 → 비었으면 TEI를 부르지 않고 빈 결과 →
   `POST {RERANK_BASE_URL}/rerank` `{"query": q, "texts": [...]}` → 돌려받은 `[{index, score}]`로 원래 hit를 재배열,
   `score`를 리랭크 점수로 바꾸고 `minScore` 미만 제외, 상위 `topN`.
