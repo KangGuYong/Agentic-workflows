@@ -52,3 +52,14 @@ async def test_structured_responses_are_copies_and_calls_record_streaming():
 
     assert scripted == {"score": {"value": 1}}
     assert [call["streamed"] for call in llm.calls] == [False, True]
+
+
+async def test_scripted_embed_is_deterministic_and_orthogonal_for_different_texts():
+    from engine.llm.scripted import ScriptedLLM
+
+    llm = ScriptedLLM([])
+    [a1, a2, b] = await llm.embed(model="m", texts=["같은 글", "같은 글", "다른 글"])
+
+    assert len(a1) == 1024 and a1 == a2 and sum(a1) == 1.0
+    assert sum(x * y for x, y in zip(a1, b)) == 0.0
+    assert llm.embed_calls == [("m", ["같은 글", "같은 글", "다른 글"])]

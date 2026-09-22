@@ -24,6 +24,7 @@ class ScriptedLLM:
         self._script: list[Response] | Responder = script if callable(script) else list(script)
         self._delay = delay
         self.calls: list[dict[str, Any]] = []
+        self.embed_calls: list[tuple[str, list[str]]] = []
 
     async def chat(
         self,
@@ -63,3 +64,16 @@ class ScriptedLLM:
     def prompts(self) -> list[str]:
         """The last message of every call, in call order."""
         return [call["messages"][-1].content for call in self.calls]
+
+    EMBED_DIM = 1024  # what the kb_chunks column holds
+
+    async def embed(self, *, model: str, texts: list[str]) -> list[list[float]]:
+        """A one-hot vector per text, keyed by the text: equal texts are identical, different texts are
+        orthogonal (almost always), so a search test can predict every cosine score."""
+        self.embed_calls.append((model, list(texts)))
+        vectors = []
+        for text in texts:
+            vector = [0.0] * self.EMBED_DIM
+            vector[sum(map(ord, text)) % self.EMBED_DIM] = 1.0
+            vectors.append(vector)
+        return vectors

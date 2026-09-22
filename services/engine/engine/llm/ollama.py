@@ -53,6 +53,20 @@ class OllamaRaw:
         except httpx.RequestError as exc:  # transport, protocol and content-decoding failures
             raise _unavailable(f"Ollama 연결 실패: {exc}") from exc
 
+    async def embed(self, *, model: str, texts: list[str]) -> list[list[float]]:
+        try:
+            response = await self._client.post(f"{self._base}/api/embed", json={"model": model, "input": texts})
+        except httpx.RequestError as exc:
+            raise _unavailable(f"Ollama 연결 실패: {exc}") from exc
+        if response.status_code >= 400:
+            _raise_for_status(response.status_code, response.text[:200], model)
+        data = _decode(response.text)
+        vectors = data.get("embeddings")
+        if (not isinstance(vectors, list) or len(vectors) != len(texts)
+                or not all(isinstance(v, list) and all(isinstance(x, (int, float)) for x in v) for v in vectors)):
+            raise _unavailable("Ollama 임베딩 응답 형식이 올바르지 않습니다")
+        return [[float(x) for x in v] for v in vectors]
+
 
 def _check_size(size: int) -> None:
     """A stuck model can generate forever: stop reading (closing the stream) past MAX_RESPONSE_CHARS."""
