@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from psycopg_pool import AsyncConnectionPool
 
 from engine.api import errors
-from engine.api.routers import node_types, runs, secrets, workflows
+from engine.api.routers import knowledge_bases, node_types, runs, secrets, workflows
 from engine.api.security import TokenAuthMiddleware
 from engine.config import EngineConfig
 from engine.nodes.registry import NodeRegistry, default_registry
@@ -40,6 +40,7 @@ def create_app(config: EngineConfig, pool: AsyncConnectionPool, redis: Any,
     app.include_router(workflows.router)
     app.include_router(runs.router)
     app.include_router(secrets.router)
+    app.include_router(knowledge_bases.router)
 
     # /healthz stays behind the shared token like every other route: TokenAuthMiddleware runs in front of
     # routing for every path unconditionally, so there is no route-level opt-out to reason about here.
