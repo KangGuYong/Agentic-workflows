@@ -216,3 +216,30 @@ def test_a_short_token_is_refused_even_in_development(monkeypatch):
 
     with pytest.raises(ConfigError):
         load_config()
+
+
+def test_knowledge_base_settings_have_defaults_and_read_the_environment(monkeypatch):
+    monkeypatch.setenv("ENGINE_DATABASE_URL", "postgresql://x/y")
+    monkeypatch.setenv("LANGGRAPH_AES_KEY", "0" * 32)
+
+    config = load_config()
+    assert (config.mineru_base_url, config.rerank_base_url) == (None, None)
+    assert (config.mineru_timeout_sec, config.kb_max_file_bytes, config.ingest_max_jobs) == (600.0, 50_000_000, 1)
+    assert config.kb_embed_model == "bge-m3"
+
+    monkeypatch.setenv("MINERU_BASE_URL", "http://mineru:8000/")
+    monkeypatch.setenv("RERANK_BASE_URL", "http://tei:80")
+    monkeypatch.setenv("KB_MAX_FILE_BYTES", "1024")
+    monkeypatch.setenv("INGEST_MAX_JOBS", "2")
+    monkeypatch.setenv("KB_EMBED_MODEL", "nomic-embed-text")
+    config = load_config()
+    assert (config.mineru_base_url, config.rerank_base_url) == ("http://mineru:8000/", "http://tei:80")
+    assert (config.kb_max_file_bytes, config.ingest_max_jobs, config.kb_embed_model) == (1024, 2, "nomic-embed-text")
+
+
+def test_a_zero_file_limit_is_refused(monkeypatch):
+    monkeypatch.setenv("ENGINE_DATABASE_URL", "postgresql://x/y")
+    monkeypatch.setenv("LANGGRAPH_AES_KEY", "0" * 32)
+    monkeypatch.setenv("KB_MAX_FILE_BYTES", "0")
+    with pytest.raises(ConfigError):
+        load_config()

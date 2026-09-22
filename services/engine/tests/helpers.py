@@ -21,6 +21,8 @@ _BASE_CONFIG = EngineConfig(
     run_max_active_ms=1000, render_timeout_sec=1.0, render_pool_size=1, max_body_bytes=1000,
     http_allowlist=(), http_max_redirects=3, http_max_request_bytes=1000, http_max_response_bytes=1000,
     db_pool_max=10, retention_days=30, purge_batch=100,
+    mineru_base_url=None, mineru_timeout_sec=5.0, rerank_base_url=None, kb_max_file_bytes=1000,
+    ingest_max_jobs=1, kb_embed_model="bge-m3",
 )
 
 
