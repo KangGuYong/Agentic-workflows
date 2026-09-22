@@ -22,7 +22,16 @@ async def test_posts_query_and_texts_and_returns_index_score_pairs():
     pairs = await _reranker(handler).rerank("질문", ["a", "b"])
 
     assert seen["url"] == "http://tei:8080/rerank"
-    assert json.loads(seen["body"]) == {"query": "질문", "texts": ["a", "b"]}
+    assert json.loads(seen["body"]) == {"query": "질문", "texts": ["a", "b"], "truncate": True}
+    assert pairs == [(1, 0.9), (0, 0.2)]
+
+
+async def test_an_unsorted_response_is_sorted_best_first():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"index": 0, "score": 0.2}, {"index": 1, "score": 0.9}])
+
+    pairs = await _reranker(handler).rerank("q", ["a", "b"])
+
     assert pairs == [(1, 0.9), (0, 0.2)]
 
 
@@ -32,6 +41,15 @@ async def test_a_malformed_response_is_retryable():
 
     with pytest.raises(NodeError) as caught:
         await _reranker(handler).rerank("q", ["a"])
+    assert caught.value.code == ErrorCode.LLM_UNAVAILABLE and caught.value.retryable
+
+
+async def test_duplicate_indexes_are_retryable():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"index": 0, "score": 0.9}, {"index": 0, "score": 0.1}])
+
+    with pytest.raises(NodeError) as caught:
+        await _reranker(handler).rerank("q", ["a", "b"])
     assert caught.value.code == ErrorCode.LLM_UNAVAILABLE and caught.value.retryable
 
 

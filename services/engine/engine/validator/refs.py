@@ -106,6 +106,10 @@ def _check_field(
             issues.append(error("LITERAL_NOT_NUMBER", f"숫자가 필요합니다: {literal}", **where))
         elif parsed.refs and parsed.whole_value is None:
             issues.append(warning("TYPE_WARNING", "문자열로 조합된 값은 실행 시 숫자로 변환됩니다", **where))
+    if template_field.target in ("array", "object") and parsed.whole_value is None:
+        label = clip(template_field.path, MAX_LABEL_CHARS)
+        issues.append(error("TYPE_INCOMPATIBLE",
+                            f"{label}에는 {{{{ 노드.필드 }}}} 형태의 참조 하나만 넣을 수 있습니다 (목록/객체 칸)", **where))
     return issues
 
 
