@@ -44,6 +44,8 @@ export interface FlowNode {
    * blank. Carrying the measurement back is the contract, not an optimisation.
    */
   measured?: Size
+  /** Whether the document's selection holds this node. See `FlowView.selection`. */
+  selected: boolean
 }
 
 export interface FlowEdge {
@@ -53,6 +55,14 @@ export interface FlowEdge {
   target: string
   /** Drawn in the severity's colour when `/validate` has something to say about this edge. */
   style?: { stroke: string }
+  /** Whether the document's selection holds this edge. See `FlowView.selection`. */
+  selected: boolean
+}
+
+/** What is selected, as the graph store holds it: node ids and edge ids. */
+export interface FlowSelection {
+  nodes: readonly string[]
+  edges: readonly string[]
 }
 
 export interface FlowView {
@@ -66,6 +76,19 @@ export interface FlowView {
   runNodes?: Record<string, NodeRunState>
   /** Sizes React Flow has reported, keyed by node id. See `FlowNode.measured`. */
   measured?: Record<string, Size>
+  /** The store's selection, written onto every node and edge as `selected`.
+   *
+   * Same contract as `measured`: in controlled mode the objects handed to React Flow are the whole
+   * truth, and it rebuilds its internal nodes from them on every new array. Left off, React Flow
+   * forgets which node is selected the moment the graph is re-derived -- any edit, a validation
+   * response, a run event -- and a selection made by the store itself (a node just dropped from the
+   * palette is selected so its panel opens) is never known to it at all. Its click handling then
+   * goes wrong in a way that looks random: with no node it believes selected there is no `selected:
+   * false` change to send for the previous one, so clicking a second node adds to the selection
+   * instead of replacing it, two nodes are selected, and the panel -- which opens on exactly one --
+   * does not appear. Clicking empty canvas likewise clears nothing.
+   */
+  selection?: FlowSelection
 }
 
 export function toFlowNodes(dsl: EditorDsl, view: FlowView): FlowNode[] {
@@ -80,6 +103,7 @@ export function toFlowNodes(dsl: EditorDsl, view: FlowView): FlowNode[] {
     // Omitted rather than set to undefined when unknown: React Flow reads `measured?.width`, and an
     // explicit `{width: undefined}` is the same to it as absent but not to a structural comparison.
     ...(size === undefined ? {} : { measured: size }),
+    selected: view.selection?.nodes.includes(node.id) ?? false,
     data: {
       type: node.type,
       // The node's own label, then the type's, then the bare type. A node type the editor has never
@@ -124,6 +148,7 @@ export function toFlowEdges(dsl: EditorDsl, view: FlowView = {}): FlowEdge[] {
     sourceHandle: edgeHandle(edge),
     target: edge.target,
     style: edgeStroke(issues, edge.id),
+    selected: view.selection?.edges.includes(edge.id) ?? false,
   }))
 }
 

@@ -146,9 +146,13 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
   // remembers it. Held here rather than in the document: it is a fact about this browser's layout, not
   // something to save or to put in `dsl_hash`.
   const [measured, setMeasured] = useState<Record<string, Size>>({})
+  // The selection goes in with the document, so React Flow's idea of what is selected is the store's
+  // (see `FlowView.selection`): its click handling decides what to deselect from what it was last
+  // told, and told nothing it would deselect nothing.
   const nodes = useMemo(
-    () => toFlowNodes(state.dsl, { labels, handles, issues, runNodes: stream.nodes, measured }),
-    [state.dsl, labels, handles, issues, stream.nodes, measured],
+    () =>
+      toFlowNodes(state.dsl, { labels, handles, issues, runNodes: stream.nodes, measured, selection: state.selection }),
+    [state.dsl, state.selection, labels, handles, issues, stream.nodes, measured],
   )
   // The panel opens on exactly one node; a multi-select has nothing single to configure.
   const selected =
@@ -156,7 +160,10 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
       ? state.dsl.nodes.find((node) => node.id === state.selection.nodes[0])
       : undefined
   const byType = useMemo(() => new Map(types.map((item) => [item.type, item])), [types])
-  const edges = useMemo(() => toFlowEdges(state.dsl, { issues }), [state.dsl, issues])
+  const edges = useMemo(
+    () => toFlowEdges(state.dsl, { issues, selection: state.selection }),
+    [state.dsl, state.selection, issues],
+  )
 
   const onNodesChange = useCallback(
     (changes: RfNodeChange[]) => {
