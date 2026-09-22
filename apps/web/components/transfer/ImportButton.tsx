@@ -20,6 +20,7 @@ export function ImportButton({
   label = "가져오기",
   multiple = false,
   accept = "application/json,.json",
+  inputLabel = "워크플로 파일",
   onPick,
 }: {
   busy?: boolean
@@ -33,6 +34,9 @@ export function ImportButton({
   /** The `accept` filter on the underlying input; defaults to the workflow-import (`.json`) filter.
    *  A caller picking other kinds of files -- documents, say -- passes its own, or `""` for none. */
   accept?: string
+  /** The input's accessible name; defaults to the workflow-import wording so existing callers are
+   *  unaffected. A caller picking a different kind of file names it, so `getByLabelText` finds it too. */
+  inputLabel?: string
   onPick: (file: File) => void
 }) {
   const input = useRef<HTMLInputElement>(null)
@@ -44,7 +48,7 @@ export function ImportButton({
         type="file"
         accept={accept}
         multiple={multiple}
-        aria-label="워크플로 파일"
+        aria-label={inputLabel}
         className="sr-only"
         onChange={(event) => {
           const files = event.target.files

@@ -167,7 +167,9 @@ function Files({ kb, onChanged, onError }: { kb: KnowledgeBaseSummary; onChanged
   const busy = files?.some((file) => file.status === "pending" || file.status === "processing") ?? false
   useEffect(() => {
     if (!busy) return
-    const timer = setInterval(() => void load(), POLL_MS)
+    // `false`: a background refresh is not a user action and must not clear a message nobody has
+    // acknowledged, such as the failure of the upload that made this table worth polling.
+    const timer = setInterval(() => void load(false), POLL_MS)
     return () => clearInterval(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `load` reads kb.id, which is the other dep
   }, [busy, kb.id])
@@ -197,9 +199,11 @@ function Files({ kb, onChanged, onError }: { kb: KnowledgeBaseSummary; onChanged
           accept=""
           busy={uploading > 0}
           label="파일 올리기"
+          inputLabel="파일 올리기"
           title="PDF·오피스 문서는 MinerU가, .md·.txt는 바로 처리됩니다. 파일당 최대 50MB."
           className="border px-3 py-1.5 text-xs disabled:opacity-35"
           style={{ borderRadius: "var(--radius)", borderColor: "var(--accent)", color: "var(--accent)" }}
+          // ponytail: one PUT and one list reload per picked file, in parallel; batch them if picks of dozens of files show up.
           onPick={(file) => void uploadOne(file)}
         />
         {uploading > 0 ? (
