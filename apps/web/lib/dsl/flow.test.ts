@@ -53,6 +53,22 @@ describe("toFlowNodes", () => {
     // drag a connection out of, or it can never be connected at all.
     expect(toFlowNodes(DSL, {})[1]?.data.handles).toEqual(["out"])
   })
+
+  it("writes the store's selection onto each node", () => {
+    // React Flow is controlled, and rebuilds what it knows from these objects on every new array. A
+    // node handed over without `selected` is one it believes unselected, whatever the store says --
+    // and then a click on another node adds to the selection rather than replacing it, two nodes are
+    // selected, and the panel that opens on exactly one does not open.
+    const nodes = toFlowNodes(DSL, { selection: { nodes: ["condition_1"], edges: [] } })
+
+    expect(nodes.map((node) => node.selected)).toEqual([false, true, false])
+  })
+
+  it("marks every node unselected when no selection is given", () => {
+    // `false`, not absent: absent is what React Flow treats as "never told", which is the state the
+    // selection is being written down to get out of.
+    expect(toFlowNodes(DSL, {}).map((node) => node.selected)).toEqual([false, false, false])
+  })
 })
 
 describe("toFlowEdges", () => {
@@ -64,6 +80,12 @@ describe("toFlowEdges", () => {
 
     expect(edges[0]).toMatchObject({ id: "e1", source: "start", target: "condition_1", sourceHandle: "out" })
     expect(edges[1]?.sourceHandle).toBe("true")
+  })
+
+  it("writes the store's selection onto each edge", () => {
+    const edges = toFlowEdges(DSL, { selection: { nodes: [], edges: ["e2"] } })
+
+    expect(edges.map((edge) => edge.selected)).toEqual([false, true])
   })
 })
 
