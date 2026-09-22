@@ -51,6 +51,18 @@ class SecretResolver(Protocol):
     async def resolve(self, names: set[str]) -> dict[str, str]: ...
 
 
+class KnowledgeBases(Protocol):
+    async def get(self, kb_id: str) -> dict[str, Any] | None: ...
+
+    async def search(self, kb_id: str, embedding: list[float], top_k: int) -> list[dict[str, Any]]: ...
+
+
+class Reranker(Protocol):
+    async def rerank(self, query: str, texts: list[str]) -> list[tuple[int, float]]:
+        """(index into texts, score) pairs, best first."""
+        ...
+
+
 @dataclass
 class NodeContext:
     run_id: str
@@ -67,6 +79,8 @@ class NodeContext:
     secrets: SecretResolver | None = None
     secret_nonce: str | None = None
     timeout_sec: float | None = None
+    kb: KnowledgeBases | None = None
+    rerank: Reranker | None = None
 
 
 class NodeSpec(ABC):

@@ -41,7 +41,8 @@ class Worker:
 
     def __init__(self, config: EngineConfig, pool: AsyncConnectionPool, redis: Any, *, llm: LLMClient,
                  owner: str | None = None, registry: NodeRegistry | None = None,
-                 render: Any = None, http: Any = None, secrets: Any = None) -> None:
+                 render: Any = None, http: Any = None, secrets: Any = None, kb: Any = None,
+                 rerank: Any = None) -> None:
         self._config = config
         self._pool = pool
         self._redis = redis
@@ -52,6 +53,8 @@ class Worker:
         self._render = render
         self._http = http
         self._secrets = secrets
+        self._kb = kb
+        self._rerank = rerank
         self._publisher = RedisPublisher(redis)
         self._reaper = Reaper(config, pool, redis)  # every worker has one; an advisory lock picks the sweeper
         self._checkpointer = make_checkpointer(pool, config)  # encrypted unless dev-insecure (design 5.3)
@@ -317,7 +320,7 @@ class Worker:
                                             store_run_data=row["store_run_data"])
                 deps = RunDeps(run_id=run_id, llm=self._llm, recorder=recorder, guard=guard,
                                render=self._render, secret_nonce=self._nonce(run_id),
-                               http=self._http, secrets=self._secrets)
+                               http=self._http, secrets=self._secrets, kb=self._kb, rerank=self._rerank)
                 outcome = await execute_run(compiled, deps=deps, inputs=row["inputs"] or {},
                                             resume=row["resume_payload"])
             finally:

@@ -47,7 +47,7 @@ async def test_node_types_describe_the_registry(api):
 
     types = {item["type"]: item for item in response.json()["nodeTypes"]}
     assert set(types) == {"start", "end", "template", "llm", "classifier", "condition", "merge",
-                          "human_approval", "http_request"}
+                          "human_approval", "http_request", "kb_search"}
     assert types["llm"]["configSchema"]["properties"]["prompt"]["x-template"] is True
     assert types["llm"]["defaultPolicy"]["retry"]["maxAttempts"] == 3
     assert types["condition"]["isBranch"] is True and types["start"]["defaultPolicy"] is None

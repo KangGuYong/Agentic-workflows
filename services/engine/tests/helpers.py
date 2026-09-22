@@ -42,6 +42,8 @@ def make_ctx(
     node_id: str = "n",
     interrupt=None,
     on_token: TokenSink | None = None,
+    kb=None,
+    rerank=None,
 ) -> NodeContext:
     return NodeContext(
         run_id="run-test",
@@ -54,6 +56,8 @@ def make_ctx(
         llm=llm or ScriptedLLM([]),
         on_token=on_token,
         interrupt=interrupt,
+        kb=kb,
+        rerank=rerank,
     )
 
 

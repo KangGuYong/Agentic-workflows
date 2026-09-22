@@ -146,7 +146,7 @@ async def worker_factory(pool, redis, db_url):
 
     started: list = []
 
-    async def make(llm, *, owner: str = "worker-1", http=None, secrets=None, **overrides):
+    async def make(llm, *, owner: str = "worker-1", http=None, secrets=None, kb=None, rerank=None, **overrides):
         import dataclasses
 
         # Defaults a test can override: spelling one of these in `overrides` used to be a TypeError
@@ -154,7 +154,8 @@ async def worker_factory(pool, redis, db_url):
         # wants to do.
         fast = {"claim_poll_sec": 0.2, "heartbeat_sec": 0.2}
         config = dataclasses.replace(load_config(), **{**fast, **overrides})
-        worker = Worker(config, pool, redis, owner=owner, llm=llm, http=http, secrets=secrets)
+        worker = Worker(config, pool, redis, owner=owner, llm=llm, http=http, secrets=secrets,
+                        kb=kb, rerank=rerank)
         await worker.start()
         started.append(worker)
         return worker

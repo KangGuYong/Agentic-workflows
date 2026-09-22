@@ -14,6 +14,7 @@ from engine.config import load_config
 from engine.db.migrate import prepare_database
 from engine.db.pool import make_pool
 from engine.http.client import GuardedClient, SystemResolver
+from engine.kb.store import PostgresKnowledgeBases
 from engine.llm.gateway import LLMGateway
 from engine.llm.ollama import OllamaRaw
 from engine.llm.semaphore import ModelSemaphore, SemaphoreLLM
@@ -72,12 +73,13 @@ async def run(stop: asyncio.Event | None = None) -> None:
                              max_request_bytes=config.http_max_request_bytes,
                              max_response_bytes=config.http_max_response_bytes)
         secrets = PostgresSecretResolver(pool, config.secret_key) if config.secret_key else None
+        kb = PostgresKnowledgeBases(pool)
         # Hosts only, never a full URL (MVP design 10.1).
         log.info("egress allowlist: %s",
                  ", ".join(f"{e.scheme}://{e.host}:{e.port}" for e in config.http_allowlist)
                  or "(empty: all http_request calls are blocked)")
         worker = Worker(config, pool, redis, llm=llm, render=render, http=http,
-                        secrets=secrets)  # the worker runs its own reaper
+                        secrets=secrets, kb=kb)  # the worker runs its own reaper
 
         await worker.start()
         log.info("worker %s ready", worker.owner)

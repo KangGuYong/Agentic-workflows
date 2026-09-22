@@ -176,6 +176,8 @@ def _context(
         secret_nonce=deps.secret_nonce,
         # The node's own share of the attempt deadline: http_request needs it to bound one request.
         timeout_sec=timeout,
+        kb=deps.kb,
+        rerank=deps.rerank,
     )
 
 

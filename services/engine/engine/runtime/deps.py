@@ -10,7 +10,7 @@ from engine.runtime.guard import NoopGuard, RunGuard
 from engine.runtime.recorder import Recorder
 
 if TYPE_CHECKING:  # avoids importing the node layer into the runtime ports
-    from engine.nodes.base import HttpClient, SecretResolver, TemplateField
+    from engine.nodes.base import HttpClient, KnowledgeBases, Reranker, SecretResolver, TemplateField
 
 RenderFn = Callable[[list["TemplateField"], dict[str, Any], str | None], Awaitable[dict[str, Any]]]
 
@@ -38,3 +38,5 @@ class RunDeps:
     """Per-run marker nonce (engine.secrets.markers). None disables the `secret` binding entirely."""
     http: "HttpClient | None" = None
     secrets: "SecretResolver | None" = None
+    kb: "KnowledgeBases | None" = None
+    rerank: "Reranker | None" = None
