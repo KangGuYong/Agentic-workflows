@@ -23,6 +23,8 @@ x-engine: &engine
 
 services:
   postgres:
+    # pgvector's own build: migration 0004 needs the `vector` extension, which the plain postgres image
+    # does not ship. Same Postgres major as before, so an existing pgdata volume mounts as is.
     image: pgvector/pgvector:pg17
     environment:
       POSTGRES_USER: engine
@@ -92,6 +94,9 @@ services:
   ingester:
     <<: *engine
     command: ["python", "-m", "engine.ingest.main"]
+    # Postgres only: the ingester claims jobs and writes chunks there and never opens Redis.
+    depends_on:
+      postgres: {condition: service_healthy}
     # Document ingestion is minutes per file and must never sit in a run worker's slot. Scale
     # separately: each replica claims jobs under its own lease.
     deploy:
