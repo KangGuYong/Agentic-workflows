@@ -1,6 +1,8 @@
 import type { EditorDsl } from "@/lib/dsl/document"
 import type { Issue } from "@/store/validation"
 
+import { detailsOf, messageOf } from "./envelope"
+
 /** Starting a run (3 설계 §8, Task 14).
  *
  * `POST /workflows/{id}/runs` answers four ways that mean different things to the editor, so the result
@@ -36,20 +38,6 @@ export interface RunFailed {
 }
 
 export type RunResult = RunStarted | RunStale | RunRejected | RunFailed
-
-interface Envelope {
-  error?: { code?: unknown; message?: unknown; details?: unknown }
-}
-
-function detailsOf(body: unknown): Record<string, unknown> | null {
-  const details = (body as Envelope | null)?.error?.details
-  return typeof details === "object" && details !== null ? (details as Record<string, unknown>) : null
-}
-
-function messageOf(body: unknown, fallback: string): string {
-  const message = (body as Envelope | null)?.error?.message
-  return typeof message === "string" && message !== "" ? message : fallback
-}
 
 /** The current draft, for a conflict the run endpoint describes only by revision. */
 async function currentDraft(workflowId: string): Promise<EditorDsl | null> {
