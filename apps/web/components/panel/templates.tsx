@@ -22,6 +22,12 @@ import type {
 export const CONTROL =
   "w-full border border-ink-600 bg-ink-700 px-2 py-1.5 text-sm outline-none focus:border-ink-500 disabled:opacity-40"
 
+/** The id of the caption that names a template field's editor. Exported for the widget: `aria-labelledby`
+ * on its side has to spell the same string as the caption on this side. */
+export function templateLabelId(id: string): string {
+  return `${id}__label`
+}
+
 function FieldTemplate({
   id,
   label,
@@ -34,8 +40,13 @@ function FieldTemplate({
   displayLabel,
   fieldPathId,
   registry,
+  uiSchema,
 }: FieldTemplateProps) {
   if (hidden) return <div className="hidden">{children}</div>
+  // A template field is a CodeMirror contenteditable, not a form control, so `<label for>` has nothing
+  // labelable to point at -- the browser flags the dangling `for` on every template node. The caption
+  // is a plain element with an id instead, and the editor names itself by it (`aria-labelledby`).
+  const isTemplate = uiSchema?.["ui:widget"] === "template"
   // The engine's verdict on this field, beside the field. `/validate` addresses it as `config.<path>`
   // and the panel splits that out; here the path is `fieldPathId.path` joined -- the same string.
   const context = registry.formContext as { issuesByField?: Map<string, Issue[]> }
@@ -44,10 +55,17 @@ function FieldTemplate({
   return (
     <div className="mb-4">
       {displayLabel && label !== "" ? (
-        <label htmlFor={id} className="instrument-label mb-1 block">
-          {label}
-          {required === true ? <span className="ml-1 text-st-failed">*</span> : null}
-        </label>
+        isTemplate ? (
+          <span id={templateLabelId(id)} className="instrument-label mb-1 block">
+            {label}
+            {required === true ? <span className="ml-1 text-st-failed">*</span> : null}
+          </span>
+        ) : (
+          <label htmlFor={id} className="instrument-label mb-1 block">
+            {label}
+            {required === true ? <span className="ml-1 text-st-failed">*</span> : null}
+          </label>
+        )
       ) : null}
       {children}
       {description}

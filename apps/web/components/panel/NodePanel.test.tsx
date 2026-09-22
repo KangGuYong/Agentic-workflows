@@ -262,6 +262,17 @@ describe("the template field", () => {
     expect(help.closest("details")?.open).toBe(false)
   })
 
+  it("is named by its caption through aria-labelledby, not a dangling <label for>", async () => {
+    show(node("llm_1", "llm"), LLM_TYPE)
+    await screen.findByTestId("template-editor")
+
+    // CodeMirror's content is a `role=textbox` contenteditable. A `<label for>` cannot label that, and
+    // the browser flags the `for` as pointing at nothing labelable on every template node; the
+    // caption names the textbox by id instead, so assistive tech still hears "프롬프트".
+    expect(screen.getByRole("textbox", { name: "프롬프트" })).toBeInTheDocument()
+    expect(document.querySelector("label[for='root_prompt']")).toBeNull()
+  })
+
   it("does not render it for a field that is not a template", () => {
     // `model` is a plain string. A CodeMirror instance per string field would be absurd.
     show(node("llm_1", "llm"), {
