@@ -17,6 +17,7 @@ import "@xyflow/react/dist/style.css"
 
 import { downloadText } from "@/lib/browser/download"
 import { emptyDsl, type EditorDsl } from "@/lib/dsl/document"
+import { describeInsert } from "@/lib/dsl/insert"
 import { exportFileName, serialize } from "@/lib/dsl/transfer"
 import { sizeChanges, toFlowEdges, toFlowNodes, type NodeChange, type Size } from "@/lib/dsl/flow"
 import { anyNodeVisible } from "@/lib/dsl/viewport"
@@ -24,6 +25,7 @@ import type { NodeType } from "@/lib/palette"
 import { saveDraft } from "@/lib/engine/save"
 import { cancelRun, resumeRun, type Decision } from "@/lib/engine/resume"
 import { startRun } from "@/lib/engine/run"
+import { readWorkflowFile } from "@/lib/engine/import"
 import { validateDraft } from "@/lib/engine/validate"
 import { inputSchema, needsInputs } from "@/lib/run/inputs"
 import { createGraphStore, type GraphState } from "@/store/graph"
@@ -33,6 +35,7 @@ import { createRunStore } from "@/store/run"
 import { createValidationStore, workflowIssues, type Issue } from "@/store/validation"
 
 import { NodePanel } from "@/components/panel/NodePanel"
+import { ImportButton } from "@/components/transfer/ImportButton"
 import { ConflictDialog } from "@/components/save/ConflictDialog"
 import { StatusBar } from "@/components/save/StatusBar"
 import { RunDialog } from "@/components/run/RunDialog"
@@ -82,6 +85,9 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
   const runStore = useRunStore(workflowId)
   const run = useStore(runStore)
   const [askingInputs, setAskingInputs] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [importError, setImportError] = useState<string | null>(null)
+  const [importNote, setImportNote] = useState<string | null>(null)
   useAutosave(state.dsl, save.changed)
   useValidate(state.dsl, workflowId, validation.validate)
   // The run this tab is watching: the one started here, or the one the URL named on load. A `?run=`
@@ -213,6 +219,34 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
     downloadText(exportFileName(workflowName ?? "workflow"), serialize(state.dsl))
   }, [state.dsl, workflowName])
 
+  /** Place a file's nodes into **this** workflow, as one undoable step.
+   *
+   * Not a replacement of the document and not a new workflow: the file's nodes are added, the way
+   * dropping one from the palette adds one. `되돌리기` takes the whole file back out in one press,
+   * which is what makes this safe to try.
+   *
+   * The file's 시작/끝 nodes never come -- the engine fixes their ids, so a document holds exactly one
+   * of each -- and a node whose id is already here is renamed with every reference to it rewritten.
+   * Both are reported, because a rename silently changing `{{ llm_1.text }}` under someone is the
+   * kind of thing they need told.
+   */
+  const onImport = useCallback(
+    async (file: File) => {
+      setImportError(null)
+      setImportNote(null)
+      setImporting(true)
+      const read = await readWorkflowFile(file)
+      setImporting(false)
+      if (!read.ok) {
+        setImportError(read.reason)
+        return
+      }
+      const result = state.insertDocument(read.dsl)
+      setImportNote(describeInsert(result))
+    },
+    [state],
+  )
+
   const onAutoLayout = useCallback(async () => {
     await state.autoLayout()
     // Auto-layout always reframes: even when a node happens to stay in view, the new arrangement is
@@ -284,6 +318,10 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
           onCancel={onCancel}
           onAutoLayout={onAutoLayout}
           onExport={onExport}
+          onImport={(file) => void onImport(file)}
+          importing={importing}
+          importError={importError}
+          importNote={importNote}
         />
       </div>
       {selected !== undefined ? (
@@ -394,6 +432,10 @@ function Toolbar({
   onCancel,
   onAutoLayout,
   onExport,
+  onImport,
+  importing,
+  importError,
+  importNote,
 }: {
   state: GraphState
   save: SaveState
@@ -404,6 +446,10 @@ function Toolbar({
   onCancel: () => Promise<void>
   onAutoLayout: () => Promise<void>
   onExport: () => void
+  onImport: (file: File) => void
+  importing: boolean
+  importError: string | null
+  importNote: string | null
 }) {
   return (
     <div className="pointer-events-none absolute left-4 top-4 flex flex-col items-start gap-2">
@@ -435,6 +481,13 @@ function Toolbar({
         >
           내보내기
         </button>
+        <ImportButton
+          busy={importing}
+          title="JSON 파일의 노드를 이 워크플로에 놓습니다. 되돌리기로 한 번에 취소할 수 있습니다"
+          className="px-2 py-1 text-xs disabled:opacity-35"
+          style={{ borderRadius: "var(--radius)" }}
+          onPick={onImport}
+        />
       </div>
       <div className="pointer-events-auto border border-ink-600 bg-ink-800 px-2 py-1.5" style={{ borderRadius: "var(--radius)" }}>
         <StatusBar state={save} />
@@ -465,6 +518,29 @@ function Toolbar({
           {state.lastError}
         </p>
       ) : null}
+      {/* A refused import says so here rather than nowhere. It is about the file, not the document on
+          screen, which is why it is not a validation badge on some node. */}
+      {importError === null ? null : (
+        <p
+          className="pointer-events-auto border px-2 py-1 text-xs"
+          style={{ borderRadius: "var(--radius)", borderColor: "var(--st-failed)", color: "var(--st-failed)" }}
+          role="alert"
+        >
+          {importError}
+        </p>
+      )}
+      {/* What an import actually did: how many nodes, which were left behind, which were renamed. A
+          rename rewrites references, so it changes documents someone already wrote -- not something to
+          do quietly. */}
+      {importNote === null ? null : (
+        <p
+          className="pointer-events-auto border border-ink-600 bg-ink-800 px-2 py-1 text-xs text-fg-muted"
+          style={{ borderRadius: "var(--radius)" }}
+          role="status"
+        >
+          {importNote}
+        </p>
+      )}
     </div>
     {/* Problems that belong to no node: a badge on an arbitrary one would send someone to fix a node
         that is fine. */}
