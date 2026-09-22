@@ -1,12 +1,23 @@
 import { expect, test } from "@playwright/test"
 
-import { createWorkflow, deleteWorkflow, editorPath, endNode, expectRunStatus, startNode } from "./support"
+import {
+  cancelRuns,
+  createWorkflow,
+  deleteWorkflow,
+  editorPath,
+  endNode,
+  expectRunStatus,
+  startNode,
+} from "./support"
 
 /** Upload a markdown file, wait for ingestion, and search it from a workflow (knowledge-base design §8).
  *
  * Markdown skips MinerU, so this runs against the compose stack alone: postgres (pgvector), api, worker,
  * ingester, web, and the Ollama host the stack already points at for the embedding.
  */
+
+// The default 60s test slot covers beforeEach too, and the ingest poll (Ollama embed) and the run share it.
+test.describe.configure({ timeout: 150_000 })
 
 let kbId: string
 let workflowId: string
@@ -25,6 +36,7 @@ test.beforeEach(async ({ request }) => {
   await expect
     .poll(async () => {
       const listed = await request.get(`/api/engine/knowledge-bases/${kbId}/files`)
+      if (!listed.ok()) return undefined
       const { files } = (await listed.json()) as { files: { status: string; error: string | null }[] }
       if (files[0]?.status === "failed") throw new Error(`ingestion failed: ${files[0].error}`)
       return files[0]?.status
@@ -52,6 +64,8 @@ test.beforeEach(async ({ request }) => {
 })
 
 test.afterEach(async ({ request }) => {
+  // A parked run holds the workflow: the engine refuses to delete one with a run still active.
+  await cancelRuns(request, workflowId)
   await deleteWorkflow(request, workflowId)
   await request.delete(`/api/engine/knowledge-bases/${kbId}`).catch(() => undefined)
 })
@@ -69,6 +83,7 @@ test("a question finds the matching section of an uploaded file", async ({ page,
 
   const listed = await request.get(`/api/engine/workflows/${workflowId}/runs`)
   const { runs } = (await listed.json()) as { runs: { id: string }[] }
+  expect(runs).toHaveLength(1)
   const detail = await request.get(`/api/engine/runs/${runs[0]!.id}`)
   const { outputs } = (await detail.json()) as { outputs: { answer: string } }
   expect(outputs.answer).toContain("14일")
