@@ -14,6 +14,7 @@ import { useEffect, useRef } from "react"
 
 import { candidates, typedAt, type RefNode } from "@/lib/template/complete"
 import type { TemplateContext } from "@/lib/template/context"
+import { echoes } from "@/lib/template/echo"
 import { openReferenceAt, ranges } from "@/lib/template/parse"
 
 /** The template field (3 설계 §6.1): autocomplete on `{{`, and references shown as label chips.
@@ -170,6 +171,9 @@ export function TemplateEditor({
   // Read through a ref so the extensions, which are built once with the view, always see the current
   // props. Rebuilding them on every render would mean reconfiguring the editor on every keystroke.
   const latest = useRef({ context, onChange, onBlur })
+  /** What this editor reported and has not yet seen come back as `value`, so a parent that commits late
+   * cannot hand an earlier document back as if it were a new one (`lib/template/echo.ts`). */
+  const reported = useRef(echoes())
   // In an effect, not during render: a ref written during render is lost under a re-entrant render, and
   // React's rules say so. The editor's callbacks all fire from user events, which are after the commit.
   useEffect(() => {
@@ -191,7 +195,11 @@ export function TemplateEditor({
           chipPlugin(() => latest.current.context),
           autocompletion({ override: [completionSource(() => latest.current.context)], icons: false }),
           EditorView.updateListener.of((update) => {
-            if (update.docChanged) latest.current.onChange(update.state.doc.toString())
+            if (update.docChanged) {
+              const doc = update.state.doc.toString()
+              reported.current.emitted(doc)
+              latest.current.onChange(doc)
+            }
             if (update.focusChanged && !update.view.hasFocus) latest.current.onBlur()
           }),
         ],
@@ -209,10 +217,15 @@ export function TemplateEditor({
   useEffect(() => {
     const editor = view.current
     if (editor === null) return
+    // Our own report coming back, on time or late, is not a change to apply. Late is the case that
+    // matters: a parent that commits a render behind hands back the previous document after the next
+    // keystroke, and written back it would erase that keystroke -- or the syllable a Korean IME had
+    // just committed.
+    if (reported.current.own(value)) return
     const current = editor.state.doc.toString()
-    // Only when it really differs, or the transaction we dispatch for our own `onChange` would move the
-    // cursor to the end on every keystroke. Never mid-composition: replacing the document under an
-    // active IME commits the half-formed syllable twice.
+    // Only when it really differs, or the cursor would move to the end for nothing. Never
+    // mid-composition: replacing the document under an active IME commits the half-formed syllable
+    // twice.
     if (current !== value && !editor.composing) {
       editor.dispatch({ changes: { from: 0, to: current.length, insert: value } })
     }
