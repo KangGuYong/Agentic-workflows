@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react"
 
+import { ImportButton } from "@/components/transfer/ImportButton"
 import {
   createKnowledgeBase,
   deleteFile,
@@ -20,6 +21,7 @@ import {
  */
 
 const POLL_MS = 5_000
+const MAX_FILE_BYTES = 50 * 1024 * 1024
 const STATUS: Record<KbFile["status"], string> = { pending: "대기 중", processing: "처리 중", ready: "완료", failed: "실패" }
 
 export function KnowledgeBasesScreen({ initial }: { initial: KnowledgeBaseSummary[] }) {
@@ -29,8 +31,10 @@ export function KnowledgeBasesScreen({ initial }: { initial: KnowledgeBaseSummar
 
   async function refresh() {
     const result = await listKnowledgeBases()
-    if (result.outcome === "ok") setBases(result.knowledgeBases)
-    else setError(result.message)
+    if (result.outcome === "ok") {
+      setError(null)
+      setBases(result.knowledgeBases)
+    } else setError(result.message)
   }
 
   const current = bases.find((kb) => kb.id === open) ?? null
@@ -55,8 +59,8 @@ export function KnowledgeBasesScreen({ initial }: { initial: KnowledgeBaseSummar
                   type="button"
                   onClick={() => setOpen(kb.id === open ? null : kb.id)}
                   aria-pressed={kb.id === open}
-                  className="readout flex-1 border border-ink-600 bg-ink-800 px-3 py-2 text-left text-sm aria-pressed:border-ink-400"
-                  style={{ borderRadius: "var(--radius)" }}
+                  className="readout flex-1 border bg-ink-800 px-3 py-2 text-left text-sm"
+                  style={{ borderRadius: "var(--radius)", borderColor: kb.id === open ? "var(--accent)" : "var(--ink-600)" }}
                 >
                   {kb.name} <span className="text-xs text-fg-faint">파일 {kb.fileCount}개</span>
                 </button>
@@ -128,14 +132,18 @@ function CreateForm({ onCreated, onError }: { onCreated: () => void; onError: (m
   )
 }
 
-function Files({ kb, onChanged, onError }: { kb: KnowledgeBaseSummary; onChanged: () => void; onError: (message: string) => void }) {
+function Files({ kb, onChanged, onError }: { kb: KnowledgeBaseSummary; onChanged: () => void; onError: (message: string | null) => void }) {
   const [files, setFiles] = useState<KbFile[] | null>(null)
   const [uploading, setUploading] = useState(0)
 
-  async function load() {
+  // `clearError` is false right after an upload failure: that error names *this* file, and a routine
+  // list refresh succeeding a moment later must not blank it out.
+  async function load(clearError = true) {
     const result = await listFiles(kb.id)
-    if (result.outcome === "ok") setFiles(result.files)
-    else onError(result.message)
+    if (result.outcome === "ok") {
+      if (clearError) onError(null)
+      setFiles(result.files)
+    } else onError(result.message)
   }
 
   useEffect(() => {
@@ -144,8 +152,10 @@ function Files({ kb, onChanged, onError }: { kb: KnowledgeBaseSummary; onChanged
     // trips `react-hooks/set-state-in-effect`, which can't see the fetch's `await` in between.
     void listFiles(kb.id).then((result) => {
       if (cancelled) return
-      if (result.outcome === "ok") setFiles(result.files)
-      else onError(result.message)
+      if (result.outcome === "ok") {
+        onError(null)
+        setFiles(result.files)
+      } else onError(result.message)
     })
     return () => {
       cancelled = true
@@ -162,75 +172,94 @@ function Files({ kb, onChanged, onError }: { kb: KnowledgeBaseSummary; onChanged
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `load` reads kb.id, which is the other dep
   }, [busy, kb.id])
 
-  async function upload(chosen: FileList | null) {
-    if (chosen === null || chosen.length === 0) return
-    setUploading(chosen.length)
-    for (const file of Array.from(chosen)) {
-      const result = await uploadFile(kb.id, file)
-      if (result.outcome === "failed") onError(`${file.name}: ${result.message}`)
-      setUploading((n) => n - 1)
+  async function uploadOne(file: File) {
+    if (file.size > MAX_FILE_BYTES) {
+      onError(`${file.name}: 파일당 최대 50MB입니다`)
+      return
     }
-    await load()
-    onChanged()
+    setUploading((n) => n + 1)
+    const result = await uploadFile(kb.id, file)
+    const failed = result.outcome === "failed"
+    if (failed) onError(`${file.name}: ${result.message}`)
+    setUploading((n) => n - 1)
+    await load(!failed)
+    // Skipped on failure: `onChanged` refreshes the base list, and that refresh clears the error on
+    // success -- which would blank out the message this upload just set.
+    if (!failed) onChanged()
   }
 
   return (
     <section>
       <h2 className="instrument-label mb-2">{kb.name}의 파일</h2>
       <div className="mb-3 flex items-center gap-3">
-        <label htmlFor="kb-upload" className="border px-3 py-1.5 text-xs" style={{ borderRadius: "var(--radius)", borderColor: "var(--accent)", color: "var(--accent)" }}>
-          파일 올리기
-        </label>
-        <input id="kb-upload" type="file" multiple className="sr-only" onChange={(event) => void upload(event.target.files)} />
-        {uploading > 0 ? <span className="text-xs text-fg-muted">올리는 중 ({uploading})</span> : null}
+        <ImportButton
+          multiple
+          accept=""
+          busy={uploading > 0}
+          label="파일 올리기"
+          title="PDF·오피스 문서는 MinerU가, .md·.txt는 바로 처리됩니다. 파일당 최대 50MB."
+          className="border px-3 py-1.5 text-xs disabled:opacity-35"
+          style={{ borderRadius: "var(--radius)", borderColor: "var(--accent)", color: "var(--accent)" }}
+          onPick={(file) => void uploadOne(file)}
+        />
+        {uploading > 0 ? (
+          <span role="status" className="text-xs text-fg-muted">
+            올리는 중 ({uploading})
+          </span>
+        ) : null}
         <span className="text-xs text-fg-faint">PDF·오피스 문서는 MinerU가, .md·.txt는 바로 처리됩니다. 파일당 최대 50MB.</span>
       </div>
       {files === null ? (
-        <p className="text-sm text-fg-muted">불러오는 중…</p>
+        <p role="status" className="text-sm text-fg-muted">불러오는 중…</p>
       ) : files.length === 0 ? (
         <p className="text-sm text-fg-muted">아직 파일이 없습니다.</p>
       ) : (
-        <table className="w-full border-collapse text-sm">
-          <thead>
-            <tr className="rule-engraved text-left">
-              <th scope="col" className="instrument-label pb-2 font-normal">이름</th>
-              <th scope="col" className="instrument-label pb-2 font-normal">크기</th>
-              <th scope="col" className="instrument-label pb-2 font-normal">상태</th>
-              <th scope="col" className="sr-only">작업</th>
-            </tr>
-          </thead>
-          <tbody>
-            {files.map((file) => (
-              <tr key={file.id} className="border-b border-ink-700">
-                <td className="readout py-2 pr-4">{file.filename}</td>
-                <td className="readout py-2 pr-4 text-xs text-fg-faint">{formatSize(file.size)}</td>
-                <td className="py-2 pr-4 text-xs">
-                  <span style={{ color: file.status === "failed" ? "var(--st-failed)" : file.status === "ready" ? "var(--st-succeeded)" : "var(--st-waiting)" }}>
-                    {STATUS[file.status]}
-                  </span>
-                  {file.error === null ? null : <span className="ml-2 text-fg-muted">{file.error}</span>}
-                </td>
-                <td className="py-2 text-right">
-                  <button
-                    type="button"
-                    className="text-xs text-fg-muted underline"
-                    onClick={() => {
-                      if (!window.confirm(`'${file.filename}'을 지식베이스에서 삭제할까요?`)) return
-                      void deleteFile(kb.id, file.id).then((result) => {
-                        if (result.outcome === "ok") {
-                          void load()
-                          onChanged()
-                        } else onError(result.message)
-                      })
-                    }}
-                  >
-                    삭제
-                  </button>
-                </td>
+        <>
+          <p role="status" className="sr-only">
+            {busy ? `${files.filter((file) => file.status === "pending" || file.status === "processing").length}개 처리 중` : "처리 중인 파일 없음"}
+          </p>
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr className="rule-engraved text-left">
+                <th scope="col" className="instrument-label pb-2 font-normal">이름</th>
+                <th scope="col" className="instrument-label pb-2 font-normal">크기</th>
+                <th scope="col" className="instrument-label pb-2 font-normal">상태</th>
+                <th scope="col" className="sr-only">작업</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {files.map((file) => (
+                <tr key={file.id} className="border-b border-ink-700">
+                  <td className="readout py-2 pr-4">{file.filename}</td>
+                  <td className="readout py-2 pr-4 text-xs text-fg-faint">{formatSize(file.size)}</td>
+                  <td className="py-2 pr-4 text-xs">
+                    <span style={{ color: file.status === "failed" ? "var(--st-failed)" : file.status === "ready" ? "var(--st-succeeded)" : "var(--st-waiting)" }}>
+                      {STATUS[file.status]}
+                    </span>
+                    {file.error === null ? null : <span className="ml-2 text-fg-muted">{file.error}</span>}
+                  </td>
+                  <td className="py-2 text-right">
+                    <button
+                      type="button"
+                      className="text-xs text-fg-muted underline"
+                      onClick={() => {
+                        if (!window.confirm(`'${file.filename}'을 지식베이스에서 삭제할까요?`)) return
+                        void deleteFile(kb.id, file.id).then((result) => {
+                          if (result.outcome === "ok") {
+                            void load()
+                            onChanged()
+                          } else onError(result.message)
+                        })
+                      }}
+                    >
+                      삭제
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
       )}
     </section>
   )

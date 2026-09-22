@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -74,10 +74,73 @@ describe("files of the open knowledge base", () => {
     await userEvent.click(screen.getByRole("button", { name: /제품 문서/ }))
     await screen.findByText("guide.pdf")
 
-    await userEvent.upload(screen.getByLabelText("파일 올리기"), new File(["# n"], "new.md", { type: "text/markdown" }))
+    // ImportButton's input keeps the workflow-import accessible name (Task 23), so it is found by type
+    // rather than by label -- the visible "파일 올리기" text lives on the button beside it.
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    await userEvent.upload(input, new File(["# n"], "new.md", { type: "text/markdown" }))
 
     await waitFor(() => expect(screen.getByText("new.md")).toBeInTheDocument())
     expect(calls.some((c) => c.init?.method === "PUT" && c.url.includes("name=new.md"))).toBe(true)
+  })
+
+  it("shows why an upload failed", async () => {
+    answer((url, init) => {
+      if (init?.method === "PUT") return json(413, { error: { message: "파일이 너무 큽니다 (최대 50MB)" } })
+      if (url.endsWith("/files")) return json(200, { files: [READY] })
+      return json(200, { knowledgeBases: [KB] })
+    })
+    render(<KnowledgeBasesScreen initial={[KB]} />)
+    await userEvent.click(screen.getByRole("button", { name: /제품 문서/ }))
+    await screen.findByText("guide.pdf")
+
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    await userEvent.upload(input, new File(["# n"], "new.md", { type: "text/markdown" }))
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("new.md: 파일이 너무 큽니다")
+  })
+
+  it("uploads the same file twice, once per pick", async () => {
+    answer((url, init) => {
+      if (init?.method === "PUT") return json(202, PENDING)
+      if (url.endsWith("/files")) return json(200, { files: [READY] })
+      return json(200, { knowledgeBases: [KB] })
+    })
+    render(<KnowledgeBasesScreen initial={[KB]} />)
+    await userEvent.click(screen.getByRole("button", { name: /제품 문서/ }))
+    await screen.findByText("guide.pdf")
+
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    const file = new File(["# n"], "new.md", { type: "text/markdown" })
+    await userEvent.upload(input, file)
+    await userEvent.upload(input, file)
+
+    await waitFor(() => expect(calls.filter((c) => c.init?.method === "PUT").length).toBe(2))
+  })
+
+  it("refuses a file over 50MB without uploading it", async () => {
+    render(<KnowledgeBasesScreen initial={[KB]} />)
+    await userEvent.click(screen.getByRole("button", { name: /제품 문서/ }))
+    await screen.findByText("guide.pdf")
+
+    const big = new File([new Uint8Array(1)], "big.bin")
+    Object.defineProperty(big, "size", { value: 51 * 1024 * 1024 })
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    await userEvent.upload(input, big)
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("big.bin: 파일당 최대 50MB입니다")
+    expect(calls.some((c) => c.init?.method === "PUT")).toBe(false)
+  })
+
+  it("deletes a file after confirming", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true)
+    render(<KnowledgeBasesScreen initial={[KB]} />)
+    await userEvent.click(screen.getByRole("button", { name: /제품 문서/ }))
+    await screen.findByText("guide.pdf")
+
+    const row = screen.getByText("guide.pdf").closest("tr")
+    await userEvent.click(within(row as HTMLElement).getByRole("button", { name: "삭제" }))
+
+    await waitFor(() => expect(calls.some((c) => c.init?.method === "DELETE")).toBe(true))
   })
 
   it("polls every 5 seconds only while a file is pending or processing", async () => {

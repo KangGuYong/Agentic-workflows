@@ -17,12 +17,22 @@ export function ImportButton({
   className,
   style,
   title,
+  label = "가져오기",
+  multiple = false,
+  accept = "application/json,.json",
   onPick,
 }: {
   busy?: boolean
   className: string
   style?: React.CSSProperties
   title?: string
+  /** Button text; defaults to the workflow-import wording so existing callers are unaffected. */
+  label?: string
+  /** When set, the input accepts several files and `onPick` fires once per file chosen. */
+  multiple?: boolean
+  /** The `accept` filter on the underlying input; defaults to the workflow-import (`.json`) filter.
+   *  A caller picking other kinds of files -- documents, say -- passes its own, or `""` for none. */
+  accept?: string
   onPick: (file: File) => void
 }) {
   const input = useRef<HTMLInputElement>(null)
@@ -32,15 +42,17 @@ export function ImportButton({
       <input
         ref={input}
         type="file"
-        accept="application/json,.json"
+        accept={accept}
+        multiple={multiple}
         aria-label="워크플로 파일"
         className="sr-only"
         onChange={(event) => {
-          const file = event.target.files?.[0]
+          const files = event.target.files
           // Cleared after every pick: choosing the *same* file twice in a row fires no `change` event
           // otherwise, which looks exactly like the import silently failing.
           event.target.value = ""
-          if (file !== undefined) onPick(file)
+          if (files === null) return
+          for (const file of Array.from(files)) onPick(file)
         }}
       />
       <button
@@ -51,7 +63,7 @@ export function ImportButton({
         className={className}
         style={style}
       >
-        가져오기
+        {label}
       </button>
     </>
   )
