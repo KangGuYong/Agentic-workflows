@@ -6,6 +6,7 @@ import type { TemplateContext } from "@/lib/template/context"
 import type { JsonSchema } from "@/lib/template/schema"
 
 import { TEMPLATE_WIDGETS, templateLabelId } from "./templates"
+import { KnowledgeBaseWidget } from "./KnowledgeBaseWidget"
 import { SchemaEditor } from "./SchemaEditor"
 import { TemplateEditor } from "./TemplateEditor"
 
@@ -67,6 +68,7 @@ export function JsonSchemaField({ schema, fieldPathId, formData, disabled, reado
 export const WIDGETS: RegistryWidgetsType = {
   ...TEMPLATE_WIDGETS,
   template: TemplateWidget,
+  knowledgeBase: KnowledgeBaseWidget,
 }
 
 export const FIELDS: RegistryFieldsType = {

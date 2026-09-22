@@ -58,6 +58,12 @@ const TITLES: Record<string, string> = {
   body: "본문",
   bodyFormat: "본문 형식",
   sendIdempotencyKey: "멱등 키 전송",
+  knowledgeBase: "지식베이스",
+  query: "질문",
+  topK: "검색 개수",
+  minScore: "최소 점수",
+  hits: "검색 결과",
+  topN: "남길 개수",
 }
 
 /** Field order per node type: what a person fills first, first. `*` catches anything not listed --
@@ -73,10 +79,16 @@ const ORDER: Record<string, string[]> = {
   merge: ["mode"],
   human_approval: ["message", "review", "allowEdit"],
   http_request: ["method", "url", "headers", "body", "bodyFormat", "sendIdempotencyKey"],
+  kb_search: ["knowledgeBase", "query", "topK", "minScore"],
+  rerank: ["query", "hits", "topN", "minScore"],
 }
 
 function isTemplate(property: unknown): boolean {
   return typeof property === "object" && property !== null && (property as Record<string, unknown>)["x-template"] === true
+}
+
+function isKnowledgeBase(property: unknown): boolean {
+  return typeof property === "object" && property !== null && (property as Record<string, unknown>)["x-knowledge-base"] === true
 }
 
 export function buildUiSchema(nodeType: NodeType): UiSchema {
@@ -89,6 +101,7 @@ export function buildUiSchema(nodeType: NodeType): UiSchema {
     // A field, not a widget: the engine declares these as `anyOf: [object, null]`, and RJSF renders an
     // `anyOf` with its own option selector without ever consulting `ui:widget`.
     if (schemaFields.has(name)) field["ui:field"] = "jsonSchema"
+    else if (isKnowledgeBase(property)) field["ui:widget"] = "knowledgeBase"
     else if (isTemplate(property)) field["ui:widget"] = "template"
     const title = TITLES[name]
     if (title !== undefined) field["ui:title"] = title
