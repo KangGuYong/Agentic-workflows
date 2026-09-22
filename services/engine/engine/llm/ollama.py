@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -64,7 +65,8 @@ class OllamaRaw:
         vectors = data.get("embeddings")
         if (not isinstance(vectors, list) or len(vectors) != len(texts)
                 or not all(isinstance(v, list)
-                           and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)
+                           and all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+                                   for x in v)
                            for v in vectors)):
             raise _unavailable("Ollama 임베딩 응답 형식이 올바르지 않습니다")
         return [[float(x) for x in v] for v in vectors]

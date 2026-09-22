@@ -6,12 +6,14 @@ no pgvector client library is needed. Callers manage transactions; nothing here 
 from __future__ import annotations
 
 import uuid
-from typing import Any, Protocol
+from typing import Any
 
+import psycopg
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from engine.db.workflows import WORKSPACE
+from engine.errors import ErrorCode, NodeError
 
 TEXT_TYPES = ("text/markdown", "text/plain")
 TEXT_SUFFIXES = (".md", ".txt")
@@ -190,6 +192,9 @@ async def replace_chunks(conn: AsyncConnection, *, file_id: str, kb_id: str,
 
 async def search(conn: AsyncConnection, *, kb_id: str, embedding: list[float], top_k: int) -> list[dict[str, Any]]:
     """Top-k chunks by cosine similarity. Text and metadata only: the vector stays in this table."""
+    # ponytail: one HNSW index over every knowledge base, filtered by kb_id after the scan. With several
+    # large bases in one table a small base can get fewer than top_k hits back; raise hnsw.ef_search or
+    # give each base its own partial index when that shows up.
     rows = await (await conn.execute(
         "SELECT c.text, c.heading, f.filename AS file, 1 - (c.embedding <=> %(q)s::vector) AS score"
         " FROM kb_chunks c JOIN kb_files f ON f.id = c.file_id"
@@ -199,22 +204,20 @@ async def search(conn: AsyncConnection, *, kb_id: str, embedding: list[float], t
     return [{"text": r["text"], "score": float(r["score"]), "heading": r["heading"], "file": r["file"]} for r in rows]
 
 
-class KnowledgeBases(Protocol):
-    """What the kb_search node needs: the model a knowledge base was embedded with, and a search."""
-
-    async def get(self, kb_id: str) -> dict[str, Any] | None: ...
-
-    async def search(self, kb_id: str, embedding: list[float], top_k: int) -> list[dict[str, Any]]: ...
-
-
 class PostgresKnowledgeBases:
     def __init__(self, pool: AsyncConnectionPool) -> None:
         self._pool = pool
 
     async def get(self, kb_id: str) -> dict[str, Any] | None:
-        async with self._pool.connection() as conn:
-            return await get_kb(conn, kb_id)
+        try:
+            async with self._pool.connection() as conn:
+                return await get_kb(conn, kb_id)
+        except psycopg.Error as exc:
+            raise NodeError(ErrorCode.NODE_FAILED, "지식베이스 저장소에 연결하지 못했습니다", retryable=True) from exc
 
     async def search(self, kb_id: str, embedding: list[float], top_k: int) -> list[dict[str, Any]]:
-        async with self._pool.connection() as conn:
-            return await search(conn, kb_id=kb_id, embedding=embedding, top_k=top_k)
+        try:
+            async with self._pool.connection() as conn:
+                return await search(conn, kb_id=kb_id, embedding=embedding, top_k=top_k)
+        except psycopg.Error as exc:
+            raise NodeError(ErrorCode.NODE_FAILED, "지식베이스 저장소에 연결하지 못했습니다", retryable=True) from exc

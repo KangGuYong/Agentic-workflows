@@ -42,8 +42,9 @@ class KbSearchConfig(BaseModel):
     knowledgeBase: str = Field(min_length=1, max_length=64, json_schema_extra=KNOWLEDGE_BASE)
     query: str = Field(min_length=1, json_schema_extra=TEMPLATE)
     topK: int = Field(5, ge=1, le=20, strict=True)
-    # 0 means no filter. A plain float rather than `float | None`: pydantic renders Optional as an
-    # `anyOf`, and RJSF draws its own branch selector for those (see collapseOptionalSchemas).
+    # 0 keeps everything a cosine search normally returns (bge-m3 scores are rarely negative). A plain
+    # float rather than `float | None`: pydantic renders Optional as an `anyOf`, and RJSF draws its own
+    # branch selector for those (see collapseOptionalSchemas).
     minScore: float = Field(0.0, ge=0, le=1)
 
 

@@ -239,3 +239,14 @@ async def test_embed_rejects_booleans_inside_a_vector():
     with pytest.raises(NodeError) as caught:
         await _raw(handler).embed(model="bge-m3", texts=["a"])
     assert caught.value.code == ErrorCode.LLM_UNAVAILABLE
+
+
+async def test_embed_rejects_non_finite_values_inside_a_vector():
+    # httpx's json= refuses NaN, so the body is built by hand.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b'{"embeddings": [[1.0, NaN]]}',
+                              headers={"content-type": "application/json"})
+
+    with pytest.raises(NodeError) as caught:
+        await _raw(handler).embed(model="bge-m3", texts=["a"])
+    assert caught.value.code == ErrorCode.LLM_UNAVAILABLE
