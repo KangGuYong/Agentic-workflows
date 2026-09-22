@@ -90,7 +90,7 @@ export async function expectSaved(page: Page, timeout = 15_000): Promise<void> {
  */
 export async function pressSave(page: Page): Promise<void> {
   await expect(page.getByRole("status", { name: "저장 상태" })).toHaveText(/저장 대기 중/, { timeout: 10_000 })
-  await page.keyboard.press("Control+c")
+  await page.keyboard.press("Control+s")
 }
 
 export async function saveNow(page: Page): Promise<void> {

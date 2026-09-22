@@ -10,7 +10,7 @@ import type { EditorDsl } from "@/lib/dsl/document"
  *
  * Saving is **once a minute, or on demand**. The minute starts at the first unsaved change and is not
  * restarted by the changes after it -- a debounce would let someone who never pauses go an hour
- * without a save. `flush` is the on-demand path: the Ctrl+C shortcut, and 실행, which must run what
+ * without a save. `flush` is the on-demand path: the Ctrl+S shortcut, and 실행, which must run what
  * is on screen rather than what the engine last heard.
  *
  * The one rule that shapes the rest: **the document is never replaced unless the person chose it.**

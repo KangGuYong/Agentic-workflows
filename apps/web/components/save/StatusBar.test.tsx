@@ -64,11 +64,11 @@ describe("StatusBar", () => {
   it("says how to save now while a save is waiting, and only then", () => {
     // A minute is long enough to wonder whether anything is going to happen.
     const { unmount } = render(<StatusBar state={state({ status: "pending" })} now={0} />)
-    expect(screen.getByRole("status", { name: "저장 상태" })).toHaveTextContent("Ctrl+C로 지금 저장")
+    expect(screen.getByRole("status", { name: "저장 상태" })).toHaveTextContent("Ctrl+S로 지금 저장")
     unmount()
 
     render(<StatusBar state={state({ status: "saved" })} now={0} />)
-    expect(screen.getByRole("status", { name: "저장 상태" })).not.toHaveTextContent("Ctrl+C")
+    expect(screen.getByRole("status", { name: "저장 상태" })).not.toHaveTextContent("Ctrl+S")
   })
 
   it("shows when the last save landed", () => {

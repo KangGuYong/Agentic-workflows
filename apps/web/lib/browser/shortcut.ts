@@ -1,12 +1,13 @@
 /** Is this keypress the save shortcut?
  *
- * Ctrl+C -- and ⌘C, which is where a Mac keyboard puts the same chord. Both are also the browser's
- * copy, which the editor never takes away: the listener that acts on this does not `preventDefault`,
- * so text selected anywhere still copies and the document saves on top of that. Making the shortcut
- * *only* save would break copying inside every text field on the screen.
+ * Ctrl+S -- and ⌘S, which is where a Mac keyboard puts the same chord. The browser's own Ctrl+S saves
+ * the *page* to a file, which is never what someone editing a workflow means, so the listener that
+ * acts on this consumes the keypress (`useSaveShortcut`) rather than letting both happen.
  *
- * Matched on `code` as well as `key`: with a Korean IME active, Chrome reports the C key as `ㅊ` in
- * `key`, and the shortcut must work on the keyboard this editor exists for.
+ * Either half matches, because neither alone covers both keyboards this has to work on. `code` is the
+ * physical key, which is what a Korean IME leaves recognisable -- with one active, Chrome reports the
+ * S key as `ㄴ` in `key`. `key` is the character, which is where a layout that moves S (Dvorak) puts
+ * save, and where the browser's own Ctrl+S is.
  */
 export function isSaveShortcut(event: {
   key: string
@@ -17,5 +18,5 @@ export function isSaveShortcut(event: {
   repeat: boolean
 }): boolean {
   if (!(event.ctrlKey || event.metaKey) || event.altKey || event.repeat) return false
-  return event.key.toLowerCase() === "c" || event.code === "KeyC"
+  return event.key.toLowerCase() === "s" || event.code === "KeyS"
 }

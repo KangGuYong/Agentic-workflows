@@ -76,7 +76,7 @@ export function StatusBar({ state, now }: { state: SaveState; now?: number }) {
         <span className="text-fg-faint">마지막 저장 {when}</span>
       ) : null}
       {/* The wait is a minute, which is long enough to wonder. The way out is named while it applies. */}
-      {state.status === "pending" ? <span className="text-fg-faint">Ctrl+C로 지금 저장</span> : null}
+      {state.status === "pending" ? <span className="text-fg-faint">Ctrl+S로 지금 저장</span> : null}
     </div>
   )
 }
