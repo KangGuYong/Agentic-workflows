@@ -19,7 +19,7 @@ from engine.nodes.merge import MergeNode
 from engine.nodes.template import TemplateNode
 from engine.runtime.deps import RunDeps
 from engine.runtime.guard import FlagGuard
-from engine.runtime.recorder import DuplicateAttempt, InMemoryRecorder
+from engine.runtime.recorder import DuplicateAttempt, InMemoryRecorder, NodeRunRecord
 
 LLM_CONFIG = {"model": "m", "prompt": "{{start.topic}}"}
 
@@ -122,6 +122,54 @@ async def test_on_error_default_uses_default_output():
 
     assert outputs_of(result)["n"] == {"text": "기본"}
     assert recorder.records[-1].status == "defaulted"
+
+
+async def test_on_error_default_records_the_fallback_as_its_own_attempt():
+    """The failure and the stand-in value are two attempts, not one row rewritten.
+
+    Rewriting the row is what the recorder's fence refuses -- it cannot tell that write apart from a
+    stale worker resurrecting a row the reaper closed -- so doing it turned every deployed
+    `onError: "default"` run into ENGINE_RECOVERY_EXHAUSTED while every unit test passed.
+    """
+    deps, recorder, _ = _deps(ScriptedLLM([ValueError("bad")]))
+    policy = Policy(retry=RetrySpec(maxAttempts=1), onError="default", defaultOutput={"text": "기본"})
+
+    await _run(_plan(LLMNode(), LLM_CONFIG, policy=policy), deps)
+
+    assert [(r.attempt, r.status) for r in recorder.records] == [(1, "failed"), (2, "defaulted")]
+    # The failure is still readable: a trace that showed only the default would hide what it stood in for.
+    assert recorder.records[0].error is not None
+
+
+async def test_on_error_default_numbers_its_attempt_from_the_log_not_from_this_call():
+    """The same rule the retry loop follows: a fresh attempt number comes from the recorded log.
+
+    A resumed execution starts on the attempt that *waited*, which can be lower than the number of rows
+    already there -- attempt 1 waited, attempt 2 was a retry that failed, and the replay comes back to
+    attempt 1. Numbering the fallback from this call's counter would then land on an attempt that already
+    exists and take the node down with a DuplicateAttempt.
+    """
+    deps, recorder, _ = _deps(ScriptedLLM([ValueError("bad")]))
+    recorder.records.append(NodeRunRecord("n", 1, 1, "waiting", waited=True))
+    recorder.records.append(NodeRunRecord("n", 1, 2, "failed"))
+    policy = Policy(retry=RetrySpec(maxAttempts=1), onError="default", defaultOutput={"text": "기본"})
+
+    result = await _run(_plan(LLMNode(), LLM_CONFIG, policy=policy), deps)
+
+    assert outputs_of(result)["n"] == {"text": "기본"}
+    assert [(r.attempt, r.status) for r in recorder.records] == [(1, "failed"), (2, "failed"), (3, "defaulted")]
+
+
+async def test_on_error_default_after_retries_numbers_its_attempt_past_them():
+    deps, recorder, _ = _deps(ScriptedLLM([TimeoutError(), TimeoutError(), TimeoutError()]))
+    policy = Policy(retry=RetrySpec(maxAttempts=3, initialDelaySec=0.5),
+                    onError="default", defaultOutput={"text": "기본"})
+
+    await _run(_plan(LLMNode(), LLM_CONFIG, policy=policy), deps)
+
+    assert [(r.attempt, r.status) for r in recorder.records] == [
+        (1, "failed"), (2, "failed"), (3, "failed"), (4, "defaulted"),
+    ]
 
 
 async def test_timeout():

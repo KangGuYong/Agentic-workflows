@@ -12,13 +12,11 @@ from engine.events.redact import MAX_EVENT_PREVIEW_BYTES, MAX_STORED_BYTES, clip
 from engine.events.writer import append_event
 from engine.jsondata import check_text
 from engine.nodes.base import Usage
-from engine.runtime.recorder import DuplicateAttempt
+from engine.runtime.recorder import DuplicateAttempt, RecorderInconsistent
 
 log = logging.getLogger(__name__)
 
-
-class RecorderInconsistent(RuntimeError):
-    """A close arrived for an attempt that was never opened. The wrapper turns this into an EngineFault."""
+__all__ = ["PostgresRecorder", "RecorderInconsistent"]
 
 
 class PostgresRecorder:

@@ -139,6 +139,23 @@ and `http_request`.
   credential header; anything the server echoes back comes out `[REDACTED]`. The value itself exists in
   plaintext only inside one `http_request` call.
 
+## Node policy
+
+Every node carries a policy — a timeout, a retry spec, and what to do when the attempts run out. A node
+may override its type's default with a partial `policy` in the DSL.
+
+`onError` decides the last part:
+
+- **`"fail"`** (default) — the node's failure fails the run.
+- **`"default"`** — the node produces `defaultOutput` instead (or, with none given, the node type's own
+  fallback) and the run carries on. Downstream nodes see that value like any other, so a `condition`
+  reading `{{ http_1.status }}` can route to a manual-handling branch.
+
+A defaulted node leaves **two rows** in `node_runs`: the attempt that failed, and a further attempt
+recorded as `defaulted` carrying the stand-in value. Both are kept on purpose — collapsing them into one
+row would erase the failure the default was standing in for, and rewriting an attempt that is already
+closed is what the recorder's own fence refuses (see `engine/events/recorder.py::_close`).
+
 ## Templates
 
 `{{ }}` in a node's config is Jinja-shaped but **not Jinja**: `engine/templates/parser.py` rejects most of

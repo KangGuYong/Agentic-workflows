@@ -5,15 +5,27 @@
       "id": "start",
       "type": "start",
       "label": "알림 요청",
-      "position": { "x": 80, "y": 200 },
+      "position": {
+        "x": 80,
+        "y": 200
+      },
       "config": {
         "inputs": {
           "type": "object",
           "properties": {
-            "channel": { "type": "string", "description": "보낼 채널 이름" },
-            "text": { "type": "string", "description": "보낼 내용" }
+            "channel": {
+              "type": "string",
+              "description": "보낼 채널 이름"
+            },
+            "text": {
+              "type": "string",
+              "description": "보낼 내용"
+            }
           },
-          "required": ["channel", "text"]
+          "required": [
+            "channel",
+            "text"
+          ]
         }
       }
     },
@@ -21,7 +33,10 @@
       "id": "payload",
       "type": "template",
       "label": "요청 본문",
-      "position": { "x": 360, "y": 200 },
+      "position": {
+        "x": 360,
+        "y": 200
+      },
       "config": {
         "template": "{\"channel\": {{ start.channel }}, \"text\": {{ start.text }}}",
         "format": "json"
@@ -31,7 +46,10 @@
       "id": "notify",
       "type": "http_request",
       "label": "알림 전송",
-      "position": { "x": 640, "y": 200 },
+      "position": {
+        "x": 640,
+        "y": 200
+      },
       "config": {
         "method": "POST",
         "url": "https://api.example.com/v1/messages",
@@ -43,15 +61,61 @@
         "bodyFormat": "json",
         "sendIdempotencyKey": true
       },
-      "policy": { "timeoutSec": 20 }
+      "policy": {
+        "timeoutSec": 20,
+        "retry": {
+          "maxAttempts": 1
+        },
+        "onError": "default",
+        "defaultOutput": {
+          "status": 0,
+          "headers": {},
+          "body": null
+        }
+      }
+    },
+    {
+      "id": "sent",
+      "type": "condition",
+      "label": "전송 성공?",
+      "position": {
+        "x": 940,
+        "y": 200
+      },
+      "config": {
+        "conditions": [
+          {
+            "left": "{{ notify.status }}",
+            "op": ">=",
+            "right": "200"
+          }
+        ],
+        "combinator": "and"
+      }
     },
     {
       "id": "receipt",
       "type": "template",
       "label": "전송 기록",
-      "position": { "x": 940, "y": 200 },
+      "position": {
+        "x": 1220,
+        "y": 80
+      },
       "config": {
         "template": "{{ start.channel }} 채널로 전송했습니다 (HTTP {{ notify.status }}).",
+        "format": "text"
+      }
+    },
+    {
+      "id": "manual",
+      "type": "template",
+      "label": "수동 확인",
+      "position": {
+        "x": 1220,
+        "y": 320
+      },
+      "config": {
+        "template": "{{ start.channel }} 채널 전송이 실패했습니다. 수동 확인이 필요합니다.",
         "format": "text"
       }
     },
@@ -59,19 +123,55 @@
       "id": "end",
       "type": "end",
       "label": "끝",
-      "position": { "x": 1220, "y": 200 },
+      "position": {
+        "x": 1500,
+        "y": 200
+      },
       "config": {
         "outputs": {
           "status": "{{ notify.status }}",
-          "receipt": "{{ receipt.text }}"
+          "receipt": "{{ receipt.text | default('', true) }}{{ manual.text | default('', true) }}"
         }
       }
     }
   ],
   "edges": [
-    { "id": "e1", "source": "start", "target": "payload" },
-    { "id": "e2", "source": "payload", "target": "notify" },
-    { "id": "e3", "source": "notify", "target": "receipt" },
-    { "id": "e4", "source": "receipt", "target": "end" }
+    {
+      "id": "e1",
+      "source": "start",
+      "target": "payload"
+    },
+    {
+      "id": "e2",
+      "source": "payload",
+      "target": "notify"
+    },
+    {
+      "id": "e3",
+      "source": "notify",
+      "target": "sent"
+    },
+    {
+      "id": "e4",
+      "source": "sent",
+      "sourceHandle": "true",
+      "target": "receipt"
+    },
+    {
+      "id": "e5",
+      "source": "sent",
+      "sourceHandle": "false",
+      "target": "manual"
+    },
+    {
+      "id": "e6",
+      "source": "receipt",
+      "target": "end"
+    },
+    {
+      "id": "e7",
+      "source": "manual",
+      "target": "end"
+    }
   ]
 }
