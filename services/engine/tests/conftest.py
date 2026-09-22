@@ -12,7 +12,8 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-APP_TABLES = ("run_events", "node_runs", "runs", "workflow_versions", "workflows", "secrets")
+APP_TABLES = ("run_events", "node_runs", "runs", "workflow_versions", "workflows", "secrets",
+              "kb_chunks", "ingest_jobs", "kb_files", "knowledge_bases")
 CHECKPOINT_TABLES = ("checkpoint_blobs", "checkpoint_writes", "checkpoints")  # not checkpoint_migrations
 
 
@@ -47,7 +48,7 @@ def db_url() -> Iterator[str]:
         return
     from testcontainers.postgres import PostgresContainer
 
-    with PostgresContainer("postgres:17-alpine", driver=None) as container:
+    with PostgresContainer("pgvector/pgvector:pg17", driver=None) as container:
         url = container.get_connection_url()
         os.environ["ENGINE_DATABASE_URL"] = url
         os.environ.setdefault("LANGGRAPH_AES_KEY", "0" * 32)

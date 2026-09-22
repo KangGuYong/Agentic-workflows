@@ -130,3 +130,39 @@ async def _new_workspace(pool) -> str:
     async with pool.connection() as conn:
         row = await (await conn.execute("SELECT gen_random_uuid() AS id")).fetchone()
     return row["id"]
+
+
+async def test_knowledge_base_tables_exist_with_the_vector_extension(pool):
+    async with pool.connection() as conn:
+        rows = await (await conn.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema='public'"
+        )).fetchall()
+        ext = await (await conn.execute("SELECT 1 FROM pg_extension WHERE extname='vector'")).fetchone()
+
+    names = {row["table_name"] for row in rows}
+    assert {"knowledge_bases", "kb_files", "ingest_jobs", "kb_chunks"} <= names
+    assert ext is not None
+
+
+async def test_deleting_a_file_cascades_to_its_chunks_and_job(pool):
+    async with pool.connection() as conn:
+        kb = await (await conn.execute(
+            "INSERT INTO knowledge_bases (id, workspace_id, name, embed_model, dim)"
+            " VALUES (gen_random_uuid(), %s, 'kb', 'bge-m3', 1024) RETURNING id",
+            ("00000000-0000-0000-0000-000000000001",),
+        )).fetchone()
+        file = await (await conn.execute(
+            "INSERT INTO kb_files (id, kb_id, filename, media_type, size, content, status)"
+            " VALUES (gen_random_uuid(), %s, 'a.md', 'text/markdown', 1, %s, 'pending') RETURNING id",
+            (kb["id"], b"x"),
+        )).fetchone()
+        await conn.execute("INSERT INTO ingest_jobs (file_id) VALUES (%s)", (file["id"],))
+        await conn.execute(
+            "INSERT INTO kb_chunks (kb_id, file_id, ordinal, heading, text, embedding)"
+            " VALUES (%s, %s, 0, NULL, 'hi', %s::vector)",
+            (kb["id"], file["id"], "[" + ",".join(["0"] * 1024) + "]"),
+        )
+        await conn.execute("DELETE FROM kb_files WHERE id=%s", (file["id"],))
+        chunks = await (await conn.execute("SELECT count(*) AS n FROM kb_chunks")).fetchone()
+        jobs = await (await conn.execute("SELECT count(*) AS n FROM ingest_jobs")).fetchone()
+    assert (chunks["n"], jobs["n"]) == (0, 0)
