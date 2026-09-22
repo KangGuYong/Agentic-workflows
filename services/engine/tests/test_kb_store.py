@@ -141,3 +141,17 @@ async def test_finish_job_on_a_deleted_file_writes_nothing(pool):
         job = await store.claim_job(conn, owner="w", lease_sec=30)
         await store.delete_file(conn, str(job["file_id"]))
         assert await store.finish_job(conn, job_id=str(job["id"]), owner="w", error=None) is False
+
+
+async def test_replace_chunks_with_a_stale_lease_writes_nothing(pool):
+    kb_id = await _kb(pool)
+    async with pool.connection() as conn:
+        file_id = str((await store.add_file(conn, kb_id=kb_id, filename="a.md", media_type="text/markdown", content=b"x"))["id"])
+        job = await store.claim_job(conn, owner="A", lease_sec=30)
+        await conn.execute("UPDATE ingest_jobs SET lease_until = now() - interval '1 second' WHERE id=%s", (job["id"],))
+        await store.claim_job(conn, owner="B", lease_sec=30)
+        rows = [("h", "t", _one_hot("t"))]
+        assert await store.replace_chunks(conn, file_id=file_id, kb_id=kb_id, chunks=rows, lease=(str(job["id"]), "A")) is False
+        assert await store.replace_chunks(conn, file_id=file_id, kb_id=kb_id, chunks=rows, lease=(str(job["id"]), "B")) is True
+        count = (await (await conn.execute("SELECT count(*) AS n FROM kb_chunks WHERE file_id=%s", (file_id,))).fetchone())["n"]
+    assert count == 1

@@ -154,7 +154,7 @@ async def test_a_file_deleted_while_processing_is_dropped_quietly(pool, ingester
     _, file_id = await _upload(pool, b"%PDF", "a.pdf", "application/pdf")
     parser = FakeParser()
     parser.proceed.clear()
-    await ingester_factory(parser=parser)
+    worker = await ingester_factory(parser=parser)
     await asyncio.wait_for(parser.started.wait(), 10)
 
     async with pool.connection() as conn:
@@ -165,10 +165,9 @@ async def test_a_file_deleted_while_processing_is_dropped_quietly(pool, ingester
         async with pool.connection() as conn:
             jobs = (await (await conn.execute("SELECT count(*) AS n FROM ingest_jobs")).fetchone())["n"]
             chunks = (await (await conn.execute("SELECT count(*) AS n FROM kb_chunks")).fetchone())["n"]
-        return parser.calls == 1 and jobs == 0 and chunks == 0
+        return parser.calls == 1 and jobs == 0 and chunks == 0 and len(worker._tasks) == 1
 
     await until(settled)
-    await asyncio.sleep(0.3)  # let _process finish after the parser returned
     assert not [r for r in caplog.records if r.levelname == "ERROR"]
 
 
@@ -179,8 +178,9 @@ async def test_an_ingester_whose_lease_was_taken_writes_no_chunks(pool, ingester
     first = await ingester_factory(parser=parser, owner="first", lease_sec=1)
     await asyncio.wait_for(parser.started.wait(), 10)
 
-    # The lease lapses while the parser is still working; another ingester takes the job.
-    async with pool.connection() as conn:
+    # The lease lapses while the parser is still working; another ingester takes the job. One
+    # transaction so "first"'s heartbeat cannot renew the lease between the two statements.
+    async with pool.connection() as conn, conn.transaction():
         await conn.execute("UPDATE ingest_jobs SET lease_until = now() - interval '1 second'")
         stolen = await store.claim_job(conn, owner="second", lease_sec=30)
     assert stolen is not None

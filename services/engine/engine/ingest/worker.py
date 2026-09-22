@@ -150,16 +150,20 @@ class Ingester:
                 await store.finish_job(conn, job_id=job_id, owner=self.owner, error=None)
         except asyncio.CancelledError:
             # stop() cancelled us mid-job; the attempt is spent either way, but the next ingester need
-            # not wait out the lease. Fenced, so a cancel caused by a lost lease writes nothing.
+            # not wait out the lease. Fenced, so a cancel caused by a lost lease writes nothing. The
+            # checkout is inside the shield too, so a second cancel during the release can't skip it.
             with contextlib.suppress(Exception):
-                async with self._pool.connection() as conn:
-                    await asyncio.shield(store.release_for_retry(conn, job_id=job_id, owner=self.owner, delay_sec=0))
+                await asyncio.shield(self._release(job_id))
             raise
         except Exception:
             # Infrastructure, not the document: leave the lease to expire so the job is retried.
             log.exception("ingest of %s aborted", file_id)
         finally:
             beat.cancel()
+
+    async def _release(self, job_id: str) -> None:
+        async with self._pool.connection() as conn:
+            await store.release_for_retry(conn, job_id=job_id, owner=self.owner, delay_sec=0)
 
     async def _ingest(self, row: dict[str, Any]) -> list[tuple[str | None, str, list[float]]]:
         filename, media_type, content = row["filename"], row["media_type"], bytes(row["content"])
