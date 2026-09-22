@@ -1,7 +1,15 @@
 import { describe, expect, it, vi } from "vitest"
 
 import type { EditorDsl } from "./document"
-import { MAX_IMPORT_BYTES, exportFileName, importedName, parseImport, readWorkflowFile, serialize } from "./transfer"
+import {
+  MAX_IMPORT_BYTES,
+  describeLoad,
+  exportFileName,
+  importedName,
+  parseImport,
+  readWorkflowFile,
+  serialize,
+} from "./transfer"
 
 const DSL: EditorDsl = {
   version: "1",
@@ -177,5 +185,23 @@ describe("readWorkflowFile", () => {
       ok: false,
       reason: "JSON 형식이 아닙니다.",
     })
+  })
+})
+
+describe("describeLoad", () => {
+  it("counts what arrived, nodes and connections both", () => {
+    // Connections are the half that was missing when import used to add rather than replace, so they
+    // are worth naming.
+    expect(describeLoad({ nodes: 5, edges: 4 })).toContain("노드 5개와 연결 4개")
+  })
+
+  it("always says undo brings the old document back", () => {
+    // Import replaces what was on screen. Saying so is what turns a mis-picked file into a keystroke.
+    expect(describeLoad({ nodes: 5, edges: 4 })).toContain("되돌리기")
+    expect(describeLoad({ nodes: 0, edges: 0 })).toContain("되돌리기")
+  })
+
+  it("says plainly when the file had no nodes", () => {
+    expect(describeLoad({ nodes: 0, edges: 0 })).toContain("노드가 없는 문서")
   })
 })

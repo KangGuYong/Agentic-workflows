@@ -395,3 +395,62 @@ describe("replaceDocument", () => {
     expect(store.getState().selection).toEqual({ nodes: [], edges: [] })
   })
 })
+
+describe("loadDocument", () => {
+  const FILE: EditorDsl = {
+    version: "1",
+    nodes: [
+      { id: "start", type: "start", position: { x: 0, y: 0 } },
+      { id: "template_1", type: "template", position: { x: 200, y: 0 }, config: { template: "{{ start.a }}" } },
+      { id: "end", type: "end", position: { x: 400, y: 0 } },
+    ],
+    edges: [
+      { id: "e1", source: "start", target: "template_1" },
+      { id: "e2", source: "template_1", target: "end" },
+    ],
+  }
+
+  it("takes the whole file, edges and all", () => {
+    // Nothing is merged and nothing is renamed: what appears is the graph the file describes, wired
+    // the way the file wired it.
+    const store = createGraphStore(emptyDsl())
+    store.getState().addNodeAt("llm", { x: 9, y: 9 })
+
+    const loaded = store.getState().loadDocument(FILE)
+
+    expect(store.getState().dsl).toEqual(FILE)
+    expect(loaded).toEqual({ nodes: 3, edges: 2 })
+  })
+
+  it("clears out what was there, including nodes the file does not have", () => {
+    const store = createGraphStore(emptyDsl())
+    store.getState().addNodeAt("llm", { x: 9, y: 9 })
+
+    store.getState().loadDocument(FILE)
+
+    expect(store.getState().dsl.nodes.some((node) => node.type === "llm")).toBe(false)
+  })
+
+  it("is one undo, unlike the conflict replacement", () => {
+    // A file picker is one mis-click from the wrong file. `replaceDocument` throwing the history away
+    // is right for a save conflict and would be a trap here.
+    const store = createGraphStore(emptyDsl())
+    store.getState().addNodeAt("llm", { x: 9, y: 9 })
+    const before = store.getState().dsl
+
+    store.getState().loadDocument(FILE)
+    store.getState().undo()
+
+    expect(store.getState().dsl).toEqual(before)
+  })
+
+  it("leaves nothing selected, because the panel would point at a node that is gone", () => {
+    const store = createGraphStore(emptyDsl())
+    store.getState().addNodeAt("llm", { x: 9, y: 9 })
+    expect(store.getState().selection.nodes).toHaveLength(1)
+
+    store.getState().loadDocument(FILE)
+
+    expect(store.getState().selection).toEqual({ nodes: [], edges: [] })
+  })
+})

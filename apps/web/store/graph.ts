@@ -13,7 +13,6 @@ import {
 } from "@/lib/dsl/commands"
 import type { EditorDsl, NodeConfig, Policy, XY } from "@/lib/dsl/document"
 import { movedPositions, type NodeChange } from "@/lib/dsl/flow"
-import { insertDocument as insert, type InsertResult } from "@/lib/dsl/insert"
 import { layout } from "@/lib/dsl/layout"
 import {
   apply,
@@ -51,9 +50,13 @@ export interface GraphState {
   lastError: string | null
 
   addNodeAt: (type: string, position: XY) => void
-  /** Place another document's nodes into this one, as one undoable step. Returns what happened so the
-   * caller can say which nodes were renamed and which were left behind. */
-  insertDocument: (incoming: EditorDsl) => InsertResult
+  /** Open another document in place of this one, as **one undoable step**.
+   *
+   * The import counterpart of `replaceDocument`, and deliberately not the same command: this one keeps
+   * the history, so 되돌리기 brings back the document that was on screen. A file picker is one mis-click
+   * from the wrong file, and undo is what makes that survivable.
+   */
+  loadDocument: (incoming: EditorDsl) => { nodes: number; edges: number }
   connectNodes: (connection: Connection) => void
   removeSelected: () => void
   moveNodes: (changes: NodeChange[]) => void
@@ -121,17 +124,14 @@ export function createGraphStore(initial: EditorDsl): GraphStore {
         if (added !== undefined) set({ selection: { nodes: [added.id], edges: [] } })
       },
 
-      insertDocument(incoming) {
-        const result = insert(get().dsl, incoming)
-        if (result.inserted > 0) {
-          // One command for the whole file, so one 되돌리기 takes all of it back rather than node by node.
-          edit(result.dsl)
-          // Selecting what arrived says where it went, on a canvas that may be scrolled away from it.
-          // The placed nodes are the last `inserted` of the new document, because insert appends.
-          const placed = result.dsl.nodes.slice(result.dsl.nodes.length - result.inserted)
-          set({ selection: { nodes: placed.map((node) => node.id), edges: [] } })
-        }
-        return result
+      loadDocument(incoming) {
+        // Through `edit`, not `set`: the previous document becomes a history entry, so one 되돌리기
+        // takes the whole import back. `replaceDocument` throws the history away instead, which is
+        // right for a save conflict (an undo there would resurrect the draft the person just declined)
+        // and wrong here.
+        edit(incoming)
+        set({ selection: NOTHING })
+        return { nodes: incoming.nodes.length, edges: incoming.edges.length }
       },
 
       connectNodes(connection) {

@@ -7,12 +7,16 @@ import { expect, test } from "@playwright/test"
  * re-render landing in the middle of an IME composition and committing the syllable twice -- is
  * invisible there.
  *
- * It is the reason the editor never recreates its `EditorView` and never writes the document back
- * while `view.composing` is true.
+ * It is the reason the editor never recreates its `EditorView` and never writes back an echo of a
+ * document it reported itself (`lib/template/echo.ts`): with the echo check removed, the lagging
+ * parent below fails "committed once" on every run. The editor also refuses to write back while
+ * `view.composing` is true; that covers a parent changing the value *of its own accord* mid-composition,
+ * which this fixture has no way to produce, so that guard is not what these tests exercise.
  */
 
 const EDITOR = "[data-testid='template-editor'] .cm-content"
 const VALUE = "[data-testid='value']"
+const COMMITS = "[data-testid='commits']"
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/")
@@ -27,10 +31,11 @@ test("Korean inserted directly appears once", async ({ page }) => {
 })
 
 test("a composed syllable is committed once, not twice", async ({ page }) => {
-  // The lagging parent: its `value` prop trails the document by a frame, so the editor's value effect
-  // has something to write back -- and writing it back while the IME is composing is what destroys the
-  // syllable. A parent that commits synchronously never reaches that branch, which is why the first
-  // version of this test passed with the guard removed.
+  // The lagging parent: its `value` prop trails the document, so the editor's value effect has
+  // something to write back. Written back while the IME is composing, it destroys the syllable; written
+  // back just after the commit, it destroys the commit (the editor sees its own stale report "아", not
+  // composing any more, and puts it over "안"). A parent that commits synchronously never reaches that
+  // branch, which is why the first version of this test passed with the guard removed.
   await page.goto("/?lag=1")
   const editor = page.locator(EDITOR)
   await editor.waitFor()
@@ -50,11 +55,20 @@ test("a composed syllable is committed once, not twice", async ({ page }) => {
     })
   }
   await cdp.send("Input.insertText", { text: "안" })
+  // Read the commit before typing the next syllable: a duplicated commit reads "안안" and a clobbered
+  // one reads "아", and either fails on this line rather than the next, where it would be harder to
+  // tell from a lost "녕".
+  await expect(page.locator(VALUE)).toHaveText("안")
   await page.keyboard.insertText("녕")
 
   // Once, in order. A controlled wrapper that writes the document back mid-composition duplicates the
   // syllable here; one that recreates the view loses it.
   await expect(page.locator(VALUE)).toHaveText("안녕")
+  // And the parent saw the syllable form, commit and grow exactly once each. A stale report written
+  // back reaches the parent again as a fresh commit, so this line catches the write-back even when the
+  // value happens to read right at the moment the lines above polled it. Without the editor's echo
+  // check the log here runs "ㅇ,아,안,ㅇ,아,안,…" and never settles.
+  await expect(page.locator(COMMITS)).toHaveText("ㅇ,아,안,안녕")
 })
 
 test("composing Korean next to a chip leaves both intact", async ({ page }) => {

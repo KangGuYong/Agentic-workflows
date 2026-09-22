@@ -17,8 +17,7 @@ import "@xyflow/react/dist/style.css"
 
 import { downloadText } from "@/lib/browser/download"
 import { emptyDsl, type EditorDsl } from "@/lib/dsl/document"
-import { describeInsert } from "@/lib/dsl/insert"
-import { exportFileName, serialize } from "@/lib/dsl/transfer"
+import { describeLoad, exportFileName, serialize } from "@/lib/dsl/transfer"
 import { sizeChanges, toFlowEdges, toFlowNodes, type NodeChange, type Size } from "@/lib/dsl/flow"
 import { anyNodeVisible } from "@/lib/dsl/viewport"
 import type { NodeType } from "@/lib/palette"
@@ -219,16 +218,15 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
     downloadText(exportFileName(workflowName ?? "workflow"), serialize(state.dsl))
   }, [state.dsl, workflowName])
 
-  /** Place a file's nodes into **this** workflow, as one undoable step.
+  /** Open a file in place of this workflow's document, as one undoable step.
    *
-   * Not a replacement of the document and not a new workflow: the file's nodes are added, the way
-   * dropping one from the palette adds one. `되돌리기` takes the whole file back out in one press,
-   * which is what makes this safe to try.
+   * The whole file arrives: its 시작/끝 nodes and **its edges**, so what appears on the canvas is the
+   * graph the file describes, already wired. Nothing is merged and nothing is renamed -- there is no
+   * second document to collide with -- which is why this needs none of the machinery that adding to a
+   * document did.
    *
-   * The file's 시작/끝 nodes never come -- the engine fixes their ids, so a document holds exactly one
-   * of each -- and a node whose id is already here is renamed with every reference to it rewritten.
-   * Both are reported, because a rename silently changing `{{ llm_1.text }}` under someone is the
-   * kind of thing they need told.
+   * What it costs is the document that was there. `되돌리기` brings it back in one press, and the line
+   * under the toolbar says so, because replacing someone's work silently is not an option.
    */
   const onImport = useCallback(
     async (file: File) => {
@@ -241,8 +239,7 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
         setImportError(read.reason)
         return
       }
-      const result = state.insertDocument(read.dsl)
-      setImportNote(describeInsert(result))
+      setImportNote(describeLoad(state.loadDocument(read.dsl)))
     },
     [state],
   )
@@ -483,7 +480,7 @@ function Toolbar({
         </button>
         <ImportButton
           busy={importing}
-          title="JSON 파일의 노드를 이 워크플로에 놓습니다. 되돌리기로 한 번에 취소할 수 있습니다"
+          title="JSON 파일의 내용으로 이 워크플로를 채웁니다. 되돌리기로 한 번에 취소할 수 있습니다"
           className="px-2 py-1 text-xs disabled:opacity-35"
           style={{ borderRadius: "var(--radius)" }}
           onPick={onImport}
