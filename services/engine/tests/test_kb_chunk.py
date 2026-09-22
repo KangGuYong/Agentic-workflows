@@ -34,3 +34,12 @@ def test_whitespace_only_sections_are_dropped():
 
 def test_empty_input_gives_no_chunks():
     assert chunk_markdown("   \n") == []
+
+
+def test_a_hash_inside_a_code_fence_is_not_a_heading():
+    text = "# 제목\n```python\n# 주석\nx = 1\n```\n본문"
+    assert chunk_markdown(text) == [Chunk(heading="제목", text="```python\n# 주석\nx = 1\n```\n본문")]
+
+
+def test_closing_hashes_are_stripped_from_a_heading():
+    assert chunk_markdown("# 제목 ##\n본문") == [Chunk(heading="제목", text="본문")]

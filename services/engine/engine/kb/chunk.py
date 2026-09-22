@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 MAX_CHARS = 1000
 OVERLAP = 150
-_HEADING = re.compile(r"^#{1,6}\s+(.*\S)\s*$")
+_HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$")
 
 
 @dataclass(frozen=True)
@@ -19,6 +19,7 @@ def chunk_markdown(markdown: str, *, max_chars: int = MAX_CHARS, overlap: int = 
     chunks: list[Chunk] = []
     heading: str | None = None
     lines: list[str] = []
+    fenced = False
 
     def flush() -> None:
         body = "\n".join(lines).strip()
@@ -27,7 +28,10 @@ def chunk_markdown(markdown: str, *, max_chars: int = MAX_CHARS, overlap: int = 
             chunks.append(Chunk(heading, piece))
 
     for line in markdown.splitlines():
-        match = _HEADING.match(line)
+        # A '# comment' inside a code fence is not a heading; fences toggle, they do not nest.
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+        match = None if fenced else _HEADING.match(line)
         if match:
             flush()
             heading = match.group(1)
