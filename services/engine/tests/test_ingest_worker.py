@@ -35,7 +35,8 @@ async def ingester_factory(pool):
     started = []
 
     async def make(*, parser=None, llm=None, owner="ing-1", retry_delays=(0.1, 0.1), **overrides):
-        config = make_config(claim_poll_sec=0.1, heartbeat_sec=0.2, lease_sec=2, **overrides)
+        overrides.setdefault("lease_sec", 2)
+        config = make_config(claim_poll_sec=0.1, heartbeat_sec=0.2, **overrides)
         worker = Ingester(config, pool, llm=llm or ScriptedLLM([]), parser=parser, owner=owner,
                           retry_delays=retry_delays)
         await worker.start()
@@ -149,7 +150,7 @@ async def test_a_wrong_embedding_dimension_fails_at_once(pool, ingester_factory)
     assert "1024" in row["error"]
 
 
-async def test_a_file_deleted_while_processing_is_dropped_quietly(pool, ingester_factory):
+async def test_a_file_deleted_while_processing_is_dropped_quietly(pool, ingester_factory, caplog):
     _, file_id = await _upload(pool, b"%PDF", "a.pdf", "application/pdf")
     parser = FakeParser()
     parser.proceed.clear()
@@ -160,10 +161,37 @@ async def test_a_file_deleted_while_processing_is_dropped_quietly(pool, ingester
         await store.delete_file(conn, file_id)
     parser.proceed.set()
 
-    await asyncio.sleep(0.5)
-    assert await _file(pool, file_id) is None
+    async def settled():
+        async with pool.connection() as conn:
+            jobs = (await (await conn.execute("SELECT count(*) AS n FROM ingest_jobs")).fetchone())["n"]
+            chunks = (await (await conn.execute("SELECT count(*) AS n FROM kb_chunks")).fetchone())["n"]
+        return parser.calls == 1 and jobs == 0 and chunks == 0
+
+    await until(settled)
+    await asyncio.sleep(0.3)  # let _process finish after the parser returned
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+async def test_an_ingester_whose_lease_was_taken_writes_no_chunks(pool, ingester_factory):
+    _, file_id = await _upload(pool, b"%PDF", "a.pdf", "application/pdf")
+    parser = FakeParser()
+    parser.proceed.clear()
+    first = await ingester_factory(parser=parser, owner="first", lease_sec=1)
+    await asyncio.wait_for(parser.started.wait(), 10)
+
+    # The lease lapses while the parser is still working; another ingester takes the job.
     async with pool.connection() as conn:
-        assert (await (await conn.execute("SELECT count(*) AS n FROM kb_chunks")).fetchone())["n"] == 0
+        await conn.execute("UPDATE ingest_jobs SET lease_until = now() - interval '1 second'")
+        stolen = await store.claim_job(conn, owner="second", lease_sec=30)
+    assert stolen is not None
+    parser.proceed.set()
+    await asyncio.sleep(1.0)
+
+    async with pool.connection() as conn:
+        chunks = (await (await conn.execute("SELECT count(*) AS n FROM kb_chunks")).fetchone())["n"]
+        job = await (await conn.execute("SELECT lease_owner FROM ingest_jobs")).fetchone()
+    assert chunks == 0 and job["lease_owner"] == "second"
+    await first.stop()
 
 
 async def test_a_job_that_keeps_dying_is_given_up_after_the_attempt_ceiling(pool, ingester_factory):

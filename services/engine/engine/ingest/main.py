@@ -30,7 +30,8 @@ async def run(stop: asyncio.Event | None = None) -> None:
             loop.add_signal_handler(getattr(signal, name), stop.set)
 
     await prepare_database(config.database_url)
-    pool = make_pool(config.database_url, max_size=max(4, config.ingest_max_jobs + 3))
+    # Each job holds a connection while its heartbeat checks out another, plus the claim loop.
+    pool = make_pool(config.database_url, max_size=max(4, config.ingest_max_jobs * 2 + 2))
     raw: OllamaRaw | None = None
     parser: MineruParser | None = None
     worker: Ingester | None = None

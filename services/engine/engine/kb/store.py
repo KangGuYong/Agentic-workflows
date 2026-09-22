@@ -158,11 +158,21 @@ async def finish_job(conn: AsyncConnection, *, job_id: str, owner: str, error: s
 
 
 async def replace_chunks(conn: AsyncConnection, *, file_id: str, kb_id: str,
-                         chunks: list[tuple[str | None, str, list[float]]]) -> bool:
+                         chunks: list[tuple[str | None, str, list[float]]],
+                         lease: tuple[str, str] | None = None) -> bool:
     """Delete this file's chunks and insert `chunks` (heading, text, embedding), so a re-run never
-    duplicates. False when the file no longer exists: the caller stops quietly."""
+    duplicates. False when the file no longer exists, or when `lease` is given and this owner no
+    longer holds the job."""
     async with conn.transaction():
-        exists = await (await conn.execute("SELECT 1 FROM kb_files WHERE id=%s FOR UPDATE", (file_id,))).fetchone()
+        if lease is None:
+            exists = await (await conn.execute("SELECT 1 FROM kb_files WHERE id=%s FOR UPDATE", (file_id,))).fetchone()
+        else:
+            # The writer must still own the job: a worker whose lease expired mid-embed writes nothing
+            # (design §4), the same rule finish_job enforces.
+            exists = await (await conn.execute(
+                "SELECT 1 FROM kb_files f WHERE f.id=%s"
+                "   AND EXISTS (SELECT 1 FROM ingest_jobs j WHERE j.id=%s AND j.lease_owner=%s AND j.file_id=f.id)"
+                " FOR UPDATE OF f", (file_id, *lease))).fetchone()
         if exists is None:
             return False
         await conn.execute("DELETE FROM kb_chunks WHERE file_id=%s", (file_id,))

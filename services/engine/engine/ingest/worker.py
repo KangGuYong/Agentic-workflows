@@ -7,7 +7,10 @@ from the start.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import math
+import time
 import uuid
 from typing import Any, Protocol
 
@@ -54,7 +57,10 @@ class Ingester:
         for task in tasks:
             task.cancel()
         if tasks:
-            await asyncio.wait(tasks, timeout=STOP_TIMEOUT_SEC)
+            _, pending = await asyncio.wait(tasks, timeout=STOP_TIMEOUT_SEC)
+            if pending:
+                log.warning("ingester %s: %s task(s) did not stop within %ss; abandoning them",
+                           self.owner, len(pending), STOP_TIMEOUT_SEC)
 
     def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
@@ -85,6 +91,7 @@ class Ingester:
                 await asyncio.sleep(self._config.claim_poll_sec)
 
     async def _heartbeat(self, job_id: str, task: asyncio.Task) -> None:
+        last_ok = time.monotonic()
         while True:
             await asyncio.sleep(self._config.heartbeat_sec)
             try:
@@ -95,10 +102,18 @@ class Ingester:
                 raise
             except Exception:
                 log.warning("ingest heartbeat failed for job %s; retrying", job_id, exc_info=True)
+                if time.monotonic() - last_ok > self._config.lease_sec:
+                    # The lease has certainly expired by now and another ingester may hold the job;
+                    # keep going and we would be the second writer.
+                    log.error("no heartbeat for job %s in %.0fs; giving up the job",
+                             job_id, time.monotonic() - last_ok)
+                    task.cancel()
+                    return
                 continue
             if not owned:  # the lease is gone: someone else owns the job, write nothing more
                 task.cancel()
                 return
+            last_ok = time.monotonic()
 
     async def _process(self, job: dict[str, Any]) -> None:
         job_id, file_id, attempt = str(job["id"]), str(job["file_id"]), int(job["attempt"])
@@ -129,10 +144,16 @@ class Ingester:
                     await store.finish_job(conn, job_id=job_id, owner=self.owner, error=exc.message)
                 return
             async with self._pool.connection() as conn:
-                if not await store.replace_chunks(conn, file_id=file_id, kb_id=str(row["kb_id"]), chunks=chunks):
-                    return  # the file was deleted while we worked; its job is gone too
+                if not await store.replace_chunks(conn, file_id=file_id, kb_id=str(row["kb_id"]), chunks=chunks,
+                                                  lease=(job_id, self.owner)):
+                    return  # the file was deleted, or the lease is no longer ours
                 await store.finish_job(conn, job_id=job_id, owner=self.owner, error=None)
         except asyncio.CancelledError:
+            # stop() cancelled us mid-job; the attempt is spent either way, but the next ingester need
+            # not wait out the lease. Fenced, so a cancel caused by a lost lease writes nothing.
+            with contextlib.suppress(Exception):
+                async with self._pool.connection() as conn:
+                    await asyncio.shield(store.release_for_retry(conn, job_id=job_id, owner=self.owner, delay_sec=0))
             raise
         except Exception:
             # Infrastructure, not the document: leave the lease to expire so the job is retried.
@@ -164,6 +185,6 @@ class Ingester:
         vectors: list[list[float]] = []
         for start in range(0, len(texts), EMBED_BATCH):
             vectors += await self._llm.embed(model=kb["embed_model"], texts=texts[start:start + EMBED_BATCH])
-        if any(len(v) != kb["dim"] for v in vectors):
-            raise IngestError(f"임베딩 차원이 지식베이스({kb['dim']})와 다릅니다", retryable=False)
-        return [(c.heading, c.text, v) for c, v in zip(chunks, vectors)]
+        if any(len(v) != kb["dim"] or not all(map(math.isfinite, v)) for v in vectors):
+            raise IngestError(f"임베딩이 올바르지 않습니다 (차원 {kb['dim']} 또는 유한값이 아님)", retryable=False)
+        return [(c.heading, c.text, v) for c, v in zip(chunks, vectors, strict=True)]
