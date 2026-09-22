@@ -79,10 +79,10 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
   // holds the document itself (3 설계 §5.1).
   const [store] = useState(() => createGraphStore(initialDsl ?? emptyDsl()))
   const state = useStore(store)
-  // The save, validation and run slices, bound to this editor's document and workflow and created once,
-  // like the graph store. Without a workflow id there is nothing to call -- the fixtures mount the canvas
-  // that way -- so each request answers locally rather than hitting an endpoint that would 404, and the
-  // status bar says so instead of claiming 저장됨. `/validate` just reports nothing.
+  // The save, validation and run slices, created once like the graph store; save also reads and replaces
+  // its document. Without a workflow id there is nothing to call -- the fixtures mount the canvas that
+  // way -- so save and run fail locally (the status bar says so instead of claiming 저장됨) and
+  // `/validate` reports nothing, rather than hitting endpoints that would 404.
   const [saveStore] = useState(() =>
     createSaveStore({
       revision: initialRevision,
