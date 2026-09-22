@@ -20,7 +20,14 @@ router = APIRouter()
 
 MAX_NAME_CHARS = 100
 MAX_FILENAME_CHARS = 255
+MAX_MEDIA_TYPE_CHARS = 255
 EMBED_DIM = 1024  # what kb_chunks.embedding holds (migration 0004)
+
+
+def _has_control_chars(name: str) -> bool:
+    # The name lands in logs and terminals; an escape sequence there is a nuisance nobody should have
+    # to think about.
+    return any(ord(ch) < 32 or ch == "\x7f" for ch in name)
 
 
 def _kb_id(raw: str) -> str:
@@ -52,7 +59,7 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
 async def create_knowledge_base(request: Request) -> dict[str, Any]:
     body = require_object(await read_json(request))
     name = field(body, "name", str).strip()
-    if not 1 <= len(name) <= MAX_NAME_CHARS:
+    if not 1 <= len(name) <= MAX_NAME_CHARS or _has_control_chars(name):
         raise ApiError(422, "REQUEST_ERROR", f"이름은 1~{MAX_NAME_CHARS}자여야 합니다")
     config = request.app.state.config
     try:
@@ -85,9 +92,16 @@ async def list_files(kb_id: str, request: Request) -> dict[str, Any]:
 async def upload_file(kb_id: str, request: Request) -> dict[str, Any]:
     kb_id = _kb_id(kb_id)
     name = (request.query_params.get("name") or "").strip()
-    if not 1 <= len(name) <= MAX_FILENAME_CHARS or "/" in name or "\\" in name or "\x00" in name:
+    if (not 1 <= len(name) <= MAX_FILENAME_CHARS or "/" in name or "\\" in name or "\x00" in name
+            or _has_control_chars(name)):
         raise ApiError(422, "REQUEST_ERROR", "파일 이름이 필요합니다 (경로 구분자 없이 255자 이하)")
     media_type = request.headers.get("content-type") or "application/octet-stream"
+    if len(media_type) > MAX_MEDIA_TYPE_CHARS:
+        raise ApiError(422, "REQUEST_ERROR", "Content-Type이 너무 깁니다")
+    # The body is read before the knowledge base is checked, on purpose: checking first would hold a
+    # pool connection open across the whole transfer.
+    # ponytail: the body is buffered in memory (about twice the file at peak); stream it to the
+    # database if uploads ever run wide.
     content = await _read_bytes(request, request.app.state.config.kb_max_file_bytes)
     if not content:
         raise ApiError(422, "REQUEST_ERROR", "빈 파일은 올릴 수 없습니다")
@@ -102,8 +116,7 @@ async def upload_file(kb_id: str, request: Request) -> dict[str, Any]:
 async def delete_file(kb_id: str, file_id: str, request: Request) -> Response:
     kb_id = _kb_id(kb_id)
     async with request.app.state.pool.connection() as conn:
-        row = await store.get_file(conn, file_id)
-        if row is None or str(row["kb_id"]) != kb_id or not await store.delete_file(conn, file_id):
+        if not await store.delete_file(conn, file_id, kb_id=kb_id):
             raise ApiError(404, "NOT_FOUND", "파일을 찾을 수 없습니다")
     return Response(status_code=204)
 
@@ -111,7 +124,7 @@ async def delete_file(kb_id: str, file_id: str, request: Request) -> Response:
 async def _read_bytes(request: Request, limit: int) -> bytes:
     """Like body.read_json's bounded read, for bytes: stop the instant the running total passes `limit`."""
     declared = request.headers.get("content-length")
-    if declared is not None and declared.isdigit() and int(declared) > limit:
+    if declared is not None and declared.isascii() and declared.isdigit() and int(declared) > limit:
         raise _too_large(limit)
     chunks: list[bytes] = []
     total = 0
@@ -124,4 +137,5 @@ async def _read_bytes(request: Request, limit: int) -> bytes:
 
 
 def _too_large(limit: int) -> ApiError:
-    return ApiError(413, "PAYLOAD_TOO_LARGE", f"파일이 너무 큽니다 (최대 {limit // 1_000_000}MB)")
+    text = f"{limit}B" if limit < 1_000_000 else f"{limit // 1_000_000}MB"
+    return ApiError(413, "PAYLOAD_TOO_LARGE", f"파일이 너무 큽니다 (최대 {text})")

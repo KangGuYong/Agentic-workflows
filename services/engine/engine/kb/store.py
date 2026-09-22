@@ -98,11 +98,17 @@ async def list_files(conn: AsyncConnection, kb_id: str) -> list[dict[str, Any]]:
     )).fetchall()
 
 
-async def delete_file(conn: AsyncConnection, file_id: str) -> bool:
+async def delete_file(conn: AsyncConnection, file_id: str, *, kb_id: str | None = None) -> bool:
+    """`kb_id` scopes the delete to that knowledge base in the same statement -- get_file would pull the
+    whole bytea just to compare an id."""
     file_id = _uuid(file_id)
     if file_id is None:
         return False
-    row = await (await conn.execute("DELETE FROM kb_files WHERE id=%s RETURNING id", (file_id,))).fetchone()
+    if kb_id is None:
+        row = await (await conn.execute("DELETE FROM kb_files WHERE id=%s RETURNING id", (file_id,))).fetchone()
+    else:
+        row = await (await conn.execute("DELETE FROM kb_files WHERE id=%s AND kb_id=%s RETURNING id",
+                                        (file_id, kb_id))).fetchone()
     return row is not None
 
 

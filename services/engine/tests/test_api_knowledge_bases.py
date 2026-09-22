@@ -1,4 +1,5 @@
 """The knowledge base API (knowledge-base design §6)."""
+import contextlib
 import dataclasses
 
 from httpx import ASGITransport, AsyncClient
@@ -10,6 +11,14 @@ async def _kb(api, name="문서") -> str:
     created = await api.post("/knowledge-bases", json={"name": name})
     assert created.status_code == 201, created.text
     return created.json()["id"]
+
+
+@contextlib.asynccontextmanager
+async def _small_limit_client(pool, redis, api, *, max_file_bytes=10):
+    small = dataclasses.replace(api.config, kb_max_file_bytes=max_file_bytes)
+    async with AsyncClient(transport=ASGITransport(app=create_app(small, pool, redis)), base_url="http://api",
+                           headers={"Authorization": "Bearer test-token"}) as client:
+        yield client
 
 
 async def test_create_list_and_delete(api):
@@ -58,10 +67,22 @@ async def test_upload_needs_a_name_and_an_existing_knowledge_base(api):
 
 async def test_an_upload_over_the_file_limit_is_a_413(pool, redis, api):
     kb_id = await _kb(api)
-    small = dataclasses.replace(api.config, kb_max_file_bytes=10)
-    async with AsyncClient(transport=ASGITransport(app=create_app(small, pool, redis)), base_url="http://api",
-                           headers={"Authorization": "Bearer test-token"}) as client:
+    async with _small_limit_client(pool, redis, api) as client:
         response = await client.put(f"/knowledge-bases/{kb_id}/files", params={"name": "big.md"}, content=b"x" * 11)
+    assert response.status_code == 413 and response.json()["error"]["code"] == "PAYLOAD_TOO_LARGE"
+    assert (await api.get(f"/knowledge-bases/{kb_id}/files")).json()["files"] == []
+
+
+async def test_an_upload_over_the_limit_is_caught_while_streaming_without_a_declared_length(pool, redis, api):
+    kb_id = await _kb(api)
+
+    async def _chunks():
+        yield b"x" * 6
+        yield b"x" * 6
+
+    async with _small_limit_client(pool, redis, api) as client:
+        response = await client.put(f"/knowledge-bases/{kb_id}/files", params={"name": "big.md"},
+                                    content=_chunks())
     assert response.status_code == 413 and response.json()["error"]["code"] == "PAYLOAD_TOO_LARGE"
     assert (await api.get(f"/knowledge-bases/{kb_id}/files")).json()["files"] == []
 
@@ -72,3 +93,35 @@ async def test_deleting_a_file_removes_it_from_the_list(api):
     assert (await api.delete(f"/knowledge-bases/{kb_id}/files/{file_id}")).status_code == 204
     assert (await api.delete(f"/knowledge-bases/{kb_id}/files/{file_id}")).status_code == 404
     assert (await api.get(f"/knowledge-bases/{kb_id}/files")).json()["files"] == []
+
+
+async def test_deleting_a_file_under_the_wrong_kb_is_a_404(api):
+    kb_a = await _kb(api, "A")
+    kb_b = await _kb(api, "B")
+    file_id = (await api.put(f"/knowledge-bases/{kb_a}/files", params={"name": "a.md"}, content=b"# a")).json()["id"]
+    assert (await api.delete(f"/knowledge-bases/{kb_b}/files/{file_id}")).status_code == 404
+    assert (await api.delete(f"/knowledge-bases/{kb_a}/files/not-a-uuid")).status_code == 404
+    files = (await api.get(f"/knowledge-bases/{kb_a}/files")).json()["files"]
+    assert files[0]["id"] == file_id
+
+
+async def test_upload_rejects_bad_metadata(api):
+    kb_id = await _kb(api)
+    assert (await api.put(f"/knowledge-bases/{kb_id}/files", params={"name": "a.md"}, content=b"")).status_code == 422
+    assert (await api.put(f"/knowledge-bases/{kb_id}/files", params={"name": "a\\b.md"},
+                          content=b"x")).status_code == 422
+    assert (await api.put(f"/knowledge-bases/{kb_id}/files", params={"name": "a\x1b.md"},
+                          content=b"x")).status_code == 422
+    long_type = await api.put(f"/knowledge-bases/{kb_id}/files", params={"name": "a.md"}, content=b"x",
+                              headers={"content-type": "text/plain" + "x" * 300})
+    assert long_type.status_code == 422
+
+
+async def test_deleting_a_knowledge_base_cascades_its_files(pool, api):
+    kb_id = await _kb(api)
+    await api.put(f"/knowledge-bases/{kb_id}/files", params={"name": "a.md"}, content=b"# a")
+    assert (await api.delete(f"/knowledge-bases/{kb_id}")).status_code == 204
+    assert (await api.get(f"/knowledge-bases/{kb_id}/files")).status_code == 404
+    async with pool.connection() as conn:
+        rows = await (await conn.execute("SELECT id FROM kb_files WHERE kb_id=%s", (kb_id,))).fetchall()
+    assert rows == []
