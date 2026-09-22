@@ -30,7 +30,7 @@ def vector_literal(embedding: list[float]) -> str:
 
 def is_text_file(filename: str, media_type: str) -> bool:
     """Files the ingester reads as UTF-8 markdown itself, without MinerU."""
-    return media_type.split(";")[0].strip() in TEXT_TYPES or filename.lower().endswith(TEXT_SUFFIXES)
+    return media_type.split(";")[0].strip().lower() in TEXT_TYPES or filename.lower().endswith(TEXT_SUFFIXES)
 
 
 # ------------------------------------------------------------------ knowledge bases
@@ -70,14 +70,16 @@ async def delete_kb(conn: AsyncConnection, kb_id: str) -> bool:
 
 async def add_file(conn: AsyncConnection, *, kb_id: str, filename: str, media_type: str,
                    content: bytes) -> dict[str, Any]:
-    """The file row and its job, in one statement each; the caller wraps them in a transaction."""
-    row = await (await conn.execute(
-        "INSERT INTO kb_files (id, kb_id, filename, media_type, size, content, status)"
-        " VALUES (%s, %s, %s, %s, %s, %s, 'pending') RETURNING id, filename, size, status, created_at",
+    """The file row and its job in one statement: the pool is autocommit, and a file without a job
+    would sit in `pending` forever."""
+    return await (await conn.execute(
+        "WITH f AS (INSERT INTO kb_files (id, kb_id, filename, media_type, size, content, status)"
+        "             VALUES (%s, %s, %s, %s, %s, %s, 'pending')"
+        "             RETURNING id, filename, size, status, created_at),"
+        "     j AS (INSERT INTO ingest_jobs (file_id) SELECT id FROM f)"
+        " SELECT * FROM f",
         (str(uuid.uuid4()), kb_id, filename, media_type, len(content), content),
     )).fetchone()
-    await conn.execute("INSERT INTO ingest_jobs (file_id) VALUES (%s)", (row["id"],))
-    return row
 
 
 async def get_file(conn: AsyncConnection, file_id: str) -> dict[str, Any] | None:
@@ -103,21 +105,21 @@ async def delete_file(conn: AsyncConnection, file_id: str) -> bool:
 
 
 async def claim_job(conn: AsyncConnection, *, owner: str, lease_sec: int) -> dict[str, Any] | None:
-    """Take the oldest due job whose lease is free or expired, like runs.claim_next. The attempt counter
-    moves here, so a crash mid-job (lease expiry) counts as an attempt too."""
-    row = await (await conn.execute(
-        "UPDATE ingest_jobs SET lease_owner=%(owner)s, attempt=attempt + 1,"
-        "   lease_until=now() + make_interval(secs => %(lease)s)"
-        " WHERE id = (SELECT id FROM ingest_jobs"
-        "             WHERE (lease_until IS NULL OR lease_until < now()) AND next_attempt_at <= now()"
-        "             ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)"
-        " RETURNING id, file_id, attempt",
+    """Take the oldest due job whose lease is free or expired, like runs.claim_next, and mark its file
+    `processing` in the same statement. The attempt counter moves here, so a crash mid-job (lease
+    expiry) counts as an attempt too."""
+    return await (await conn.execute(
+        "WITH j AS (UPDATE ingest_jobs SET lease_owner=%(owner)s, attempt=attempt + 1,"
+        "             lease_until=now() + make_interval(secs => %(lease)s)"
+        "           WHERE id = (SELECT id FROM ingest_jobs"
+        "                       WHERE (lease_until IS NULL OR lease_until < now()) AND next_attempt_at <= now()"
+        "                       ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)"
+        "           RETURNING id, file_id, attempt),"
+        "     f AS (UPDATE kb_files SET status='processing', error=NULL, updated_at=now()"
+        "           WHERE id = (SELECT file_id FROM j))"
+        " SELECT id, file_id, attempt FROM j",
         {"owner": owner, "lease": lease_sec},
     )).fetchone()
-    if row is not None:
-        await conn.execute("UPDATE kb_files SET status='processing', error=NULL, updated_at=now() WHERE id=%s",
-                           (row["file_id"],))
-    return row
 
 
 async def heartbeat_job(conn: AsyncConnection, *, job_id: str, owner: str, lease_sec: int) -> bool:
@@ -128,30 +130,29 @@ async def heartbeat_job(conn: AsyncConnection, *, job_id: str, owner: str, lease
     return row is not None
 
 
-async def release_for_retry(conn: AsyncConnection, *, job_id: str, owner: str, delay_sec: float) -> None:
-    await conn.execute(
-        "UPDATE ingest_jobs SET lease_owner=NULL, lease_until=NULL,"
-        "   next_attempt_at=now() + make_interval(secs => %s)"
-        " WHERE id=%s AND lease_owner=%s", (delay_sec, job_id, owner),
-    )
-    await conn.execute(
-        "UPDATE kb_files SET status='pending', updated_at=now()"
-        " WHERE id=(SELECT file_id FROM ingest_jobs WHERE id=%s)", (job_id,),
-    )
-
-
-async def finish_job(conn: AsyncConnection, *, job_id: str, owner: str, file_id: str,
-                     error: str | None) -> bool:
-    """Close the job: the file becomes ready, or failed with `error`. False means this owner no longer
-    held the lease (or the file is gone) and nothing was written."""
-    owned = await (await conn.execute(
-        "DELETE FROM ingest_jobs WHERE id=%s AND lease_owner=%s RETURNING id", (job_id, owner),
-    )).fetchone()
-    if owned is None:
-        return False
+async def release_for_retry(conn: AsyncConnection, *, job_id: str, owner: str, delay_sec: float) -> bool:
+    """Hand the job back for a later attempt. False means this owner no longer held the lease and
+    nothing was written -- including the file's status, which belongs to whoever holds it now."""
     row = await (await conn.execute(
-        "UPDATE kb_files SET status=%s, error=%s, updated_at=now() WHERE id=%s RETURNING id",
-        ("failed" if error else "ready", error, file_id),
+        "WITH j AS (UPDATE ingest_jobs SET lease_owner=NULL, lease_until=NULL,"
+        "             next_attempt_at=now() + make_interval(secs => %(delay)s)"
+        "           WHERE id=%(job)s AND lease_owner=%(owner)s RETURNING file_id)"
+        " UPDATE kb_files SET status='pending', updated_at=now()"
+        " WHERE id = (SELECT file_id FROM j) RETURNING id",
+        {"delay": delay_sec, "job": job_id, "owner": owner},
+    )).fetchone()
+    return row is not None
+
+
+async def finish_job(conn: AsyncConnection, *, job_id: str, owner: str, error: str | None) -> bool:
+    """Close the job and mark its file ready, or failed with `error`, in one statement: two would let a
+    crash in between delete the job and leave the file `processing` with nothing left to recover it.
+    False means this owner no longer held the lease (or the file is gone) and nothing was written."""
+    row = await (await conn.execute(
+        "WITH j AS (DELETE FROM ingest_jobs WHERE id=%(job)s AND lease_owner=%(owner)s RETURNING file_id)"
+        " UPDATE kb_files SET status=%(status)s, error=%(error)s, updated_at=now()"
+        " WHERE id = (SELECT file_id FROM j) RETURNING id",
+        {"job": job_id, "owner": owner, "status": "failed" if error else "ready", "error": error},
     )).fetchone()
     return row is not None
 

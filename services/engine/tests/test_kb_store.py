@@ -59,9 +59,10 @@ async def test_an_expired_lease_is_claimed_again_with_a_higher_attempt(pool):
 async def test_release_for_retry_delays_the_next_claim(pool):
     kb_id = await _kb(pool)
     async with pool.connection() as conn:
-        await store.add_file(conn, kb_id=kb_id, filename="a.md", media_type="text/markdown", content=b"x")
+        file_id = str((await store.add_file(conn, kb_id=kb_id, filename="a.md", media_type="text/markdown", content=b"x"))["id"])
         job = await store.claim_job(conn, owner="w", lease_sec=30)
         await store.release_for_retry(conn, job_id=str(job["id"]), owner="w", delay_sec=3600)
+        assert (await store.get_file(conn, file_id))["status"] == "pending"
         assert await store.claim_job(conn, owner="w", lease_sec=30) is None
         await conn.execute("UPDATE ingest_jobs SET next_attempt_at = now()")
         assert await store.claim_job(conn, owner="w", lease_sec=30) is not None
@@ -76,7 +77,7 @@ async def test_replace_chunks_is_idempotent_and_marks_the_file_ready(pool):
         assert await store.replace_chunks(conn, file_id=file_id, kb_id=kb_id, chunks=rows) is True
         assert await store.replace_chunks(conn, file_id=file_id, kb_id=kb_id, chunks=rows) is True
         count = (await (await conn.execute("SELECT count(*) AS n FROM kb_chunks WHERE file_id=%s", (file_id,))).fetchone())["n"]
-        assert await store.finish_job(conn, job_id=str(job["id"]), owner="w", file_id=file_id, error=None)
+        assert await store.finish_job(conn, job_id=str(job["id"]), owner="w", error=None)
         row = await store.get_file(conn, file_id)
         jobs = (await (await conn.execute("SELECT count(*) AS n FROM ingest_jobs")).fetchone())["n"]
     assert count == 2 and row["status"] == "ready" and jobs == 0
@@ -87,7 +88,7 @@ async def test_finish_job_with_an_error_marks_the_file_failed(pool):
     async with pool.connection() as conn:
         file_id = str((await store.add_file(conn, kb_id=kb_id, filename="a.md", media_type="text/markdown", content=b"x"))["id"])
         job = await store.claim_job(conn, owner="w", lease_sec=30)
-        await store.finish_job(conn, job_id=str(job["id"]), owner="w", file_id=file_id, error="문서를 읽지 못했습니다")
+        await store.finish_job(conn, job_id=str(job["id"]), owner="w", error="문서를 읽지 못했습니다")
         row = await store.get_file(conn, file_id)
     assert (row["status"], row["error"]) == ("failed", "문서를 읽지 못했습니다")
 
@@ -115,3 +116,28 @@ async def test_search_orders_by_cosine_similarity_and_returns_text_only(pool):
 async def test_get_kb_rejects_a_non_uuid_without_touching_the_database(pool):
     async with pool.connection() as conn:
         assert await store.get_kb(conn, "not-a-uuid") is None
+
+
+async def test_a_stale_owner_cannot_release_or_finish_a_job_someone_else_holds(pool):
+    kb_id = await _kb(pool)
+    async with pool.connection() as conn:
+        file_id = str((await store.add_file(conn, kb_id=kb_id, filename="a.md", media_type="text/markdown", content=b"x"))["id"])
+        job = await store.claim_job(conn, owner="w1", lease_sec=30)
+        await conn.execute("UPDATE ingest_jobs SET lease_until = now() - interval '1 second' WHERE id=%s", (job["id"],))
+        assert (await store.claim_job(conn, owner="w2", lease_sec=30))["attempt"] == 2
+
+        assert await store.release_for_retry(conn, job_id=str(job["id"]), owner="w1", delay_sec=1) is False
+        assert await store.finish_job(conn, job_id=str(job["id"]), owner="w1", error=None) is False
+        assert await store.heartbeat_job(conn, job_id=str(job["id"]), owner="w1", lease_sec=30) is False
+        row = await store.get_file(conn, file_id)
+        jobs = (await (await conn.execute("SELECT count(*) AS n FROM ingest_jobs")).fetchone())["n"]
+    assert row["status"] == "processing" and jobs == 1
+
+
+async def test_finish_job_on_a_deleted_file_writes_nothing(pool):
+    kb_id = await _kb(pool)
+    async with pool.connection() as conn:
+        await store.add_file(conn, kb_id=kb_id, filename="a.md", media_type="text/markdown", content=b"x")
+        job = await store.claim_job(conn, owner="w", lease_sec=30)
+        await store.delete_file(conn, str(job["file_id"]))
+        assert await store.finish_job(conn, job_id=str(job["id"]), owner="w", error=None) is False
