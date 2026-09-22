@@ -22,7 +22,10 @@ export function KnowledgeBaseWidget({ id, value, disabled, readonly, onChange, o
     void listKnowledgeBases().then((result) => {
       if (cancelled) return
       if (result.outcome === "ok") setBases(result.knowledgeBases)
-      else setError(result.message)
+      else {
+        setError(result.message)
+        setBases([])
+      }
     })
     return () => {
       cancelled = true
@@ -52,7 +55,7 @@ export function KnowledgeBaseWidget({ id, value, disabled, readonly, onChange, o
         ))}
       </select>
       {error === null ? null : <p className="mt-1 text-xs text-st-failed">{error}</p>}
-      {bases !== null && bases.length === 0 ? (
+      {error === null && bases !== null && bases.length === 0 ? (
         <p className="mt-1 text-xs text-fg-faint">지식베이스가 없습니다. 지식베이스 화면에서 먼저 만들어 주세요.</p>
       ) : null}
     </div>

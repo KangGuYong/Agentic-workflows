@@ -39,3 +39,27 @@ it("keeps a saved id that is no longer listed, and says so", async () => {
   expect((select as HTMLSelectElement).value).toBe("kb_gone")
   expect(screen.getByRole("option", { name: /삭제된 지식베이스/ })).toBeInTheDocument()
 })
+
+it("shows the error and keeps the picker usable when the list fetch fails", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() => Promise.resolve(new Response(JSON.stringify({ error: { message: "엔진 점검 중" } }), { status: 503 }))),
+  )
+  render(<KnowledgeBaseWidget {...props({ value: "kb_1" })} />)
+
+  expect(await screen.findByText("엔진 점검 중")).toBeInTheDocument()
+  const select = screen.getByRole("combobox")
+  expect(select).toBeEnabled()
+  expect((select as HTMLSelectElement).value).toBe("kb_1")
+})
+
+it("shows the empty-list hint and keeps the picker usable when there are no knowledge bases", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() => Promise.resolve(new Response(JSON.stringify({ knowledgeBases: [] }), { status: 200 }))),
+  )
+  render(<KnowledgeBaseWidget {...props()} />)
+
+  expect(await screen.findByText("지식베이스가 없습니다. 지식베이스 화면에서 먼저 만들어 주세요.")).toBeInTheDocument()
+  expect(screen.getByRole("combobox")).toBeEnabled()
+})
