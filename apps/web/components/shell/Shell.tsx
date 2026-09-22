@@ -29,6 +29,9 @@ export function Shell({ title, action, children }: { title: string; action?: Rea
             <Link href="/secrets" className="text-fg-muted hover:text-fg">
               시크릿
             </Link>
+            <Link href="/knowledge-bases" className="text-fg-muted hover:text-fg">
+              지식베이스
+            </Link>
           </nav>
         </div>
       </header>
