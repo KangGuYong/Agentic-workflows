@@ -23,6 +23,7 @@ async def test_sends_the_file_as_multipart_and_returns_markdown():
     assert seen["url"] == "http://mineru:8000/file_parse"
     assert seen["content_type"].startswith("multipart/form-data")
     assert b'filename="report.pdf"' in seen["body"] and b"%PDF-1.4" in seen["body"]
+    assert b'name="files"' in seen["body"]
     assert markdown == "# 보고서\n\n본문"
 
 
@@ -53,3 +54,12 @@ async def test_a_response_without_markdown_is_not_retryable():
     with pytest.raises(IngestError) as caught:
         await _parser(handler).to_markdown("a.pdf", "application/pdf", b"x")
     assert not caught.value.retryable
+
+
+async def test_a_non_json_response_is_retryable():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>gateway</html>")
+
+    with pytest.raises(IngestError) as caught:
+        await _parser(handler).to_markdown("a.pdf", "application/pdf", b"x")
+    assert caught.value.retryable
