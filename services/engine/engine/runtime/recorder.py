@@ -28,6 +28,17 @@ class DuplicateAttempt(LeaseLost):
     A LeaseLost, so the node wrapper stops instead of treating it as a node error."""
 
 
+class RecorderInconsistent(RuntimeError):
+    """A close that no longer applies: the attempt is already closed with a different status.
+
+    Lives with the protocol rather than with one implementation because **every** implementation has to
+    refuse it. A fake that accepts a write the real recorder rejects does not make tests easier, it makes
+    them wrong: `onError: "default"` recorded its fallback under the attempt it had just closed `failed`,
+    which the in-memory recorder took happily and Postgres refused -- so every unit test passed and every
+    deployed run died with ENGINE_RECOVERY_EXHAUSTED.
+    """
+
+
 class Recorder(Protocol):
     """Observation log of node executions for ONE run (spec 3.3 node_runs, 7.1 events). Never the source of truth.
 
@@ -121,11 +132,25 @@ class InMemoryRecorder:
         self.records.append(record)
         self.events.append(event)
 
+    def _closing(self, node_id: str, exec_index: int, attempt: int, status: str) -> NodeRunRecord:
+        """The record a close is about to write, or `RecorderInconsistent`.
+
+        Mirrors the Postgres recorder's fence (`engine/events/recorder.py::_close`, which matches only
+        `status IN ('running','waiting')` or the status being written). An attempt already closed -- by
+        the reaper, by a cancel, or by this attempt's own earlier close -- cannot be closed again with a
+        different status. Writing the status it already holds stays allowed, because a deterministic
+        replay of a resumed approval has to be idempotent.
+        """
+        record = self._get(node_id, exec_index, attempt)
+        if record.status not in ("running", "waiting") and record.status != status:
+            raise RecorderInconsistent((node_id, exec_index, attempt))
+        return record
+
     async def node_succeeded(
         self, node_id: str, exec_index: int, attempt: int, output: dict[str, Any], usage: Usage,
         *, defaulted: bool, meta: dict[str, Any],
     ) -> None:
-        record = self._get(node_id, exec_index, attempt)
+        record = self._closing(node_id, exec_index, attempt, "defaulted" if defaulted else "succeeded")
         stored_output, stored_meta = _stored(output), _stored(meta)
         event = self._event("node_finished", node_id, exec_index, attempt, defaulted=defaulted, **meta)
         record.status = "defaulted" if defaulted else "succeeded"
@@ -135,7 +160,7 @@ class InMemoryRecorder:
     async def node_failed(
         self, node_id: str, exec_index: int, attempt: int, error: dict[str, Any], *, will_retry: bool
     ) -> None:
-        record = self._get(node_id, exec_index, attempt)
+        record = self._closing(node_id, exec_index, attempt, "failed")
         stored_error = _stored(error)
         event = self._event("node_failed", node_id, exec_index, attempt, error=error, willRetry=will_retry)
         record.status, record.error = "failed", stored_error

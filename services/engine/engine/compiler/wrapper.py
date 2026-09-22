@@ -277,6 +277,18 @@ def make_node_fn(plan: NodePlan):
             decision = _decide(plan, fallback, loop_counters)
         except NodeError as exc:
             raise NodeFailedError(node_id, exc) from exc
+        # The fallback gets an attempt of its own. The loop above just closed `attempt` as `failed`, and
+        # closing it again as `defaulted` is the one thing the recorder's fence exists to refuse -- it
+        # cannot tell that write apart from a stale worker resurrecting a row the reaper closed. Doing it
+        # anyway made every `onError: "default"` run die with ENGINE_RECOVERY_EXHAUSTED: the recorder
+        # raised, `_recorded` turned it into an EngineFault, the run was recovered and re-executed, and
+        # the same write failed again until recovery gave up.
+        #
+        # A separate row is also what the trace should show. `node_runs` is the record of what happened,
+        # and what happened is an attempt that failed *and then* a value the policy supplied; one row
+        # flipped from `failed` to `defaulted` would lose the failure it was standing in for.
+        attempt = await _recorded(recorder.attempts_so_far(node_id, exec_index)) + 1
+        await _recorded(recorder.node_started(node_id, exec_index, attempt, rendered))
         return await _succeed(plan, deps, exec_index, attempt, NodeResult(fallback), decision, defaulted=True)
 
     return node_fn

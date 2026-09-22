@@ -3,7 +3,7 @@ import pytest
 from engine.errors import LeaseLost, RunCancelled
 from engine.nodes.base import Usage
 from engine.runtime.guard import FlagGuard, NoopGuard
-from engine.runtime.recorder import DuplicateAttempt, InMemoryRecorder
+from engine.runtime.recorder import DuplicateAttempt, InMemoryRecorder, RecorderInconsistent
 
 
 async def test_recorder_tracks_attempt_lifecycle():
@@ -41,6 +41,44 @@ def test_guards():
     guard.cancel()
     with pytest.raises(RunCancelled):
         guard.check()
+
+
+async def test_recorder_refuses_to_close_an_attempt_twice():
+    """The same fence the Postgres recorder applies, for the same reason.
+
+    A fake that accepts a write the real recorder rejects does not make tests easier, it makes them
+    wrong -- and it did: `onError: "default"` closed its failed attempt a second time as `defaulted`,
+    which this recorder used to take happily and Postgres refused, so the whole suite stayed green while
+    every deployed run of that policy died with ENGINE_RECOVERY_EXHAUSTED.
+    """
+    recorder = InMemoryRecorder()
+    await recorder.node_started("llm_1", 1, 1, None)
+    await recorder.node_failed("llm_1", 1, 1, {"code": "NODE_FAILED", "message": "x"}, will_retry=False)
+
+    with pytest.raises(RecorderInconsistent):
+        await recorder.node_succeeded("llm_1", 1, 1, {"text": "기본"}, Usage(), defaulted=True, meta={})
+
+    # The refused write changed nothing.
+    assert recorder.for_node("llm_1")[0].status == "failed"
+    assert recorder.for_node("llm_1")[0].output is None
+
+
+async def test_recorder_allows_a_close_that_writes_the_status_already_there():
+    """A deterministic replay of a resumed approval has to be idempotent, or a survivable crash becomes a
+    permanently failed run."""
+    recorder = InMemoryRecorder()
+    await recorder.node_started("approval_1", 1, 1, None)
+    await recorder.node_succeeded("approval_1", 1, 1, {"decision": "approve"}, Usage(), defaulted=False, meta={})
+    await recorder.node_succeeded("approval_1", 1, 1, {"decision": "approve"}, Usage(), defaulted=False, meta={})
+
+    assert recorder.for_node("approval_1")[0].status == "succeeded"
+
+
+async def test_recorder_refuses_a_close_on_an_attempt_that_was_never_opened():
+    recorder = InMemoryRecorder()
+
+    with pytest.raises(KeyError):
+        await recorder.node_failed("llm_1", 1, 1, {"code": "NODE_FAILED", "message": "x"}, will_retry=False)
 
 
 async def test_recorder_rejects_a_duplicate_attempt():
