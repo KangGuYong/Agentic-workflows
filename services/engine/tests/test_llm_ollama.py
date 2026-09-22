@@ -230,3 +230,12 @@ async def test_embed_maps_a_missing_model_to_a_non_retryable_error():
     with pytest.raises(NodeError) as caught:
         await _raw(handler).embed(model="nope", texts=["a"])
     assert not caught.value.retryable
+
+
+async def test_embed_rejects_booleans_inside_a_vector():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"embeddings": [[True, 0.5]]})
+
+    with pytest.raises(NodeError) as caught:
+        await _raw(handler).embed(model="bge-m3", texts=["a"])
+    assert caught.value.code == ErrorCode.LLM_UNAVAILABLE
