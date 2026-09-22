@@ -8,13 +8,18 @@ import type { EditorDsl } from "@/lib/dsl/document"
  * because half-built work is the normal state of an editor. Every save carries the `revision` it was
  * built on, and the engine's compare-and-set answers 409 when someone else got there first.
  *
+ * Saving is **once a minute, or on demand**. The minute starts at the first unsaved change and is not
+ * restarted by the changes after it -- a debounce would let someone who never pauses go an hour
+ * without a save. `flush` is the on-demand path: the Ctrl+S shortcut, and 실행, which must run what
+ * is on screen rather than what the engine last heard.
+ *
  * The one rule that shapes the rest: **the document is never replaced unless the person chose it.**
  * Taking the other tab's draft on a conflict, silently, would throw away work that is only in this tab.
  * So a 409 stops autosaving and asks, and nothing here retries on its own -- two tabs auto-retrying at
  * each other is a race where whoever types last wins and the other's work disappears.
  */
 
-export const SAVE_DELAY_MS = 1_000
+export const SAVE_DELAY_MS = 60_000
 
 export type SaveResult =
   | { outcome: "saved"; revision: number }
@@ -40,9 +45,10 @@ export interface SaveState {
   /** The other side's draft, while the dialog is open. Never applied without a choice. */
   conflict: Conflict | null
 
-  /** The document changed: schedule a save. */
+  /** The document changed: schedule a save, unless one is already scheduled. */
   changed: () => void
-  /** Save now, skipping the wait. */
+  /** Save now, skipping the wait. Resolves once nothing unsaved is left in the air -- or, on a
+   * failure or a conflict, once that is what the state says. A no-op when there is nothing to save. */
   flush: () => Promise<void>
   /** Take the other side's draft, adopting its revision. */
   reload: () => void
@@ -70,7 +76,8 @@ export function createSaveStore(options: SaveOptions): SaveStore {
 
   return createStore<SaveState>((set, get) => {
     let timer: ReturnType<typeof setTimeout> | null = null
-    let inFlight = false
+    /** The save in the air, follow-ups included, so `flush` can wait for it rather than race it. */
+    let inFlight: Promise<void> | null = null
     /** A change arrived while a save was in the air. Exactly one follow-up save, not one per change. */
     let again = false
 
@@ -81,8 +88,15 @@ export function createSaveStore(options: SaveOptions): SaveStore {
       }
     }
 
+    /** One save, and the one follow-up it may need. `inFlight` is the whole chain. */
+    function start(revision: number): Promise<void> {
+      inFlight = send(revision).finally(() => {
+        inFlight = null
+      })
+      return inFlight
+    }
+
     async function send(revision: number): Promise<void> {
-      inFlight = true
       set({ status: "saving" })
       let result: SaveResult
       try {
@@ -92,7 +106,6 @@ export function createSaveStore(options: SaveOptions): SaveStore {
         // only in what the status bar can say.
         result = { outcome: "failed", message: error instanceof Error ? error.message : "저장하지 못했습니다" }
       }
-      inFlight = false
 
       if (result.outcome === "saved") {
         // Plainly "saved": when a follow-up is queued, the `send` below sets "saving" synchronously
@@ -130,22 +143,35 @@ export function createSaveStore(options: SaveOptions): SaveStore {
         // A conflict is unresolved until the person resolves it. Saving over it is the thing this
         // whole slice exists to prevent.
         if (get().status === "conflict") return
-        if (inFlight) {
+        if (inFlight !== null) {
           again = true
           return
         }
-        cancelTimer()
+        // A timer already running keeps its due time. Restarting it here would be a debounce, and a
+        // debounce saves nothing for as long as someone keeps editing.
+        if (timer !== null) return
         set({ status: "pending" })
         timer = setTimeout(() => {
           timer = null
-          void send(get().revision)
+          void start(get().revision)
         }, delayMs)
       },
 
       async flush() {
-        if (get().status === "conflict" || inFlight) return
+        if (get().status === "conflict") return
+        // Whatever changed during that save is already queued behind it as `again`, so waiting for the
+        // chain is waiting for the document as it is now.
+        if (inFlight !== null) {
+          await inFlight
+          return
+        }
+        // Nothing unsaved: sending the same draft again would bump the revision for no reason, and
+        // another tab holding the old one would then be told it conflicts. "error" is unsaved work too,
+        // and the person's press is the retry.
+        const { status } = get()
+        if (status !== "pending" && status !== "error") return
         cancelTimer()
-        await send(get().revision)
+        await start(get().revision)
       },
 
       reload() {
@@ -161,7 +187,7 @@ export function createSaveStore(options: SaveOptions): SaveStore {
         // The person's click *is* the one retry (3 설계 §9). A second 409 comes back here and asks
         // again rather than looping -- a loop is two tabs overwriting each other forever.
         set({ revision: conflict.currentRevision, conflict: null, status: "saving" })
-        await send(conflict.currentRevision)
+        await start(conflict.currentRevision)
       },
 
       dismissConflict() {

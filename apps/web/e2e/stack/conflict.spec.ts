@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test"
 
-import { createWorkflow, deleteWorkflow, dropNode, editorPath, endNode, expectSaved, startNode } from "./support"
+import { createWorkflow, deleteWorkflow, dropNode, editorPath, endNode, pressSave, saveNow, startNode } from "./support"
 
 /** Two people editing the same workflow, and the one who saves second (3 설계 §9, Task 21).
  *
@@ -39,9 +39,10 @@ test("the second save is refused, and 불러오기 replaces the document", async
 
     // Two different node types, so "whose document won" is answerable by looking at the canvas.
     await dropNode(a, "템플릿", { x: 260, y: 220 })
-    await expectSaved(a)
+    await saveNow(a)
 
     await dropNode(b, "사람 승인", { x: 260, y: 220 })
+    await pressSave(b)
 
     const dialog = b.getByRole("dialog")
     await expect(dialog).toBeVisible({ timeout: 20_000 })

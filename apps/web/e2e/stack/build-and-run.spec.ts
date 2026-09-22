@@ -9,7 +9,7 @@ import {
   editorPath,
   endNode,
   expectRunStatus,
-  expectSaved,
+  saveNow,
   startNode,
 } from "./support"
 
@@ -61,7 +61,9 @@ test("draw a template node, wire it up, and run it", async ({ page }) => {
   await option.click()
   await page.keyboard.type(".name }}!")
 
-  await expectSaved(page)
+  // Ctrl+S from inside the template field: the shortcut has to work where the typing happens, and
+  // CodeMirror must not swallow it.
+  await saveNow(page)
 
   // 4. Validation has to clear before the run button will do anything.
   const run = page.getByRole("button", { name: "실행" })

@@ -61,6 +61,16 @@ describe("StatusBar", () => {
     expect(screen.getByRole("status", { name: "저장 상태" })).toHaveTextContent("워크플로가 너무 큽니다")
   })
 
+  it("says how to save now while a save is waiting, and only then", () => {
+    // A minute is long enough to wonder whether anything is going to happen.
+    const { unmount } = render(<StatusBar state={state({ status: "pending" })} now={0} />)
+    expect(screen.getByRole("status", { name: "저장 상태" })).toHaveTextContent("Ctrl+S로 지금 저장")
+    unmount()
+
+    render(<StatusBar state={state({ status: "saved" })} now={0} />)
+    expect(screen.getByRole("status", { name: "저장 상태" })).not.toHaveTextContent("Ctrl+S")
+  })
+
   it("shows when the last save landed", () => {
     render(<StatusBar state={state({ savedAt: 1_000 })} now={61_000} />)
 

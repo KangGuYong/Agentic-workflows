@@ -6,6 +6,9 @@ import type { SaveState } from "@/store/save"
 
 /** What autosave is doing, in one line (3 설계 §9).
  *
+ * Autosave runs once a minute, so 저장 대기 중 is a state someone actually sits in -- the line says how
+ * to leave it.
+ *
  * Not decoration: someone who does not know whether their work is saved will not close the tab, and
  * someone who wrongly believes it is will lose it. So the five states are named plainly, and a failure
  * carries the engine's own message rather than a generic one.
@@ -72,6 +75,8 @@ export function StatusBar({ state, now }: { state: SaveState; now?: number }) {
       ) : when !== null ? (
         <span className="text-fg-faint">마지막 저장 {when}</span>
       ) : null}
+      {/* The wait is a minute, which is long enough to wonder. The way out is named while it applies. */}
+      {state.status === "pending" ? <span className="text-fg-faint">Ctrl+S로 지금 저장</span> : null}
     </div>
   )
 }
