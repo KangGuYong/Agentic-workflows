@@ -69,8 +69,8 @@ async function settle() {
   await vi.advanceTimersByTimeAsync(0)
 }
 
-describe("debouncing", () => {
-  it("saves one second after a change", async () => {
+describe("the minute", () => {
+  it("saves a minute after a change", async () => {
     stub.queue({ outcome: "saved", revision: 2 })
     store.getState().changed()
 
@@ -112,12 +112,49 @@ describe("debouncing", () => {
     expect(store.getState().savedAt).not.toBeNull()
   })
 
+  it("keeps the minute's due time across later changes, rather than restarting it", async () => {
+    // A debounce would push the save back on every edit, and someone who never pauses for a minute
+    // would never be saved. The minute runs from the first unsaved change.
+    stub.queue({ outcome: "saved", revision: 2 })
+    store.getState().changed()
+    await vi.advanceTimersByTimeAsync(SAVE_DELAY_MS - 1_000)
+    store.getState().changed()
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    expect(stub.calls).toHaveLength(1)
+  })
+
   it("saves immediately on flush", async () => {
     stub.queue({ outcome: "saved", revision: 2 })
     store.getState().changed()
     await store.getState().flush()
 
     expect(stub.calls).toHaveLength(1)
+    // And the minute's timer does not fire a second save behind it.
+    await vi.advanceTimersByTimeAsync(SAVE_DELAY_MS)
+    expect(stub.calls).toHaveLength(1)
+  })
+
+  it("does not send an unchanged document on flush", async () => {
+    // A save of the same draft bumps the revision for nothing, and another tab still holding the old
+    // revision would be told it conflicts with -- nothing.
+    await store.getState().flush()
+
+    expect(stub.calls).toHaveLength(0)
+    expect(store.getState().status).toBe("saved")
+  })
+
+  it("retries a failed save on flush", async () => {
+    stub.queue({ outcome: "failed", message: "실패" }, { outcome: "saved", revision: 2 })
+    store.getState().changed()
+    await vi.advanceTimersByTimeAsync(SAVE_DELAY_MS)
+    await settle()
+    expect(store.getState().status).toBe("error")
+
+    await store.getState().flush()
+
+    expect(stub.calls).toHaveLength(2)
+    expect(store.getState().status).toBe("saved")
   })
 })
 
@@ -157,6 +194,29 @@ describe("a change while a save is in the air", () => {
 
     stub.release({ outcome: "saved", revision: 3 })
     await settle()
+    expect(store.getState().status).toBe("saved")
+    expect(store.getState().revision).toBe(3)
+  })
+
+  it("flush waits for the save in the air and the follow-up behind it", async () => {
+    // 실행 flushes before it starts, so what it runs is what is on screen. Resolving while a follow-up
+    // is still going out would let the run pin the draft from before that follow-up.
+    store.getState().changed()
+    await vi.advanceTimersByTimeAsync(SAVE_DELAY_MS)
+    store.getState().changed()
+
+    let settled = false
+    const flushed = store.getState().flush().then(() => {
+      settled = true
+    })
+    await settle()
+    expect(settled).toBe(false)
+
+    stub.queue({ outcome: "saved", revision: 3 })
+    stub.release({ outcome: "saved", revision: 2 })
+    await flushed
+
+    expect(stub.calls).toHaveLength(2)
     expect(store.getState().status).toBe("saved")
     expect(store.getState().revision).toBe(3)
   })

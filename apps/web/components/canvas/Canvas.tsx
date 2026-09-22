@@ -37,6 +37,7 @@ import { NodePanel } from "@/components/panel/NodePanel"
 import { ImportButton } from "@/components/transfer/ImportButton"
 import { ConflictDialog } from "@/components/save/ConflictDialog"
 import { StatusBar } from "@/components/save/StatusBar"
+import { useSaveShortcut } from "@/components/save/useSaveShortcut"
 import { RunDialog } from "@/components/run/RunDialog"
 import { ApprovalDialog } from "@/components/run/ApprovalDialog"
 import { TracePanel } from "@/components/run/TracePanel"
@@ -88,6 +89,7 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
   const [importError, setImportError] = useState<string | null>(null)
   const [importNote, setImportNote] = useState<string | null>(null)
   useAutosave(state.dsl, save.changed)
+  useSaveShortcut(save.flush)
   useValidate(state.dsl, workflowId, validation.validate)
   // The run this tab is watching: the one started here, or the one the URL named on load. A `?run=`
   // the engine does not have drops out here rather than being cleared into state -- deriving it means
@@ -123,9 +125,16 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
     if (result.outcome !== "failed") stream.markCancelling()
   }
 
-  function onRun() {
+  async function onRun() {
+    // What runs is the draft the engine holds at `revision`, and up to a minute of edits can be sitting
+    // here unsaved. The engine cannot tell -- the revision has not moved -- so without this it would
+    // run the old draft and say nothing. Save first; and when that fails or conflicts, run nothing
+    // rather than something other than what is on screen. The status bar and the dialog say why.
+    await save.flush()
+    const { status, revision } = saveStore.getState()
+    if (status === "error" || status === "conflict") return
     // Nothing to ask for: a dialog with no fields is a dialog asking nothing.
-    if (!needsInputs(state.dsl)) void run.start({}, save.revision)
+    if (!needsInputs(state.dsl)) void run.start({}, revision)
     else setAskingInputs(true)
   }
   const { screenToFlowPosition, fitView, getViewport } = useReactFlow()
@@ -318,7 +327,7 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
           issues={issues}
           runId={watching}
           stream={stream}
-          onRun={onRun}
+          onRun={() => void onRun()}
           onCancel={onCancel}
           onAutoLayout={onAutoLayout}
           onExport={onExport}

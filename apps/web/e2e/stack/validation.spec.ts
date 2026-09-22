@@ -7,6 +7,8 @@ import {
   deselect,
   editorPath,
   endNode,
+  expectRunStatus,
+  expectSaved,
   startNode,
 } from "./support"
 
@@ -41,7 +43,7 @@ test.afterEach(async ({ request }) => {
   await deleteWorkflow(request, workflowId)
 })
 
-test("an unconnected handle blocks the run until it is connected", async ({ page }) => {
+test("an unconnected handle blocks the run until it is connected, and 실행 runs the connected document", async ({ page }) => {
   await page.goto(editorPath(workflowId))
   await expect(page.locator(".react-flow__node")).toHaveCount(3, { timeout: 20_000 })
 
@@ -71,4 +73,14 @@ test("an unconnected handle blocks the run until it is connected", async ({ page
   // agreeing with the engine about a document it just changed.
   await expect(run).toBeEnabled({ timeout: 20_000 })
   await expect(badge).toHaveCount(0)
+
+  // The connection is on screen and not yet on the engine: autosave is a minute away. 실행 must save
+  // first and run *this* document. Run without saving and the engine pins the draft it holds -- the
+  // unconnected one -- and answers 422 for a document the button just said was fine.
+  await expect(page.getByRole("status", { name: "저장 상태" })).toHaveText(/저장 대기 중/)
+  await run.click()
+  await expectSaved(page)
+  await page.getByLabel("name").fill("세계")
+  await page.getByRole("button", { name: "실행", exact: true }).last().click()
+  await expectRunStatus(page, /성공/)
 })

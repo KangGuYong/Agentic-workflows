@@ -82,6 +82,22 @@ export async function expectSaved(page: Page, timeout = 15_000): Promise<void> {
   await expect(page.getByRole("status", { name: "저장 상태" })).toHaveText(/저장됨/, { timeout })
 }
 
+/** Press the save shortcut once there is something to save.
+ *
+ * Autosave runs once a minute, which is longer than any wait a spec should have, so a spec that needs
+ * the document on the engine saves the way a person in a hurry does. Waiting for 저장 대기 중 first:
+ * a press before the edit has reached the save slice would find nothing to save and do nothing.
+ */
+export async function pressSave(page: Page): Promise<void> {
+  await expect(page.getByRole("status", { name: "저장 상태" })).toHaveText(/저장 대기 중/, { timeout: 10_000 })
+  await page.keyboard.press("Control+c")
+}
+
+export async function saveNow(page: Page): Promise<void> {
+  await pressSave(page)
+  await expectSaved(page)
+}
+
 /** Drag a palette entry onto the canvas and wait for the node to exist.
  *
  * `targetPosition` is relative to the canvas, and the canvas is not the window: the node panel takes
