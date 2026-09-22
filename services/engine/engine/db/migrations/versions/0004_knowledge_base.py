@@ -68,6 +68,9 @@ CREATE INDEX kb_chunks_embedding_idx ON kb_chunks USING hnsw (embedding vector_c
 """
 
 DOWN = """
+-- The extension stays: it is shared infrastructure, and dropping it here would break any other
+-- relation an operator has since built on it. Dropping the tables removes every vector this
+-- migration created.
 DROP TABLE IF EXISTS kb_chunks;
 DROP TABLE IF EXISTS ingest_jobs;
 DROP TABLE IF EXISTS kb_files;
