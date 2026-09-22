@@ -79,11 +79,10 @@ test("a file that is not a workflow is refused, and nothing is created", async (
   await expect(page.locator("tbody tr")).toHaveCount(before)
 })
 
-test("importing in the editor places the file's nodes into the open workflow", async ({ page, request }) => {
-  // The editor's 가져오기 is not the list's: it adds to the document on screen. The file's 시작/끝 are
-  // left behind (the engine fixes their ids, so a document holds one of each), and 되돌리기 takes the
-  // whole file back out in one press.
-  const mine = await createWorkflow(request, `e2e-insert-${Date.now()}`, {
+test("importing in the editor replaces the document, edges and all", async ({ page, request }) => {
+  // The editor's 가져오기 opens the file **in place of** what is on screen: its 시작/끝 nodes and its
+  // edges come too, so the graph arrives already wired rather than as loose nodes to connect by hand.
+  const mine = await createWorkflow(request, `e2e-load-${Date.now()}`, {
     version: "1",
     nodes: [startNode({ name: { type: "string" } }), endNode({ greeting: "{{ start.name }}" })],
     edges: [{ id: "edge_1", source: "start", target: "end" }],
@@ -92,42 +91,30 @@ test("importing in the editor places the file's nodes into the open workflow", a
 
   await page.goto(editorPath(openId))
   await expect(page.locator(".react-flow__node")).toHaveCount(2, { timeout: 20_000 })
+  await expect(page.locator(".react-flow__edge")).toHaveCount(1)
 
   await page.setInputFiles("input[aria-label='워크플로 파일']", EXAMPLE)
 
-  // Same workflow, more nodes: the example's three middle nodes, not its 시작/끝.
+  // Same workflow, now holding the example's whole graph: five nodes and its five edges.
   await expect(page).toHaveURL(new RegExp(`/workflows/${openId}$`))
   await expect(page.locator(".react-flow__node")).toHaveCount(5, { timeout: 20_000 })
+  await expect(page.locator(".react-flow__edge")).toHaveCount(5)
   await expect(page.locator(".react-flow__node", { hasText: "모으기" })).toHaveCount(1)
-  await expect(page.locator(".react-flow__node", { hasText: "시작" })).toHaveCount(1)
-  await expect(page.locator(".react-flow__node", { hasText: "끝" })).toHaveCount(1)
+  // One start and one end -- the file's, not the old document's kept alongside them. By id, not by
+  // label: the engine fixes these two ids, and a file is free to label them anything (this one calls
+  // its start 배포 정보).
+  await expect(page.locator('.react-flow__node[data-id="start"]')).toHaveCount(1)
+  await expect(page.locator('.react-flow__node[data-id="end"]')).toHaveCount(1)
 
-  // And it says what it did, including what it left behind.
-  await expect(page.getByRole("status").filter({ hasText: "놓았습니다" })).toContainText("제외했습니다", {
+  // Wired means valid: the run button is not blocked by unconnected handles.
+  await expect(page.getByRole("button", { name: "실행" })).toBeEnabled({ timeout: 20_000 })
+
+  await expect(page.getByRole("status").filter({ hasText: "불러왔습니다" })).toContainText("연결", {
     timeout: 10_000,
   })
 
-  // One 되돌리기 takes the whole file back out.
+  // And one 되돌리기 brings the previous document back, which is what makes a mis-picked file survivable.
   await page.getByRole("button", { name: "되돌리기" }).click()
   await expect(page.locator(".react-flow__node")).toHaveCount(2, { timeout: 10_000 })
-})
-
-test("importing twice renames the second copy instead of colliding", async ({ page, request }) => {
-  const mine = await createWorkflow(request, `e2e-twice-${Date.now()}`, {
-    version: "1",
-    nodes: [startNode({ name: { type: "string" } }), endNode({ greeting: "{{ start.name }}" })],
-    edges: [{ id: "edge_1", source: "start", target: "end" }],
-  })
-  openId = mine.id
-
-  await page.goto(editorPath(openId))
-  await expect(page.locator(".react-flow__node")).toHaveCount(2, { timeout: 20_000 })
-
-  await page.setInputFiles("input[aria-label='워크플로 파일']", EXAMPLE)
-  await expect(page.locator(".react-flow__node")).toHaveCount(5, { timeout: 20_000 })
-  await page.setInputFiles("input[aria-label='워크플로 파일']", EXAMPLE)
-  await expect(page.locator(".react-flow__node")).toHaveCount(8, { timeout: 20_000 })
-
-  // Ids are what every reference names, so a collision would be a silently broken document.
-  await expect(page.getByRole("status").filter({ hasText: "이름을 바꿨습니다" })).toBeVisible({ timeout: 10_000 })
+  await expect(page.locator(".react-flow__edge")).toHaveCount(1)
 })

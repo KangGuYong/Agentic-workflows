@@ -109,3 +109,14 @@ export async function readWorkflowFile(file: File): Promise<ImportResult> {
   if (text === null) return { ok: false, reason: "파일을 읽지 못했습니다." }
   return parseImport(text)
 }
+
+/** What opening a file did, in one line a person can read.
+ *
+ * Import replaces the document on screen, which is the kind of thing that must never be silent: the
+ * line says what arrived and that 되돌리기 takes it back, so a mis-picked file is a keystroke to undo
+ * rather than a draft to reconstruct.
+ */
+export function describeLoad(loaded: { nodes: number; edges: number }): string {
+  if (loaded.nodes === 0) return "노드가 없는 문서를 불러왔습니다. 되돌리기로 이전 내용을 되살릴 수 있습니다."
+  return `노드 ${loaded.nodes}개와 연결 ${loaded.edges}개를 불러왔습니다. 이전 내용은 되돌리기로 되살릴 수 있습니다.`
+}
