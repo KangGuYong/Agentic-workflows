@@ -52,6 +52,7 @@ import { DRAG_TYPE, Palette } from "./Palette"
 import { WorkflowNode } from "./WorkflowNode"
 
 const NODE_TYPES = { workflow: WorkflowNode }
+const NO_WORKFLOW = { outcome: "failed" as const, message: "열린 워크플로가 없습니다" }
 
 export interface CanvasProps {
   types: NodeType[]
@@ -78,11 +79,28 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
   // holds the document itself (3 설계 §5.1).
   const [store] = useState(() => createGraphStore(initialDsl ?? emptyDsl()))
   const state = useStore(store)
-  const saveStore = useSaveStore(store, workflowId, initialRevision)
+  // The save, validation and run slices, bound to this editor's document and workflow and created once,
+  // like the graph store. Without a workflow id there is nothing to call -- the fixtures mount the canvas
+  // that way -- so each request answers locally rather than hitting an endpoint that would 404, and the
+  // status bar says so instead of claiming 저장됨. `/validate` just reports nothing.
+  const [saveStore] = useState(() =>
+    createSaveStore({
+      revision: initialRevision,
+      getDsl: () => store.getState().dsl,
+      onReload: (dsl) => store.getState().replaceDocument(dsl),
+      save: (body) => (workflowId === undefined ? Promise.resolve(NO_WORKFLOW) : saveDraft(workflowId, body)),
+    }),
+  )
   const save = useStore(saveStore)
-  const validationStore = useValidationStore(workflowId)
+  const [validationStore] = useState(() =>
+    createValidationStore((dsl) =>
+      workflowId === undefined ? Promise.resolve({ issues: [] }) : validateDraft(workflowId, dsl),
+    ),
+  )
   const validation = useStore(validationStore)
-  const runStore = useRunStore(workflowId)
+  const [runStore] = useState(() =>
+    createRunStore((body) => (workflowId === undefined ? Promise.resolve(NO_WORKFLOW) : startRun(workflowId, body))),
+  )
   const run = useStore(runStore)
   const [askingInputs, setAskingInputs] = useState(false)
   const [importing, setImporting] = useState(false)
@@ -97,13 +115,15 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
   const urlRunId = initialRunId ?? null
   const restored = useRestoredRun(run.runId === null ? urlRunId : null)
   const watching = run.runId ?? (restored.gone ? null : urlRunId)
-  useRunInUrl(run.runId)
+  useEffect(() => {
+    if (run.runId !== null) setRunParam(run.runId)
+  }, [run.runId])
   const stream = useRunStream(watching, run.runId === null ? restored.state : null)
 
   // Keeping a `?run=` that 404s would retry the same fetch on every reload and leave a status bar
   // describing nothing. This is a URL edit, not a state change.
   useEffect(() => {
-    if (restored.gone) clearRunFromUrl()
+    if (restored.gone) setRunParam(null)
   }, [restored.gone])
   const trace = useNodeRuns(watching, stream.finished)
   const approval = useApproval(watching, stream.waitingFor)
@@ -187,29 +207,16 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
           ? previous
           : { ...previous, ...sizes },
       )
-      const selected = changes.filter((change) => change.type === "select")
-      if (selected.length > 0) {
-        const chosen = new Set(state.selection.nodes)
-        for (const change of selected) {
-          if (change.selected) chosen.add(change.id)
-          else chosen.delete(change.id)
-        }
-        state.select({ nodes: [...chosen], edges: state.selection.edges })
-      }
+      const chosen = toggled(state.selection.nodes, changes)
+      if (chosen !== null) state.select({ nodes: chosen, edges: state.selection.edges })
     },
     [state],
   )
 
   const onEdgesChange = useCallback(
     (changes: EdgeChange[]) => {
-      const selected = changes.filter((change) => change.type === "select")
-      if (selected.length === 0) return
-      const chosen = new Set(state.selection.edges)
-      for (const change of selected) {
-        if (change.selected) chosen.add(change.id)
-        else chosen.delete(change.id)
-      }
-      state.select({ nodes: state.selection.nodes, edges: [...chosen] })
+      const chosen = toggled(state.selection.edges, changes)
+      if (chosen !== null) state.select({ nodes: state.selection.nodes, edges: chosen })
     },
     [state],
   )
@@ -287,6 +294,7 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
     [state, screenToFlowPosition],
   )
 
+  const runInputs = inputSchema(state.dsl)
   return (
     <div className="flex h-full min-h-0 flex-1">
       <Palette types={types} />
@@ -383,9 +391,9 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
           onDismiss={approval.dismiss}
         />
       )}
-      {inputSchema(state.dsl) === null ? null : (
+      {runInputs === null ? null : (
         <RunDialog
-          schema={inputSchema(state.dsl) ?? {}}
+          schema={runInputs}
           open={askingInputs}
           starting={run.starting}
           error={run.error}
@@ -398,27 +406,6 @@ function Editor({ types, workflowId, initialDsl, initialRevision = 0, initialRun
       )}
     </div>
   )
-}
-
-/** The save slice, bound to this editor's document and workflow.
- *
- * Created once, like the graph store. Without a workflow id there is nothing to save into -- the
- * fixtures mount the canvas that way -- so the request reports a failure rather than calling an
- * endpoint that would 404, and the status bar says so instead of claiming 저장됨.
- */
-function useSaveStore(store: ReturnType<typeof createGraphStore>, workflowId: string | undefined, revision: number) {
-  const [saveStore] = useState(() =>
-    createSaveStore({
-      revision,
-      getDsl: () => store.getState().dsl,
-      onReload: (dsl) => store.getState().replaceDocument(dsl),
-      save: (body) =>
-        workflowId === undefined
-          ? Promise.resolve({ outcome: "failed" as const, message: "열린 워크플로가 없습니다" })
-          : saveDraft(workflowId, body),
-    }),
-  )
-  return saveStore
 }
 
 /** Tell the save slice the document changed -- but not about the document it started with.
@@ -562,22 +549,6 @@ function Toolbar({
   )
 }
 
-/** The validation slice, bound to this workflow.
- *
- * Without a workflow id there is nothing to validate against -- `/validate` is keyed by one -- so the
- * request reports nothing rather than calling an endpoint that would 404.
- */
-function useValidationStore(workflowId: string | undefined) {
-  const [validationStore] = useState(() =>
-    createValidationStore((dsl) =>
-      workflowId === undefined
-        ? Promise.resolve({ issues: [] })
-        : validateDraft(workflowId, dsl),
-    ),
-  )
-  return validationStore
-}
-
 /** Re-validate when the document changes.
  *
  * On the opening document too, unlike autosave: opening is not an edit, but a workflow saved with
@@ -636,39 +607,31 @@ function useApproval(runId: string | null, waiting: StreamState["waitingFor"]) {
   }
 }
 
-/** The run slice, bound to this workflow. */
-function useRunStore(workflowId: string | undefined) {
-  const [runStore] = useState(() =>
-    createRunStore((body) =>
-      workflowId === undefined
-        ? Promise.resolve({ outcome: "failed" as const, message: "열린 워크플로가 없습니다" })
-        : startRun(workflowId, body),
-    ),
-  )
-  return runStore
-}
-
-/** Drop `?run=` when it names a run the engine does not have. */
-function clearRunFromUrl() {
-  const url = new URL(window.location.href)
-  if (!url.searchParams.has("run")) return
-  url.searchParams.delete("run")
-  window.history.replaceState(null, "", url)
-}
-
-/** Put the run in the URL (3 설계 §8.3), so reloading the tab comes back to the same run.
+/** Point `?run=` at `runId`, or drop it for `null` (3 설계 §8.3), so reloading the tab comes back to the
+ * same run and a run the engine does not have stops being retried on every reload.
  *
  * `replaceState`, not a navigation: the run did not change which page this is, and pushing a history
  * entry would make the browser's back button undo a run, which it cannot.
  */
-function useRunInUrl(runId: string | null) {
-  useEffect(() => {
-    if (runId === null) return
-    const url = new URL(window.location.href)
-    if (url.searchParams.get("run") === runId) return
-    url.searchParams.set("run", runId)
-    window.history.replaceState(null, "", url)
-  }, [runId])
+function setRunParam(runId: string | null) {
+  const url = new URL(window.location.href)
+  if (url.searchParams.get("run") === runId) return
+  if (runId === null) url.searchParams.delete("run")
+  else url.searchParams.set("run", runId)
+  window.history.replaceState(null, "", url)
+}
+
+/** `ids` with React Flow's `select` changes applied, or `null` when there were none -- so a move or a
+ * resize never re-selects anything. */
+function toggled(ids: readonly string[], changes: readonly (RfNodeChange | EdgeChange)[]): string[] | null {
+  const selects = changes.filter((change) => change.type === "select")
+  if (selects.length === 0) return null
+  const chosen = new Set(ids)
+  for (const change of selects) {
+    if (change.selected) chosen.add(change.id)
+    else chosen.delete(change.id)
+  }
+  return [...chosen]
 }
 
 function ToolbarButton({
