@@ -93,7 +93,7 @@ async def get_file(conn: AsyncConnection, file_id: str) -> dict[str, Any] | None
 
 async def list_files(conn: AsyncConnection, kb_id: str) -> list[dict[str, Any]]:
     return await (await conn.execute(
-        "SELECT id, filename, media_type, size, status, error, created_at, updated_at"
+        "SELECT id, filename, size, status, error, created_at, updated_at"
         " FROM kb_files WHERE kb_id=%s ORDER BY created_at DESC", (kb_id,),
     )).fetchall()
 

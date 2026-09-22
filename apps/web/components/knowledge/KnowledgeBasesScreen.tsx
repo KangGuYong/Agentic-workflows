@@ -21,7 +21,7 @@ import {
  */
 
 const POLL_MS = 5_000
-const MAX_FILE_BYTES = 50 * 1024 * 1024
+const MAX_FILE_BYTES = 50_000_000 // the engine default (KB_MAX_FILE_BYTES); both sides say "50MB"
 const STATUS: Record<KbFile["status"], string> = { pending: "대기 중", processing: "처리 중", ready: "완료", failed: "실패" }
 
 export function KnowledgeBasesScreen({ initial }: { initial: KnowledgeBaseSummary[] }) {

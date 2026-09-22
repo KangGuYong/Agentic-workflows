@@ -125,17 +125,17 @@ async def _read_bytes(request: Request, limit: int) -> bytes:
     """Like body.read_json's bounded read, for bytes: stop the instant the running total passes `limit`."""
     declared = request.headers.get("content-length")
     if declared is not None and declared.isascii() and declared.isdigit() and int(declared) > limit:
-        raise _too_large(limit)
+        raise _file_too_large(limit)
     chunks: list[bytes] = []
     total = 0
     async for chunk in request.stream():
         total += len(chunk)
         if total > limit:
-            raise _too_large(limit)
+            raise _file_too_large(limit)
         chunks.append(chunk)
     return b"".join(chunks)
 
 
-def _too_large(limit: int) -> ApiError:
+def _file_too_large(limit: int) -> ApiError:
     text = f"{limit}B" if limit < 1_000_000 else f"{limit // 1_000_000}MB"
     return ApiError(413, "PAYLOAD_TOO_LARGE", f"파일이 너무 큽니다 (최대 {text})")
