@@ -5,6 +5,8 @@
  * function with that name would invite a UI that implies the value could be shown.
  */
 
+import { messageOf } from "./envelope"
+
 export interface SecretSummary {
   name: string
   createdAt: string
@@ -16,11 +18,6 @@ export type SecretListResult =
   | { outcome: "failed"; message: string }
 
 export type SecretResult = { outcome: "ok" } | { outcome: "failed"; message: string }
-
-function messageOf(body: unknown, fallback: string): string {
-  const message = (body as { error?: { message?: unknown } } | null)?.error?.message
-  return typeof message === "string" && message !== "" ? message : fallback
-}
 
 export async function listSecrets(init: { signal?: AbortSignal } = {}): Promise<SecretListResult> {
   const response = await fetch("/api/engine/secrets", { signal: init.signal })

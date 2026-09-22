@@ -1,5 +1,7 @@
 /** Answering an approval and cancelling a run (3 설계 §8.4, Task 17). */
 
+import { messageOf } from "./envelope"
+
 export type Decision = "approve" | "reject"
 
 export interface ResumeBody {
@@ -16,15 +18,6 @@ export type ResumeResult =
   | { outcome: "stale"; message: string }
   | { outcome: "rejected"; message: string }
   | { outcome: "failed"; message: string }
-
-interface Envelope {
-  error?: { code?: unknown; message?: unknown; details?: unknown }
-}
-
-function messageOf(body: unknown, fallback: string): string {
-  const message = (body as Envelope | null)?.error?.message
-  return typeof message === "string" && message !== "" ? message : fallback
-}
 
 /** Every key the engine accepts in an answer (`human_approval._ANSWER_KEYS`) **except `reviewedAt`**.
  *

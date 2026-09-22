@@ -1,5 +1,7 @@
 /** Workflow list operations from the browser, through the BFF proxy (Task 19). */
 
+import { messageOf } from "./envelope"
+
 export interface WorkflowSummary {
   id: string
   name: string
@@ -15,15 +17,6 @@ export type MutationResult<T = void> =
   | ({ outcome: "ok" } & (T extends void ? Record<string, never> : { value: T }))
   | { outcome: "blocked"; message: string }
   | { outcome: "failed"; message: string }
-
-interface Envelope {
-  error?: { code?: unknown; message?: unknown }
-}
-
-function messageOf(body: unknown, fallback: string): string {
-  const message = (body as Envelope | null)?.error?.message
-  return typeof message === "string" && message !== "" ? message : fallback
-}
 
 function summaryOf(value: unknown): WorkflowSummary | null {
   if (typeof value !== "object" || value === null) return null
