@@ -715,6 +715,8 @@ git commit -m "feat(engine): MinerU parser client" -m "Co-Authored-By: Claude Fa
 
 ### Task 6: 지식베이스 저장소 (`engine/kb/store.py`)
 
+> **실행 중 정정 (Task 6 리뷰):** 아래 코드 블록의 `add_file`·`claim_job`·`release_for_retry`·`finish_job`은 autocommit 연결에서 두 문장이 두 트랜잭션이 되는 문제 때문에 **각각 단일 CTE 문장**으로 다시 썼고, `finish_job`은 `file_id` 인자를 받지 않으며 `release_for_retry`는 `bool`을 돌려준다. 실제 코드는 커밋된 `engine/kb/store.py`를 따른다.
+
 **Files:**
 - Create: `services/engine/engine/kb/store.py`
 - Test: `services/engine/tests/test_kb_store.py`
@@ -1252,6 +1254,16 @@ async def test_a_file_deleted_while_processing_is_dropped_quietly(pool, ingester
         assert (await (await conn.execute("SELECT count(*) AS n FROM kb_chunks")).fetchone())["n"] == 0
 
 
+async def test_a_job_that_keeps_dying_is_given_up_after_the_attempt_ceiling(pool, ingester_factory):
+    _, file_id = await _upload(pool)
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE ingest_jobs SET attempt = 3")  # three claims already came and went
+
+    await ingester_factory()
+    row = await until(lambda: _status_is(pool, file_id, "failed"))
+    assert "반복해서 중단" in row["error"]
+
+
 async def test_a_job_whose_owner_died_is_picked_up_by_the_next_ingester(pool, ingester_factory):
     _, file_id = await _upload(pool)
     async with pool.connection() as conn:
@@ -1382,6 +1394,13 @@ class Ingester:
                 row = await store.get_file(conn, file_id)
             if row is None:
                 return  # deleted between claim and read; the job went with it
+            if attempt > MAX_ATTEMPTS:
+                # Every earlier attempt died without reaching finish_job (a crash, a kill mid-parse): the
+                # lease expired and the claim counted it. Without this the job would be re-leased forever.
+                async with self._pool.connection() as conn:
+                    await store.finish_job(conn, job_id=job_id, owner=self.owner,
+                                           error="처리가 반복해서 중단되어 포기했습니다")
+                return
             try:
                 chunks = await self._ingest(row)
             except (IngestError, NodeError) as exc:
@@ -1393,12 +1412,12 @@ class Ingester:
                         await store.release_for_retry(conn, job_id=job_id, owner=self.owner, delay_sec=delay)
                     return
                 async with self._pool.connection() as conn:
-                    await store.finish_job(conn, job_id=job_id, owner=self.owner, file_id=file_id, error=exc.message)
+                    await store.finish_job(conn, job_id=job_id, owner=self.owner, error=exc.message)
                 return
             async with self._pool.connection() as conn:
                 if not await store.replace_chunks(conn, file_id=file_id, kb_id=str(row["kb_id"]), chunks=chunks):
                     return  # the file was deleted while we worked; its job is gone too
-                await store.finish_job(conn, job_id=job_id, owner=self.owner, file_id=file_id, error=None)
+                await store.finish_job(conn, job_id=job_id, owner=self.owner, error=None)
         except asyncio.CancelledError:
             raise
         except Exception:
