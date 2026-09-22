@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { createKnowledgeBase, deleteFile, listFiles, listKnowledgeBases, uploadFile } from "./knowledgeBases"
+import { createKnowledgeBase, deleteFile, deleteKnowledgeBase, listFiles, listKnowledgeBases, uploadFile } from "./knowledgeBases"
 
 function reply(status: number, body?: unknown) {
   return new Response(body === undefined ? null : JSON.stringify(body), {
@@ -44,6 +44,11 @@ describe("listKnowledgeBases", () => {
     answer(reply(503, { error: { code: "INTERNAL", message: "엔진 점검 중" } }))
     expect(await listKnowledgeBases()).toEqual({ outcome: "failed", message: "엔진 점검 중" })
   })
+
+  it("drops a row it cannot read rather than rendering it half-blank", async () => {
+    answer(reply(200, { knowledgeBases: [KB, { id: "x" }] }))
+    expect(await listKnowledgeBases()).toEqual({ outcome: "ok", knowledgeBases: [KB] })
+  })
 })
 
 describe("createKnowledgeBase", () => {
@@ -52,6 +57,23 @@ describe("createKnowledgeBase", () => {
     expect(await createKnowledgeBase("문서")).toEqual({ outcome: "ok", knowledgeBase: KB })
     expect(calls[0]?.init?.method).toBe("POST")
     expect(JSON.parse(calls[0]?.init?.body as string)).toEqual({ name: "문서" })
+  })
+
+  it("reports an unreadable 2xx body instead of rendering it", async () => {
+    answer(reply(201, {}))
+    expect(await createKnowledgeBase("문서")).toEqual({ outcome: "failed", message: "지식베이스 응답을 이해하지 못했습니다" })
+  })
+})
+
+describe("deleteKnowledgeBase", () => {
+  it("succeeds on 204", async () => {
+    answer(reply(204))
+    expect(await deleteKnowledgeBase("kb_1")).toEqual({ outcome: "ok" })
+  })
+
+  it("passes the engine's message through on 404", async () => {
+    answer(reply(404, { error: { code: "NOT_FOUND", message: "지식베이스를 찾을 수 없습니다" } }))
+    expect(await deleteKnowledgeBase("kb_1")).toEqual({ outcome: "failed", message: "지식베이스를 찾을 수 없습니다" })
   })
 })
 
@@ -86,5 +108,10 @@ describe("listFiles and deleteFile", () => {
     expect(await deleteFile("kb_1", "f_1")).toEqual({ outcome: "ok" })
     expect(calls[1]?.url).toBe("/api/engine/knowledge-bases/kb_1/files/f_1")
     expect(calls[1]?.init?.method).toBe("DELETE")
+  })
+
+  it("drops a file row with an unrecognized status", async () => {
+    answer(reply(200, { files: [FILE, { ...FILE, id: "f_2", status: "weird" }] }))
+    expect(await listFiles("kb_1")).toEqual({ outcome: "ok", files: [FILE] })
   })
 })

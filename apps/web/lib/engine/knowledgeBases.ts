@@ -29,13 +29,31 @@ export interface KbFile {
 
 type Failed = { outcome: "failed"; message: string }
 
+function isKnowledgeBase(value: unknown): value is KnowledgeBaseSummary {
+  if (typeof value !== "object" || value === null) return false
+  const { id, name, embedModel, fileCount, createdAt } = value as Record<string, unknown>
+  return typeof id === "string" && typeof name === "string" && typeof embedModel === "string"
+    && typeof fileCount === "number" && typeof createdAt === "string"
+}
+
+const FILE_STATUSES: readonly string[] = ["pending", "processing", "ready", "failed"]
+
+function isKbFile(value: unknown): value is KbFile {
+  if (typeof value !== "object" || value === null) return false
+  const { id, filename, size, status, error, createdAt, updatedAt } = value as Record<string, unknown>
+  return typeof id === "string" && typeof filename === "string" && typeof size === "number"
+    && typeof status === "string" && FILE_STATUSES.includes(status)
+    && (error === null || typeof error === "string")
+    && typeof createdAt === "string" && typeof updatedAt === "string"
+}
+
 export async function listKnowledgeBases(init: { signal?: AbortSignal } = {}): Promise<{ outcome: "ok"; knowledgeBases: KnowledgeBaseSummary[] } | Failed> {
   const response = await fetch("/api/engine/knowledge-bases", { signal: init.signal })
   const body: unknown = await response.json().catch(() => null)
   if (!response.ok) return { outcome: "failed", message: messageOf(body, `지식베이스 목록을 불러오지 못했습니다 (${response.status})`) }
   const raw = (body as { knowledgeBases?: unknown } | null)?.knowledgeBases
   if (!Array.isArray(raw)) return { outcome: "failed", message: "지식베이스 응답을 이해하지 못했습니다" }
-  return { outcome: "ok", knowledgeBases: raw as KnowledgeBaseSummary[] }
+  return { outcome: "ok", knowledgeBases: raw.filter(isKnowledgeBase) }
 }
 
 export async function createKnowledgeBase(name: string): Promise<{ outcome: "ok"; knowledgeBase: KnowledgeBaseSummary } | Failed> {
@@ -46,7 +64,8 @@ export async function createKnowledgeBase(name: string): Promise<{ outcome: "ok"
   })
   const body: unknown = await response.json().catch(() => null)
   if (!response.ok) return { outcome: "failed", message: messageOf(body, `지식베이스를 만들지 못했습니다 (${response.status})`) }
-  return { outcome: "ok", knowledgeBase: body as KnowledgeBaseSummary }
+  if (!isKnowledgeBase(body)) return { outcome: "failed", message: "지식베이스 응답을 이해하지 못했습니다" }
+  return { outcome: "ok", knowledgeBase: body }
 }
 
 export async function deleteKnowledgeBase(id: string): Promise<{ outcome: "ok" } | Failed> {
@@ -62,7 +81,7 @@ export async function listFiles(kbId: string, init: { signal?: AbortSignal } = {
   if (!response.ok) return { outcome: "failed", message: messageOf(body, `파일 목록을 불러오지 못했습니다 (${response.status})`) }
   const raw = (body as { files?: unknown } | null)?.files
   if (!Array.isArray(raw)) return { outcome: "failed", message: "파일 목록 응답을 이해하지 못했습니다" }
-  return { outcome: "ok", files: raw as KbFile[] }
+  return { outcome: "ok", files: raw.filter(isKbFile) }
 }
 
 export async function uploadFile(kbId: string, file: File): Promise<{ outcome: "ok"; file: KbFile } | Failed> {
@@ -72,7 +91,8 @@ export async function uploadFile(kbId: string, file: File): Promise<{ outcome: "
   )
   const body: unknown = await response.json().catch(() => null)
   if (!response.ok) return { outcome: "failed", message: messageOf(body, `파일을 올리지 못했습니다 (${response.status})`) }
-  return { outcome: "ok", file: body as KbFile }
+  if (!isKbFile(body)) return { outcome: "failed", message: "파일 응답을 이해하지 못했습니다" }
+  return { outcome: "ok", file: body }
 }
 
 export async function deleteFile(kbId: string, fileId: string): Promise<{ outcome: "ok" } | Failed> {
