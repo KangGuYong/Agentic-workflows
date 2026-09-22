@@ -27,6 +27,7 @@ def default_registry() -> NodeRegistry:
     from engine.nodes.kb_search import KbSearchNode
     from engine.nodes.llm import LLMNode
     from engine.nodes.merge import MergeNode
+    from engine.nodes.rerank import RerankNode
     from engine.nodes.template import TemplateNode
 
     return NodeRegistry(
@@ -41,5 +42,6 @@ def default_registry() -> NodeRegistry:
             HumanApprovalNode(),
             HttpRequestNode(),
             KbSearchNode(),
+            RerankNode(),
         ]
     )
