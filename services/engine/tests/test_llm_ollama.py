@@ -197,3 +197,56 @@ async def test_token_sink_errors_propagate_unchanged():
     raw = _raw(lambda request: httpx.Response(200, content=body))
     with pytest.raises(RuntimeError, match="sink broke"):
         await raw.complete(model="m", messages=MSG, format=None, temperature=0.7, on_token=failing_sink)
+
+
+async def test_embed_posts_the_texts_and_returns_one_vector_each():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"embeddings": [[0.1, 0.2], [0.3, 0.4]]})
+
+    vectors = await _raw(handler).embed(model="bge-m3", texts=["a", "b"])
+
+    assert seen["url"] == "http://ollama:11434/api/embed"
+    assert seen["body"] == {"model": "bge-m3", "input": ["a", "b"]}
+    assert vectors == [[0.1, 0.2], [0.3, 0.4]]
+
+
+async def test_embed_treats_a_wrong_count_or_shape_as_unavailable():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"embeddings": [[0.1]]})
+
+    with pytest.raises(NodeError) as caught:
+        await _raw(handler).embed(model="bge-m3", texts=["a", "b"])
+    assert caught.value.code == ErrorCode.LLM_UNAVAILABLE and caught.value.retryable
+
+
+async def test_embed_maps_a_missing_model_to_a_non_retryable_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "model not found"})
+
+    with pytest.raises(NodeError) as caught:
+        await _raw(handler).embed(model="nope", texts=["a"])
+    assert not caught.value.retryable
+
+
+async def test_embed_rejects_booleans_inside_a_vector():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"embeddings": [[True, 0.5]]})
+
+    with pytest.raises(NodeError) as caught:
+        await _raw(handler).embed(model="bge-m3", texts=["a"])
+    assert caught.value.code == ErrorCode.LLM_UNAVAILABLE
+
+
+async def test_embed_rejects_non_finite_values_inside_a_vector():
+    # httpx's json= refuses NaN, so the body is built by hand.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b'{"embeddings": [[1.0, NaN]]}',
+                              headers={"content-type": "application/json"})
+
+    with pytest.raises(NodeError) as caught:
+        await _raw(handler).embed(model="bge-m3", texts=["a"])
+    assert caught.value.code == ErrorCode.LLM_UNAVAILABLE

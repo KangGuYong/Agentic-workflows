@@ -14,6 +14,8 @@ from engine.config import load_config
 from engine.db.migrate import prepare_database
 from engine.db.pool import make_pool
 from engine.http.client import GuardedClient, SystemResolver
+from engine.kb.rerank import TeiReranker
+from engine.kb.store import PostgresKnowledgeBases
 from engine.llm.gateway import LLMGateway
 from engine.llm.ollama import OllamaRaw
 from engine.llm.semaphore import ModelSemaphore, SemaphoreLLM
@@ -59,6 +61,7 @@ async def run(stop: asyncio.Event | None = None) -> None:
     render: RenderPool | None = None
     http: GuardedClient | None = None
     worker: Worker | None = None
+    rerank: TeiReranker | None = None
     try:
         await pool.open(wait=True)
         redis = Redis.from_url(config.redis_url, decode_responses=True)
@@ -72,12 +75,16 @@ async def run(stop: asyncio.Event | None = None) -> None:
                              max_request_bytes=config.http_max_request_bytes,
                              max_response_bytes=config.http_max_response_bytes)
         secrets = PostgresSecretResolver(pool, config.secret_key) if config.secret_key else None
+        kb = PostgresKnowledgeBases(pool)
+        rerank = TeiReranker(config.rerank_base_url) if config.rerank_base_url else None
+        if rerank is None:
+            log.warning("RERANK_BASE_URL is not set: rerank nodes will fail")
         # Hosts only, never a full URL (MVP design 10.1).
         log.info("egress allowlist: %s",
                  ", ".join(f"{e.scheme}://{e.host}:{e.port}" for e in config.http_allowlist)
                  or "(empty: all http_request calls are blocked)")
         worker = Worker(config, pool, redis, llm=llm, render=render, http=http,
-                        secrets=secrets)  # the worker runs its own reaper
+                        secrets=secrets, kb=kb, rerank=rerank)  # the worker runs its own reaper
 
         await worker.start()
         log.info("worker %s ready", worker.owner)
@@ -95,6 +102,7 @@ async def run(stop: asyncio.Event | None = None) -> None:
             # grace period, so it must not run directly on the event loop.
             ("render pool", (lambda r=render: asyncio.to_thread(r.close)) if render is not None else None),
             ("http client", http.aclose if http is not None else None),
+            ("rerank client", rerank.aclose if rerank is not None else None),
             ("ollama client", raw.aclose if raw is not None else None),
             ("redis client", redis.aclose if redis is not None else None),
             ("db pool", pool.close),

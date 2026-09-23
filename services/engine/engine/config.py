@@ -40,6 +40,14 @@ class EngineConfig:
     db_pool_max: int
     retention_days: int
     purge_batch: int
+    # Knowledge base (knowledge-base design §2). All optional: an engine without MinerU still ingests
+    # .md/.txt, and one without a reranker runs every workflow that has no rerank node.
+    mineru_base_url: str | None
+    mineru_timeout_sec: float
+    rerank_base_url: str | None
+    kb_max_file_bytes: int
+    ingest_max_jobs: int
+    kb_embed_model: str
 
 
 def _int(name: str, default: int) -> int:
@@ -128,4 +136,11 @@ def load_config() -> EngineConfig:
         # negative one would purge runs that have not finished yet.
         retention_days=_bounded_int("RUN_DATA_RETENTION_DAYS", 30, minimum=1, maximum=3650),
         purge_batch=_bounded_int("RUN_PURGE_BATCH", 100, minimum=1, maximum=10_000),
+        mineru_base_url=os.getenv("MINERU_BASE_URL") or None,
+        mineru_timeout_sec=float(_bounded_int("MINERU_TIMEOUT_SEC", 600, minimum=1, maximum=86_400)),
+        rerank_base_url=os.getenv("RERANK_BASE_URL") or None,
+        # 1 byte .. 1 GB: 0 would refuse every upload, unbounded would let one upload fill the database.
+        kb_max_file_bytes=_bounded_int("KB_MAX_FILE_BYTES", 50_000_000, minimum=1, maximum=1_000_000_000),
+        ingest_max_jobs=_bounded_int("INGEST_MAX_JOBS", 1, minimum=1, maximum=64),
+        kb_embed_model=os.getenv("KB_EMBED_MODEL") or "bge-m3",
     )

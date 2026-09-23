@@ -12,7 +12,8 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-APP_TABLES = ("run_events", "node_runs", "runs", "workflow_versions", "workflows", "secrets")
+APP_TABLES = ("run_events", "node_runs", "runs", "workflow_versions", "workflows", "secrets",
+              "kb_chunks", "ingest_jobs", "kb_files", "knowledge_bases")
 CHECKPOINT_TABLES = ("checkpoint_blobs", "checkpoint_writes", "checkpoints")  # not checkpoint_migrations
 
 
@@ -47,7 +48,7 @@ def db_url() -> Iterator[str]:
         return
     from testcontainers.postgres import PostgresContainer
 
-    with PostgresContainer("postgres:17-alpine", driver=None) as container:
+    with PostgresContainer("pgvector/pgvector:pg17", driver=None) as container:
         url = container.get_connection_url()
         os.environ["ENGINE_DATABASE_URL"] = url
         os.environ.setdefault("LANGGRAPH_AES_KEY", "0" * 32)
@@ -145,7 +146,7 @@ async def worker_factory(pool, redis, db_url):
 
     started: list = []
 
-    async def make(llm, *, owner: str = "worker-1", http=None, secrets=None, **overrides):
+    async def make(llm, *, owner: str = "worker-1", http=None, secrets=None, kb=None, rerank=None, **overrides):
         import dataclasses
 
         # Defaults a test can override: spelling one of these in `overrides` used to be a TypeError
@@ -153,7 +154,8 @@ async def worker_factory(pool, redis, db_url):
         # wants to do.
         fast = {"claim_poll_sec": 0.2, "heartbeat_sec": 0.2}
         config = dataclasses.replace(load_config(), **{**fast, **overrides})
-        worker = Worker(config, pool, redis, owner=owner, llm=llm, http=http, secrets=secrets)
+        worker = Worker(config, pool, redis, owner=owner, llm=llm, http=http, secrets=secrets,
+                        kb=kb, rerank=rerank)
         await worker.start()
         started.append(worker)
         return worker

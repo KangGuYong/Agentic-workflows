@@ -5,9 +5,10 @@ import type { FieldProps, RegistryFieldsType, RegistryWidgetsType, WidgetProps }
 import type { TemplateContext } from "@/lib/template/context"
 import type { JsonSchema } from "@/lib/template/schema"
 
-import { TEMPLATE_WIDGETS, templateLabelId } from "./templates"
+import { KnowledgeBaseWidget } from "./KnowledgeBaseWidget"
 import { SchemaEditor } from "./SchemaEditor"
 import { TemplateEditor } from "./TemplateEditor"
+import { TEMPLATE_WIDGETS, templateLabelId } from "./templates"
 
 /** Custom RJSF widgets for the two field kinds its defaults cannot render.
  *
@@ -67,6 +68,7 @@ export function JsonSchemaField({ schema, fieldPathId, formData, disabled, reado
 export const WIDGETS: RegistryWidgetsType = {
   ...TEMPLATE_WIDGETS,
   template: TemplateWidget,
+  knowledgeBase: KnowledgeBaseWidget,
 }
 
 export const FIELDS: RegistryFieldsType = {

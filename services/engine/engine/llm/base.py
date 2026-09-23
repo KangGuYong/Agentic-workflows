@@ -34,6 +34,10 @@ class LLMClient(Protocol):
         on_token: TokenSink | None = None,
     ) -> ChatResult: ...
 
+    async def embed(self, *, model: str, texts: list[str]) -> list[list[float]]:
+        """One vector per text, in order. Raises NodeError like `chat` does."""
+        ...
+
 
 class RawLLM(Protocol):
     """Transport to a model server. `format` is a JSON Schema the server should constrain output to."""
@@ -47,3 +51,7 @@ class RawLLM(Protocol):
         temperature: float,
         on_token: TokenSink | None,
     ) -> ChatResult: ...
+
+    async def embed(self, *, model: str, texts: list[str]) -> list[list[float]]:
+        """One vector per text, in order. Raises NodeError like `chat` does."""
+        ...

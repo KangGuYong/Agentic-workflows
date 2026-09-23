@@ -11,6 +11,12 @@ x-engine: &engine
     LANGGRAPH_AES_KEY: ${LANGGRAPH_AES_KEY:?set LANGGRAPH_AES_KEY}
     ENGINE_SECRET_KEY: ${ENGINE_SECRET_KEY:?set ENGINE_SECRET_KEY}
     OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:?set OLLAMA_BASE_URL}
+    MINERU_BASE_URL: ${MINERU_BASE_URL:-}
+    RERANK_BASE_URL: ${RERANK_BASE_URL:-}
+    KB_EMBED_MODEL: ${KB_EMBED_MODEL:-bge-m3}
+    KB_MAX_FILE_BYTES: ${KB_MAX_FILE_BYTES:-50000000}
+    MINERU_TIMEOUT_SEC: ${MINERU_TIMEOUT_SEC:-600}
+    INGEST_MAX_JOBS: ${INGEST_MAX_JOBS:-1}
     HTTP_ALLOWLIST: ${HTTP_ALLOWLIST:-}
     RUN_DATA_RETENTION_DAYS: ${RUN_DATA_RETENTION_DAYS:-30}
   depends_on:
@@ -20,7 +26,9 @@ x-engine: &engine
 
 services:
   postgres:
-    image: postgres:17-alpine
+    # pgvector's own build: migration 0004 needs the `vector` extension, which the plain postgres image
+    # does not ship. Same Postgres major as before, so an existing pgdata volume mounts as is.
+    image: pgvector/pgvector:pg17
     environment:
       POSTGRES_USER: engine
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
@@ -85,6 +93,17 @@ services:
     # Safe to scale: leases, fencing and the reaper's advisory lock were built for more than one.
     deploy:
       replicas: ${WORKER_REPLICAS:-1}
+
+  ingester:
+    <<: *engine
+    command: ["python", "-m", "engine.ingest.main"]
+    # Postgres only: the ingester claims jobs and writes chunks there and never opens Redis.
+    depends_on:
+      postgres: {condition: service_healthy}
+    # Document ingestion is minutes per file and must never sit in a run worker's slot. Scale
+    # separately: each replica claims jobs under its own lease.
+    deploy:
+      replicas: ${INGESTER_REPLICAS:-1}
 
 volumes:
   pgdata:

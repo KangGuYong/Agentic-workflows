@@ -14,6 +14,7 @@ export OLLAMA_BASE_URL=http://localhost:11434
 
 uv run uvicorn engine.api.main:app --port 8000   # API (Linux; see the Windows note below)
 uv run python -m engine.worker.main              # worker (one or more)
+uv run python -m engine.ingest.main              # ingester (one or more)
 ```
 
 On Windows, run the API with `uv run python -m engine.api.main` instead of the plain `uvicorn` CLI's
@@ -60,6 +61,12 @@ uv run ruff check .
 | `ENGINE_SECRET_KEY`    | —                                     | 16/24/32-byte key for stored secrets and run payloads (required unless `ENGINE_DEV_INSECURE=1`) |
 | `ENGINE_DEV_INSECURE`  | `0`                                    | Start without the keys or the token (development only)           |
 | `OLLAMA_BASE_URL`      | `http://localhost:11434`               | Base URL of the Ollama server the LLM gateway calls               |
+| `MINERU_BASE_URL`      | (unset)                                | MinerU API server for document parsing; unset limits ingestion to .md/.txt |
+| `MINERU_TIMEOUT_SEC`   | `600`                                  | One document's parse timeout                                      |
+| `RERANK_BASE_URL`      | (unset)                                | text-embeddings-inference `/rerank` endpoint for the rerank node  |
+| `KB_EMBED_MODEL`       | `bge-m3`                               | Ollama embedding model for knowledge bases (1024 dims)            |
+| `KB_MAX_FILE_BYTES`    | `50000000`                             | Upload size limit per file                                        |
+| `INGEST_MAX_JOBS`      | `1`                                    | Files one ingester processes at once                              |
 | `OLLAMA_NUM_PARALLEL`  | `1`                                    | Per-model concurrency limit, enforced via the Redis semaphore     |
 | `WORKER_MAX_RUNS`      | `10`                                   | Concurrent runs per worker                                        |
 | `WORKER_LEASE_SEC`     | `30`                                   | Seconds a worker's claim on a run stays valid before the reaper may recover it |

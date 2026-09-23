@@ -427,3 +427,37 @@ def test_an_explicit_policy_still_overrides_the_per_method_default():
     dsl["nodes"][1]["policy"] = {"retry": {"maxAttempts": 2}}
 
     assert analyze(dsl).graph.nodes["http_1"].policy.retry.maxAttempts == 2
+
+
+def _rerank_dsl(hits: str) -> dict:
+    return {
+        "nodes": [
+            START,
+            {"id": "kb_search_1", "type": "kb_search",
+             "config": {"knowledgeBase": "kb", "query": "{{ start.topic }}"}},
+            {"id": "rerank_1", "type": "rerank",
+             "config": {"query": "{{ start.topic }}", "hits": hits}},
+            {"id": "end", "type": "end", "config": {"outputs": {"r": "{{ rerank_1.context }}"}}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "start", "target": "kb_search_1"},
+            {"id": "e2", "source": "kb_search_1", "target": "rerank_1"},
+            {"id": "e3", "source": "rerank_1", "target": "end"},
+        ],
+    }
+
+
+def test_an_interpolated_array_field_is_type_incompatible():
+    codes = [(issue.severity, issue.code) for issue in validate(_rerank_dsl("결과: {{ kb_search_1.hits }}"))
+             if issue.field == "config.hits"]
+    assert codes.count(("error", "TYPE_INCOMPATIBLE")) == 1
+
+
+def test_a_literal_array_field_is_type_incompatible():
+    codes = [(issue.severity, issue.code) for issue in validate(_rerank_dsl("그냥 글자"))
+             if issue.field == "config.hits"]
+    assert codes == [("error", "TYPE_INCOMPATIBLE")]
+
+
+def test_a_whole_value_array_reference_has_no_issues():
+    assert validate(_rerank_dsl("{{ kb_search_1.hits }}")) == []

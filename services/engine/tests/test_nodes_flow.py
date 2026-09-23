@@ -161,7 +161,7 @@ async def test_human_approval_needs_an_interrupt_and_a_message():
 def test_registry_has_all_mvp_nodes():
     assert {spec.type for spec in default_registry().all()} == {
         "start", "end", "template", "llm", "classifier", "condition", "merge", "human_approval",
-        "http_request",
+        "http_request", "kb_search", "rerank",
     }
 
 

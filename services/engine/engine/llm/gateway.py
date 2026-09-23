@@ -67,3 +67,6 @@ class LLMGateway:
                 ChatMessage("user", REPAIR_PROMPT.format(error=problem)),
             ]
         raise NodeError(ErrorCode.STRUCTURED_OUTPUT_FAILED, f"구조화 출력 검증 실패: {problem}", retryable=True)
+
+    async def embed(self, *, model: str, texts: list[str]) -> list[list[float]]:
+        return await self._raw.embed(model=model, texts=texts)

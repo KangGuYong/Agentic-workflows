@@ -87,6 +87,20 @@ describe("buildUiSchema", () => {
     expect(ui["ui:order"]).toEqual(["model", "system", "prompt", "temperature", "outputSchema", "*"])
   })
 
+  it("routes an x-knowledge-base property to the knowledge base picker, with Korean titles", () => {
+    const ui = buildUiSchema(
+      nodeType("kb_search", {
+        knowledgeBase: { type: "string", "x-knowledge-base": true },
+        query: { type: "string", "x-template": true },
+        topK: { type: "integer" },
+      }),
+    )
+    expect(field(ui, "knowledgeBase")?.["ui:widget"]).toBe("knowledgeBase")
+    expect(field(ui, "knowledgeBase")?.["ui:title"]).toBe("지식베이스")
+    expect(field(ui, "topK")?.["ui:title"]).toBe("검색 개수")
+    expect(ui["ui:order"]).toEqual(["knowledgeBase", "query", "topK", "minScore", "*"])
+  })
+
   it("always ends the order with the wildcard, so a new field still renders", () => {
     // Without `*` RJSF throws on any property the order does not mention -- which would turn an engine
     // adding a config field into a blank panel.

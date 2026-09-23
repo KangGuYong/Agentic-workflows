@@ -80,3 +80,7 @@ class SemaphoreLLM:
         async with self._semaphore.slot(model):
             return await self._inner.chat(model=model, messages=messages, schema=schema,
                                           temperature=temperature, on_token=on_token)
+
+    async def embed(self, *, model: str, texts: list[str]) -> list[list[float]]:
+        async with self._semaphore.slot(model):
+            return await self._inner.embed(model=model, texts=texts)

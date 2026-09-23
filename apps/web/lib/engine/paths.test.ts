@@ -16,6 +16,8 @@ describe("engineTarget", () => {
     [["runs", "abc", "nodes"], "/runs/abc/nodes"],
     [["secrets"], "/secrets"],
     [["secrets", "API_TOKEN"], "/secrets/API_TOKEN"],
+    [["knowledge-bases"], "/knowledge-bases"],
+    [["knowledge-bases", "abc", "files"], "/knowledge-bases/abc/files"],
   ])("passes %j through", (segments, expected) => {
     expect(engineTarget(segments as string[])).toBe(expected)
   })
